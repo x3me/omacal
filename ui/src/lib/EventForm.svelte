@@ -15,7 +15,7 @@
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
     mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest, removeGuest, ruleInWords,
     repeatEndProblem, shiftedEndDate, toEventInput, toggledGuestOptional, toggledWeeklyDay, timeProblem,
-    toggledAllDay, weekdayCodeForDate,
+    toggledAllDay, videoCallProblem, weekdayCodeForDate,
     type EventFormResult, type EventFormValue, type Scope,
   } from './eventform';
 
@@ -123,6 +123,13 @@
     weeklyDays: [...initial.weeklyDays],
     repeatEnd: { ...initial.repeatEnd },
   });
+  // The Zoom URL gets its own draft because the choice can be switched away
+  // from and back to without throwing away a link somebody just pasted. The
+  // actual event value is still updated on every keystroke, so the grid
+  // preview and save validation never read a stale second source of truth.
+  // svelte-ignore state_referenced_locally
+  let zoomDraft = $state(initial.videoCall?.provider === 'zoom' ? initial.videoCall.uri ?? '' : '');
+  const videoChoice = $derived(value.videoCall?.provider ?? 'none');
   let scope = $state<Scope>('this');
 
   // The grid's live preview rides on this: a snapshot per change, so the
@@ -156,7 +163,7 @@
   let error = $state<string | null>(null);
   /** Which time input the current `error` is about, so it can be marked rather
    *  than only described. Cleared with `error` on any input. */
-  let invalidField = $state<'start' | 'end' | 'guest' | 'repeatEnd' | null>(null);
+  let invalidField = $state<'start' | 'end' | 'guest' | 'video' | 'repeatEnd' | null>(null);
 
   /** What is in the add-a-guest box. Not part of `value`: an address nobody has
    *  pressed Add on is not on the guest list, and a save must not quietly
@@ -329,11 +336,57 @@
       value.repeatEnd = { kind: 'never' };
     }
   }
+
+  /** Selects the conferencing provider without pretending Zoom can be
+   * manufactured from calendar credentials. Google Meet is a server-side
+   * create request; Zoom is a real meeting URL, scheduled in Zoom and pasted
+   * here. Restoring the provider the form opened with restores its URI and
+   * source too, which makes switching away and back a no-op on the wire. */
+  function chooseVideoCall(choice: string) {
+    if (choice === videoChoice || choice === 'other') return;
+    if (choice === 'none') {
+      value.videoCall = null;
+      return;
+    }
+    if (choice === 'googleMeet') {
+      value.videoCall = initial.videoCall?.provider === 'googleMeet'
+        ? { ...initial.videoCall }
+        : { provider: 'googleMeet', uri: null, source: 'new' };
+      return;
+    }
+    if (choice === 'zoom') {
+      const opened = initial.videoCall?.provider === 'zoom' ? initial.videoCall : null;
+      const uri = zoomDraft.trim() || opened?.uri || null;
+      value.videoCall = {
+        provider: 'zoom',
+        uri,
+        source: opened && opened.uri === uri ? opened.source : 'new',
+      };
+    }
+  }
+
+  function updateZoomCall(raw: string) {
+    zoomDraft = raw;
+    const uri = raw.trim() || null;
+    const opened = initial.videoCall?.provider === 'zoom' ? initial.videoCall : null;
+    value.videoCall = {
+      provider: 'zoom',
+      uri,
+      source: opened && opened.uri === uri ? opened.source : 'new',
+    };
+  }
+
   function save() {
     error = null;
     invalidField = null;
     if (value.calendarId === null) {
       error = 'There is no calendar here you can write to.';
+      return;
+    }
+    const videoProblem = videoCallProblem(value, provider);
+    if (videoProblem) {
+      error = videoProblem;
+      invalidField = 'video';
       return;
     }
     // Before `endAfterStart`, because it is the *reason* that check fails and
@@ -532,6 +585,47 @@
       <span class="lab">Location</span>
       <input bind:value={value.location} placeholder="Add a location" />
     </label>
+
+    <div class="field video" role="group" aria-label="Video call">
+      <span class="lab">Video call</span>
+      <div class="videorow">
+        <select
+          aria-label="Add video call"
+          value={videoChoice}
+          onchange={(e) => chooseVideoCall(e.currentTarget.value)}
+        >
+          <option value="none">Add Video Call</option>
+          <option value="googleMeet" disabled={provider !== 'google'}>Google Meet</option>
+          <option value="zoom">Zoom</option>
+          {#if videoChoice === 'other'}
+            <option value="other">Existing video call</option>
+          {/if}
+        </select>
+        {#if value.videoCall?.uri}
+          <a href={value.videoCall.uri} target="_blank" rel="noopener noreferrer">Open ↗</a>
+        {/if}
+      </div>
+      {#if videoChoice === 'googleMeet' && value.videoCall?.uri === null}
+        <p class="videohint">A unique Google Meet link will be generated when you save.</p>
+      {:else if videoChoice === 'zoom'}
+        <div class="zoomrow">
+          <input
+            type="url"
+            aria-label="Zoom meeting link"
+            aria-invalid={invalidField === 'video' ? 'true' : undefined}
+            placeholder="https://zoom.us/j/…"
+            value={zoomDraft}
+            oninput={(e) => updateZoomCall(e.currentTarget.value)}
+          />
+          <a href="https://zoom.us/meeting/schedule" target="_blank" rel="noopener noreferrer"
+            >Schedule ↗</a
+          >
+        </div>
+        <p class="videohint">Schedule in Zoom, then paste its invite link here.</p>
+      {:else if videoChoice === 'other'}
+        <p class="videohint">This event’s existing video call will be preserved.</p>
+      {/if}
+    </div>
 
     <!-- The event's popup reminders, as rows (reminders spec §3). Whether a
          save carries them at all is `toEventInput`'s unchanged-means-absent
@@ -945,6 +1039,14 @@
   .aftercount { display: flex; align-items: center; gap: 5px; min-width: 0;
                 color: var(--muted); font-size: 10px; }
   .aftercount input { width: 58px; flex: none; }
+
+  .videorow, .zoomrow { display: flex; align-items: center; gap: 7px; }
+  .videorow select, .zoomrow input { flex: 1; min-width: 0; }
+  .videorow a, .zoomrow a { flex: none; color: var(--muted); font-size: 10.5px;
+                            text-decoration: none; }
+  .videorow a:hover, .zoomrow a:hover { color: var(--text); }
+  .videohint { margin: 0; color: var(--muted); font-size: 9.5px; line-height: 1.4; }
+
   .allday { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
   .allday input { width: auto; }
 

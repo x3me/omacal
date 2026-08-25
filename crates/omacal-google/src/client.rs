@@ -212,7 +212,11 @@ impl CalendarClient {
                 urlencoding_path(event_id)
             ))
             .bearer_auth(&self.access_token)
-            .query(&[("sendUpdates", send_updates)])
+            // Version 1 is required both to create conferenceData and to
+            // preserve it correctly on later event modifications. It is sent
+            // on every write once this client supports conferencing, as Google
+            // recommends for an application that stores fully-synced events.
+            .query(&[("sendUpdates", send_updates), ("conferenceDataVersion", "1")])
             .json(body);
         if let Some(etag) = etag {
             req = req.header("If-Match", etag);
@@ -298,7 +302,7 @@ impl CalendarClient {
                 urlencoding_path(cal)
             ))
             .bearer_auth(&self.access_token)
-            .query(&[("sendUpdates", send_updates)])
+            .query(&[("sendUpdates", send_updates), ("conferenceDataVersion", "1")])
             .json(body)
             .send()
             .await
@@ -538,6 +542,7 @@ mod tests {
             Mock::given(method("PATCH"))
                 .and(path("/calendars/cal%40x.com/events/ev1"))
                 .and(query_param("sendUpdates", send_updates))
+                .and(query_param("conferenceDataVersion", "1"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "id": "ev1", "status": "confirmed"
                 })))
@@ -649,6 +654,7 @@ mod tests {
             Mock::given(method("POST"))
                 .and(path("/calendars/cal%40x.com/events"))
                 .and(query_param("sendUpdates", send_updates))
+                .and(query_param("conferenceDataVersion", "1"))
                 .and(body_json_string(r#"{"summary":"Lunch"}"#))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "id": "new1", "status": "confirmed", "etag": "\"e1\""

@@ -11,6 +11,7 @@ import type {
   EventDetail, EventInput, RepeatEnd, SendUpdates, WeekdayCode, WhenInput,
 } from './eventdetail';
 export type { RepeatEnd, WeekdayCode } from './eventdetail';
+import { meetingProvider, meetingUrl } from './location';
 
 /** Which occurrences an edit applies to. Mirrors `update_event`'s own scopes. */
 export type Scope = 'this' | 'all' | 'following';
@@ -152,6 +153,13 @@ export type EventFormValue = {
   isAllDay: boolean;
   location: string;
   description: string;
+  /** The video call described by the form, kept separate from the place.
+   *
+   * Google Meet can be requested without a URI (`source: 'new'`); Google fills
+   * that URI after the write. Zoom requires a real link. Existing third-party
+   * conference data is carried as `other` so an unrelated edit preserves it,
+   * even though this editor cannot manufacture another one. */
+  videoCall: VideoCall | null;
   /** The calendar to write to. `null` when there is not a writable one. */
   calendarId: number | null;
   /** A key from `REPEAT_OPTIONS`, or `CUSTOM_REPEAT`. */
@@ -216,6 +224,12 @@ export type EventFormValue = {
   isEdit: boolean;
   /** Part of a series — the only case where a scope choice means anything. */
   isRecurring: boolean;
+};
+
+export type VideoCall = {
+  provider: 'googleMeet' | 'zoom' | 'other';
+  uri: string | null;
+  source: 'conference' | 'location' | 'new';
 };
 
 /** One guest, as the form holds them. Mirrors `write::Guest` on the Rust side,
@@ -618,6 +632,7 @@ export function blankValueAt(
     isAllDay: false,
     location: '',
     description: '',
+    videoCall: null,
     calendarId,
     repeat: 'never',
     weeklyDays: [weekdayCodeForDate(dateOf(startMs))],
@@ -820,6 +835,26 @@ export function valueFromDetail(
   startMs: number,
   endMs: number,
 ): EventFormValue {
+  const conferenceProvider = meetingProvider(detail.conference_uri);
+  const locationUri = detail.conference_uri ? null : meetingUrl(detail.location);
+  const locationProvider = meetingProvider(locationUri);
+  const videoCall: VideoCall | null = detail.conference_uri
+    ? {
+        provider: conferenceProvider === 'Google Meet'
+          ? 'googleMeet'
+          : conferenceProvider === 'Zoom' ? 'zoom' : 'other',
+        uri: detail.conference_uri,
+        source: 'conference',
+      }
+    : locationUri
+      ? {
+          provider: locationProvider === 'Google Meet'
+            ? 'googleMeet'
+            : locationProvider === 'Zoom' ? 'zoom' : 'other',
+          uri: locationUri,
+          source: 'location',
+        }
+      : null;
   const displayedDate = detail.is_all_day
     ? occurrenceDate(detail.start_date, detail.start_ms, startMs)
     : dateOf(startMs);
@@ -843,6 +878,7 @@ export function valueFromDetail(
     // editable field and then save the stripped text back over the real event —
     // silently deleting whatever its author actually wrote.
     description: detail.description ?? '',
+    videoCall,
     calendarId: detail.calendar_id,
     repeat: detail.repeat,
     weeklyDays: detail.weekly_days.length > 0
@@ -1178,6 +1214,13 @@ export const endAfterStart = (value: EventFormValue): boolean => {
  */
 export function toEventInput(value: EventFormValue, initial: EventFormValue): EventInput {
   const blank = (s: string) => (s.trim() === '' ? null : s);
+  // A create has no location-backed call to preserve. Quick-add hands the full
+  // editor an already-parsed `initial`, so treating that as a server-side
+  // before would make its Zoom URI look unchanged and omit it from Location.
+  const location = locationForVideoCall(
+    value.location, value.videoCall, value.isEdit ? initial.videoCall : null,
+  );
+  const conference = conferenceChange(value, initial);
   const repeatChanged = value.repeat !== initial.repeat
     || (value.repeat === 'weekly' && !sameWeeklyDays(value.weeklyDays, initial.weeklyDays))
     || (value.repeat !== 'never' && value.repeat !== CUSTOM_REPEAT
@@ -1201,7 +1244,7 @@ export function toEventInput(value: EventFormValue, initial: EventFormValue): Ev
         : authoredRepeat);
   return {
     summary: blank(value.title),
-    location: blank(value.location),
+    location: blank(location),
     description: blank(value.description),
     when: whenOf(value),
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -1209,6 +1252,7 @@ export function toEventInput(value: EventFormValue, initial: EventFormValue): Ev
     // paste-style seeds whose repeat value is already populated when the full
     // editor opens: comparing only with `initial` would omit that real choice.
     ...repeatFields,
+    ...(conference ? { conference } : {}),
     // **Unchanged means absent**, the same three-state `repeat` runs on, and
     // on an edit it is load bearing rather than tidy: `attendees` is a
     // whole-list replace on Google's side, so a payload that carried the list
@@ -1251,6 +1295,78 @@ export function toEventInput(value: EventFormValue, initial: EventFormValue): Ev
           },
         }),
   };
+}
+
+/** Whether two form calls describe the same conferencing choice. `source` is
+ * deliberately ignored: a Zoom URL read from structured data and the same URL
+ * pasted into the Zoom field still describe the same call. */
+export function sameVideoCall(a: VideoCall | null, b: VideoCall | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.provider === b.provider && (a.uri ?? '') === (b.uri ?? '');
+}
+
+/** The conference instruction for the backend. Manual meeting URLs are kept
+ * in `location`, where the existing Join path already recognises them. */
+function conferenceChange(
+  value: EventFormValue,
+  initial: EventFormValue,
+): EventInput['conference'] | undefined {
+  const current = value.videoCall;
+
+  if (!value.isEdit) {
+    return current?.provider === 'googleMeet' && current.uri === null ? 'googleMeet' : undefined;
+  }
+  if (sameVideoCall(current, initial.videoCall)) return undefined;
+  if (current?.provider === 'googleMeet' && current.uri === null) return 'googleMeet';
+  if (initial.videoCall?.source === 'conference') return 'none';
+  return undefined;
+}
+
+/** Removes a meeting URL that used to live in Location without disturbing a
+ * real place beside it. This is intentionally conservative: only the exact
+ * URI represented by the previous video-call value is removed. */
+function withoutCall(raw: string, call: VideoCall | null): string {
+  if (call?.source !== 'location' || !call.uri || !raw.includes(call.uri)) return raw.trim();
+  const provider = call.provider === 'zoom' ? 'Zoom' : call.provider === 'googleMeet'
+    ? 'Google Meet' : '';
+  return raw
+    .replace(call.uri, '')
+    .replace(provider ? new RegExp(`\\b${provider.replace(' ', '\\s+')}\\s*:?`, 'i') : /$^/, '')
+    .replace(/^[\s,;:·–—-]+|[\s,;:·–—-]+$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/** The place sent on the wire after a video-call selection. Google Meet uses
+ * structured conference data. A manual Zoom/Meet URL is appended only once;
+ * replacing or removing a location-backed call first removes its exact URI. */
+export function locationForVideoCall(
+  raw: string,
+  current: VideoCall | null,
+  initial: VideoCall | null,
+): string {
+  if (sameVideoCall(current, initial)) return raw.trim();
+  const clean = withoutCall(raw, initial);
+  if (!current?.uri || current.source === 'conference') return clean;
+  if (clean.includes(current.uri)) return clean;
+  const label = current.provider === 'zoom' ? 'Zoom' : current.provider === 'googleMeet'
+    ? 'Google Meet' : 'Video call';
+  return clean ? `${clean} · ${label}: ${current.uri}` : `${label}: ${current.uri}`;
+}
+
+/** A form-level validation message for conferencing, kept pure so quick-add
+ * and the full editor enforce the same rule. */
+export function videoCallProblem(value: EventFormValue, calendarProvider: string): string | null {
+  const call = value.videoCall;
+  if (!call) return null;
+  if (call.provider === 'googleMeet' && call.uri === null && calendarProvider !== 'google') {
+    return 'Google Meet can only be added to a Google calendar.';
+  }
+  if (call.provider === 'zoom') {
+    if (!call.uri) return 'Paste the Zoom meeting link before creating the event.';
+    if (meetingProvider(call.uri) !== 'Zoom') return 'That is not a zoom.us meeting link.';
+  }
+  return null;
 }
 
 /**

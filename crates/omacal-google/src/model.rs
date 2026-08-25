@@ -118,6 +118,12 @@ pub struct Event {
     pub recurring_event_id: Option<String>,
     pub original_start_time: Option<EventDateTime>,
     pub hangout_link: Option<String>,
+    /// The complete conference object, retained for operations that create a
+    /// second event from this one (a “this and following” series split).
+    /// `hangout_link` is enough to render Join, but not enough to copy the
+    /// conference without losing its entry points and solution metadata.
+    #[serde(default)]
+    pub conference_data: Option<serde_json::Value>,
     #[serde(default)]
     pub attendees: Vec<Attendee>,
     #[serde(default)]
@@ -154,6 +160,24 @@ mod tests {
 
     fn parse_event(v: serde_json::Value) -> Event {
         serde_json::from_value(v).expect("event should parse")
+    }
+
+    #[test]
+    fn an_event_keeps_complete_conference_data_for_copying() {
+        let mut wire = event_json(None);
+        wire["conferenceData"] = serde_json::json!({
+            "conferenceId": "abc-defg-hij",
+            "conferenceSolution": { "key": { "type": "hangoutsMeet" } },
+            "entryPoints": [{
+                "entryPointType": "video",
+                "uri": "https://meet.google.com/abc-defg-hij"
+            }]
+        });
+        let event = parse_event(wire);
+        assert_eq!(
+            event.conference_data.as_ref().and_then(|c| c["conferenceId"].as_str()),
+            Some("abc-defg-hij")
+        );
     }
 
     /// The override list replaces the calendar's defaults entirely, so every

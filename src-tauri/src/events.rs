@@ -792,6 +792,9 @@ async fn create_impl(
     // resync. `send_updates` does not travel — CalDAV has no notify question,
     // and the form never asks one on these calendars.
     if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
+        if fields.conference.is_some() {
+            anyhow::bail!("Google Meet can only be added to a Google calendar");
+        }
         return crate::caldav_write::create(state, calendar_id, fields).await;
     }
 
@@ -887,6 +890,9 @@ async fn create_via_client(
     // what an untouched form asked for.
     if let Some(r) = &f.reminders {
         body["reminders"] = crate::write::reminders_json(r);
+    }
+    if let Some(conference) = &f.conference {
+        body["conferenceData"] = crate::write::conference_json(conference);
     }
 
     // **The guest list, through the edit path's own builder.**
@@ -1061,6 +1067,7 @@ pub(crate) fn edit_patch_body(
         // And likewise again: compared below against `ev.reminders`, the row's
         // own settings, not against a before-side this struct would carry.
         reminders: None,
+        conference: None,
     };
 
     let anchor = if is_recurring(&ev.recurrence, &ev.recurring_event_id) {
@@ -1127,6 +1134,14 @@ pub(crate) fn edit_patch_body(
         if *wanted != reminders_as_input(&ev.reminders) {
             body["reminders"] = crate::write::reminders_json(wanted);
         }
+    }
+
+    // Structured conferencing is already an operation rather than a value to
+    // diff: absent means untouched, create carries its idempotency key, and
+    // remove is an explicit JSON null. `conferenceDataVersion=1` is supplied by
+    // CalendarClient for every modifying request.
+    if let Some(conference) = &after.conference {
+        body["conferenceData"] = crate::write::conference_json(conference);
     }
 
     body
@@ -1336,6 +1351,9 @@ async fn update_impl(
                 .await?;
         if let Some(cal_id) = cal_id {
             if crate::caldav_write::is_caldav_calendar(&state.pool, cal_id).await? {
+                if fields.conference.is_some() {
+                    anyhow::bail!("Google Meet can only be added to a Google calendar");
+                }
                 return crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields)
                     .await;
             }
@@ -1834,6 +1852,15 @@ async fn split_series(
     if let Some(s) = &after.summary     { body["summary"]     = s.clone().into(); }
     if let Some(s) = &after.location    { body["location"]    = s.clone().into(); }
     if let Some(s) = &after.description { body["description"] = s.clone().into(); }
+    if let Some(conference) = &after.conference {
+        body["conferenceData"] = crate::write::conference_json(conference);
+    } else if let Some(conference) = &master.conference_data {
+        // This body is an INSERT, not a PATCH: omission would mean “create the
+        // tail with no conference”, not “leave the existing one alone”. A
+        // split is the same meeting continuing, so copy the complete object
+        // Google returned unless the form explicitly replaces or removes it.
+        body["conferenceData"] = conference.clone();
+    }
 
     match &after.recurrence {
         // Repeat untouched: the tail repeats exactly as the series did.
@@ -2813,7 +2840,8 @@ mod tests {
             summary: None, description: None, location: None,
             start: Default::default(), end: Default::default(),
             recurrence: None, recurring_event_id: None, original_start_time: None,
-            hangout_link: None, attendees: vec![], sequence: 0, organizer: Default::default(),
+            hangout_link: None, conference_data: None, attendees: vec![], sequence: 0,
+            organizer: Default::default(),
             reminders: Default::default(),
         }
     }
@@ -2892,6 +2920,7 @@ mod tests {
             start: Default::default(), end: Default::default(),
             recurrence: None, recurring_event_id: None, original_start_time: None,
             hangout_link: None,
+            conference_data: None,
             attendees: vec![omacal_google::model::Attendee {
                 email: "me@x.com".into(), display_name: None,
                 response_status: "declined".into(), optional: false, is_self: true,
@@ -3810,6 +3839,7 @@ mod tests {
                     minutes: 10,
                 }],
             }),
+            conference: None,
         }
     }
 
@@ -4011,6 +4041,63 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("{send_updates}: {e}"));
         }
+    }
+
+    #[tokio::test]
+    async fn creating_with_google_meet_sends_structured_conference_data() {
+        let fields = crate::write::EventFields {
+            conference: Some(crate::write::ConferenceAction::CreateGoogleMeet {
+                request_id: "quick-add-create-1".into(),
+            }),
+            ..sample_fields()
+        };
+        let (start, end) = crate::write::when_json(&fields.when, &fields.tz);
+        let expected_body = serde_json::json!({
+            "start": start,
+            "end": end,
+            "summary": "Lunch",
+            "recurrence": ["RRULE:FREQ=WEEKLY"],
+            "reminders": { "useDefault": false,
+                           "overrides": [{ "method": "popup", "minutes": 10 }] },
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": "quick-add-create-1",
+                    "conferenceSolutionKey": { "type": "hangoutsMeet" }
+                }
+            }
+        });
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .and(wiremock::matchers::query_param("conferenceDataVersion", "1"))
+            .and(wiremock::matchers::body_json(expected_body))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({
+                    "id": "meet-new", "status": "confirmed", "etag": "\"e1\"",
+                    "summary": "Lunch",
+                    "hangoutLink": "https://meet.google.com/abc-defg-hij",
+                    "start": {"dateTime": "2026-08-10T12:00:00+03:00"},
+                    "end":   {"dateTime": "2026-08-10T13:00:00+03:00"}
+                }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let cal = seed_calendar(&pool, "owner").await;
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        let id = create_via_client(
+            &pool, cal, "cal@x.com", "UTC", fields, "none", &client,
+        )
+        .await
+        .unwrap();
+        let (stored, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.conference_uri.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
     }
 
     /// The end-to-end write-back: `create_via_client` posts to Google, then
@@ -4281,6 +4368,7 @@ mod tests {
             guests: None,
             // Likewise untouched, for the same reason.
             reminders: None,
+            conference: None,
         }
     }
 
@@ -5171,6 +5259,36 @@ mod tests {
             serde_json::json!({ "reminders": { "useDefault": false,
                 "overrides": [{ "method": "popup", "minutes": 15 }] } })
         );
+    }
+
+    #[test]
+    fn conference_changes_are_explicit_patch_operations() {
+        let mut ev = stored(three());
+        ev.summary = Some("Lunch".into());
+        ev.start_utc = OCCURRENCE;
+        ev.end_utc = OCCURRENCE + HOUR;
+
+        let mut add = form("Lunch", OCCURRENCE, OCCURRENCE + HOUR);
+        add.conference = Some(crate::write::ConferenceAction::CreateGoogleMeet {
+            request_id: "quick-add-1".into(),
+        });
+        let body = edit_patch_body(&ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", &add);
+        assert_eq!(body, serde_json::json!({
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": "quick-add-1",
+                    "conferenceSolutionKey": { "type": "hangoutsMeet" }
+                }
+            }
+        }));
+
+        let mut remove = form("Lunch", OCCURRENCE, OCCURRENCE + HOUR);
+        remove.conference = Some(crate::write::ConferenceAction::Remove);
+        let body = edit_patch_body(
+            &ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", &remove,
+        );
+        assert!(body.as_object().is_some_and(|o| o.contains_key("conferenceData")));
+        assert!(body["conferenceData"].is_null());
     }
 
     /// …and a guest change on its own is **not** an empty body, so the two
@@ -6847,10 +6965,77 @@ mod tests {
         );
         assert_eq!(
             post.url.query(),
-            Some("sendUpdates=all"),
+            Some("sendUpdates=all&conferenceDataVersion=1"),
             "the tail was created without telling its guests, while the truncation mailed \
              them that the series had changed — half a story each"
         );
+    }
+
+    /// An omitted conference instruction means preserve on a PATCH, but the
+    /// tail is an INSERT and has nothing to preserve unless the complete
+    /// object is copied onto it. A title-only split must not quietly turn the
+    /// second half of a video meeting into a meeting with no way to join.
+    #[tokio::test]
+    async fn the_new_series_carries_an_untouched_conference() {
+        let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+        ev.conference_uri = Some("https://meet.google.com/abc-defg-hij".into());
+        let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let conference = serde_json::json!({
+            "conferenceId": "abc-defg-hij",
+            "conferenceSolution": { "key": { "type": "hangoutsMeet" } },
+            "entryPoints": [{
+                "entryPointType": "video",
+                "uri": "https://meet.google.com/abc-defg-hij"
+            }]
+        });
+        let mut master = wire_master(&["RRULE:FREQ=WEEKLY"]);
+        master["hangoutLink"] = serde_json::json!("https://meet.google.com/abc-defg-hij");
+        master["conferenceData"] = conference.clone();
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(master))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                UNTIL_BEFORE_OCCURRENCE,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            OCCURRENCE,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let sent = requests(&server).await;
+        let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+        let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        assert_eq!(body["conferenceData"], conference);
     }
 
     /// The truncation carries the ending and nothing else.

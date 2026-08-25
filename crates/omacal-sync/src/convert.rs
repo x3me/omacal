@@ -219,7 +219,7 @@ mod tests {
             end: EventDateTime { date_time: Some(end.into()), date: None,
                                  time_zone: Some("Europe/Sofia".into()) },
             recurrence: None, recurring_event_id: None, original_start_time: None,
-            hangout_link: None, attendees: vec![], sequence: 0,
+            hangout_link: None, conference_data: None, attendees: vec![], sequence: 0,
             organizer: Organizer::default(),
             reminders: Default::default(),
         }

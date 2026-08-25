@@ -64,6 +64,31 @@ pub(crate) struct EventFields {
     /// nobody and mails nobody, so there is no notify question for a create to
     /// defer.
     pub reminders: Option<RemindersInput>,
+    /// A structured conferencing change, or `None` when conferencing was not
+    /// touched. Manual Zoom URLs are represented in `location`; Google Meet is
+    /// the structured provider this Google connection can create itself.
+    pub conference: Option<ConferenceAction>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConferenceAction {
+    CreateGoogleMeet { request_id: String },
+    Remove,
+}
+
+/// The Google Calendar `conferenceData` value for a requested change. A
+/// client-generated id makes creation idempotent across an HTTP retry while a
+/// new form submission receives a fresh conference.
+pub(crate) fn conference_json(action: &ConferenceAction) -> Value {
+    match action {
+        ConferenceAction::CreateGoogleMeet { request_id } => json!({
+            "createRequest": {
+                "requestId": request_id,
+                "conferenceSolutionKey": { "type": "hangoutsMeet" }
+            }
+        }),
+        ConferenceAction::Remove => Value::Null,
+    }
 }
 
 /// One guest, as the form names them.
@@ -435,7 +460,19 @@ pub(crate) struct EventInput {
     /// editing (a drag).
     #[serde(default)]
     pub reminders: Option<RemindersInput>,
+    /// Absent means preserve conferencing. The enum is a JSON string —
+    /// `"googleMeet"` or `"none"` — matching the UI union exactly.
+    #[serde(default)]
+    pub conference: Option<ConferenceInput>,
 }
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ConferenceInput {
+    GoogleMeet,
+    None,
+}
+
 /// A weekday as the UI names it and iCalendar writes it. The explicit serde
 /// names are the command-boundary contract; accepting a free-form `String`
 /// here would let a typo become an invalid RRULE sent to Google.
@@ -555,6 +592,12 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
         recurrence,
         guests: input.guests,
         reminders: input.reminders,
+        conference: input.conference.map(|c| match c {
+            ConferenceInput::GoogleMeet => ConferenceAction::CreateGoogleMeet {
+                request_id: uuid::Uuid::new_v4().to_string(),
+            },
+            ConferenceInput::None => ConferenceAction::Remove,
+        }),
     })
 }
 
@@ -938,6 +981,7 @@ mod tests {
             recurrence: None,
             guests: None,
             reminders: None,
+            conference: None,
         }
     }
 
@@ -1267,7 +1311,65 @@ mod tests {
             repeat_end: None,
             guests: None,
             reminders: None,
+            conference: None,
         }
+    }
+
+    #[test]
+    fn conferencing_commands_deserialize_and_become_google_operations() {
+        // The strings are the TypeScript union on the command boundary. Pin
+        // them here as wire values; constructing the enum directly would let
+        // a serde rename drift while every domain-level assertion stayed
+        // green.
+        let input: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "UTC",
+            "conference": "googleMeet"
+        }))
+        .unwrap();
+        let first = fields_from_input(input).unwrap();
+        let ConferenceAction::CreateGoogleMeet { request_id } = first.conference.unwrap() else {
+            panic!("googleMeet did not become a Meet create request");
+        };
+        assert!(uuid::Uuid::parse_str(&request_id).is_ok(), "request id was not a UUID");
+        assert_eq!(
+            conference_json(&ConferenceAction::CreateGoogleMeet {
+                request_id: request_id.clone(),
+            }),
+            serde_json::json!({
+                "createRequest": {
+                    "requestId": request_id,
+                    "conferenceSolutionKey": { "type": "hangoutsMeet" }
+                }
+            })
+        );
+
+        let remove: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "allDay", "startDate": "2026-08-25",
+                      "endDate": "2026-08-26" },
+            "tz": "UTC",
+            "conference": "none"
+        }))
+        .unwrap();
+        assert!(matches!(
+            fields_from_input(remove).unwrap().conference,
+            Some(ConferenceAction::Remove)
+        ));
+        assert_eq!(conference_json(&ConferenceAction::Remove), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn each_meet_submission_gets_a_fresh_idempotency_key() {
+        let mut first = sample_input();
+        first.conference = Some(ConferenceInput::GoogleMeet);
+        let mut second = sample_input();
+        second.conference = Some(ConferenceInput::GoogleMeet);
+        let Some(ConferenceAction::CreateGoogleMeet { request_id: a }) =
+            fields_from_input(first).unwrap().conference else { panic!("missing first request") };
+        let Some(ConferenceAction::CreateGoogleMeet { request_id: b }) =
+            fields_from_input(second).unwrap().conference else { panic!("missing second request") };
+        assert_ne!(a, b);
     }
 
     #[test]

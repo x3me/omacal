@@ -3,10 +3,10 @@ import { offerableCalendarId, type Calendar } from '../src/lib/calendars';
 import type { EventDetail } from '../src/lib/eventdetail';
 import {
   addGuest, blankValue, blankValueAt, endAfterStart, isAddress, mailableGuests, pastedValue,
-  previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
-  repeatEndProblem, sameRepeatEnd, sameWeeklyDays, shiftedEndDate,
+  locationForVideoCall, previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
+  repeatEndProblem, sameRepeatEnd, sameVideoCall, sameWeeklyDays, shiftedEndDate,
   toEventInput, toggledGuestOptional,
-  toggledWeeklyDay, valueFromDetail, weekdayCodeForDate, whenOf,
+  toggledWeeklyDay, valueFromDetail, videoCallProblem, weekdayCodeForDate, whenOf,
   type EventFormValue,
 } from '../src/lib/eventform';
 
@@ -2273,6 +2273,104 @@ test.describe('what a save sends about guests', () => {
     // "nobody" coincide there, and no key is the smaller payload.
     const blank = blankValueAt(Date.UTC(2026, 8, 10, 9, 0), 1);
     expect(toEventInput(blank, blank).guests).toBeUndefined();
+  });
+});
+
+// --- Video calls ----------------------------------------------------------
+
+test.describe('video calls in the value and on the wire', () => {
+  const opened = (detail: EventDetail) =>
+    valueFromDetail(detail, detail.start_ms, detail.end_ms);
+
+  test('reads structured Meet data separately from a physical location', () => {
+    const value = opened({
+      ...timedDetail(0, 30 * 60_000),
+      location: 'Room 4',
+      conference_uri: 'https://meet.google.com/abc-defg-hij',
+    });
+    expect(value.location).toBe('Room 4');
+    expect(value.videoCall).toEqual({
+      provider: 'googleMeet',
+      uri: 'https://meet.google.com/abc-defg-hij',
+      source: 'conference',
+    });
+  });
+
+  test('recognises an existing Zoom link stored in Location', () => {
+    const value = opened({
+      ...timedDetail(0, 30 * 60_000),
+      location: 'Board room · Zoom: https://us02web.zoom.us/j/123456789',
+    });
+    expect(value.videoCall).toEqual({
+      provider: 'zoom',
+      uri: 'https://us02web.zoom.us/j/123456789',
+      source: 'location',
+    });
+  });
+
+  test('a new Google Meet is a structured create request', () => {
+    const initial = blankValueAt(Date.UTC(2026, 7, 25, 14), 1);
+    const value = {
+      ...initial,
+      videoCall: { provider: 'googleMeet', uri: null, source: 'new' } as const,
+    };
+    expect(toEventInput(value, initial).conference).toBe('googleMeet');
+    expect(toEventInput(value, initial).location).toBeNull();
+    expect(videoCallProblem(value, 'google')).toBeNull();
+    expect(videoCallProblem(value, 'caldav')).toContain('Google calendar');
+  });
+
+  test('an unchanged structured call is absent, while removing it sends null', () => {
+    const initial = opened({
+      ...timedDetail(0, 30 * 60_000),
+      conference_uri: 'https://meet.google.com/abc-defg-hij',
+    });
+    expect(toEventInput(initial, initial).conference).toBeUndefined();
+
+    const removed = { ...initial, videoCall: null };
+    expect(toEventInput(removed, initial).conference).toBe('none');
+  });
+
+  test('replacing structured Meet with Zoom removes it and appends the Zoom link once', () => {
+    const initial = opened({
+      ...timedDetail(0, 30 * 60_000),
+      location: 'Room 4',
+      conference_uri: 'https://meet.google.com/abc-defg-hij',
+    });
+    const value: EventFormValue = {
+      ...initial,
+      videoCall: {
+        provider: 'zoom', uri: 'https://zoom.us/j/987654321', source: 'new',
+      },
+    };
+    const sent = toEventInput(value, initial);
+    expect(sent.conference).toBe('none');
+    expect(sent.location).toBe('Room 4 · Zoom: https://zoom.us/j/987654321');
+    expect(locationForVideoCall(sent.location ?? '', value.videoCall, value.videoCall))
+      .toBe(sent.location);
+    expect(videoCallProblem(value, 'google')).toBeNull();
+  });
+
+  test('a quick-add Zoom seed still writes its URL on create', () => {
+    const value = blankValueAt(Date.UTC(2026, 7, 25, 14), 1);
+    value.videoCall = {
+      provider: 'zoom', uri: 'https://zoom.us/j/987654321', source: 'new',
+    };
+    // Quick add can hand this populated value to Continue editing. On a create
+    // there is no server-side before, even though `initial` is the same object.
+    expect(toEventInput(value, value).location).toBe('Zoom: https://zoom.us/j/987654321');
+  });
+
+  test('validates Zoom links and compares conferencing by meaning, not source', () => {
+    const value = blankValueAt(Date.UTC(2026, 7, 25, 14), 1);
+    value.videoCall = { provider: 'zoom', uri: null, source: 'new' };
+    expect(videoCallProblem(value, 'google')).toContain('Paste the Zoom');
+    value.videoCall = { provider: 'zoom', uri: 'https://example.com/room', source: 'new' };
+    expect(videoCallProblem(value, 'google')).toContain('not a zoom.us');
+    expect(sameVideoCall(
+      { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'conference' },
+      { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'location' },
+    )).toBe(true);
   });
 });
 

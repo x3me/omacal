@@ -10,6 +10,23 @@ const PROVIDERS: Array<[RegExp, string]> = [
 
 const URL_RE = /https?:\/\/[^\s,;]+/i;
 
+/** The recognised meeting provider behind one URL, or `null`.
+ *
+ * Kept beside `meetingUrl`'s allowlist so quick event creation and the event
+ * editor do not grow a second, subtly different definition of “a Zoom link”.
+ * Callers may hand this either a bare URL or a sentence containing one; the
+ * same punctuation and host checks as `meetingUrl` apply. */
+export function meetingProvider(raw: string | null): string | null {
+  const url = meetingUrl(raw);
+  if (!url) return null;
+  try {
+    const host = new URL(url).hostname;
+    return PROVIDERS.find(([re]) => re.test(host))?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The joinable meeting URL a location holds, or `null`.
  *
