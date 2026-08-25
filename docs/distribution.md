@@ -42,6 +42,12 @@ precedence pinned by four tests proven against two mutations):**
 
       OMACAL_CLIENT_ID=… OMACAL_CLIENT_SECRET=… cargo tauri build
 
+  Zoom meeting creation is independent and uses the native/public client id
+  `option_env!("OMACAL_ZOOM_PUBLIC_CLIENT_ID")`; there is deliberately no
+  Zoom client secret in a desktop PKCE flow:
+
+      OMACAL_ZOOM_PUBLIC_CLIENT_ID=… cargo tauri build
+
 - **Precedence: `config.toml` wins when present**; the embedded pair is the
   fallback; only when neither exists does today's "no config at …" error
   appear. Developers and distro packagers keep using their own projects, and
