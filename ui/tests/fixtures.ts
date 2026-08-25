@@ -431,6 +431,8 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   // What `write::repeat_from_rrule` answers for `recurrence: null`, so the two
   // defaults agree. A fixture that sets one must set the other.
   repeat: 'never',
+  weekly_days: [],
+  repeat_end: { kind: 'never' },
   color: '#5b8def',
   organizer_email: null,
   self_response: 'needsAction',

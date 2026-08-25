@@ -7,7 +7,10 @@
 // three-state `repeat` — are testable as functions rather than only through a
 // rendered form.
 
-import type { EventDetail, EventInput, SendUpdates, WhenInput } from './eventdetail';
+import type {
+  EventDetail, EventInput, RepeatEnd, SendUpdates, WeekdayCode, WhenInput,
+} from './eventdetail';
+export type { RepeatEnd, WeekdayCode } from './eventdetail';
 
 /** Which occurrences an edit applies to. Mirrors `update_event`'s own scopes. */
 export type Scope = 'this' | 'all' | 'following';
@@ -45,8 +48,9 @@ export type EventFormResult = {
  * This is a *label* table, not a second copy of the mapping: no rule text
  * appears here, and nothing in this file decides whether a given RRULE is one
  * of these — that answer arrives already made, on `EventDetail.repeat`, from
- * `write::repeat_from_rrule`. See that field's own comment for why there is
- * exactly one authority for it.
+ * `write::repeat_from_rrule`. That Rust function also strictly recognises the
+ * plain weekly BYDAY shape represented by `weeklyDays`; the UI never parses
+ * raw recurrence to make this decision.
  */
 export const REPEAT_OPTIONS: Array<[key: string, label: string]> = [
   ['never', 'Does not repeat'],
@@ -60,6 +64,20 @@ export const REPEAT_OPTIONS: Array<[key: string, label: string]> = [
 /** The value `write::repeat_from_rrule` answers for a rule omacal cannot
  *  express. Not in `REPEAT_OPTIONS`: it is never something a user may pick. */
 export const CUSTOM_REPEAT = 'custom';
+
+/** The visual pattern the user asked for: `S M T W R F S`, with `R` for
+ * Thursday so both Tuesdays and Thursdays stay one keystroke/wide button. */
+export const WEEKDAY_OPTIONS: ReadonlyArray<{
+  code: WeekdayCode; short: string; name: string;
+}> = [
+  { code: 'SU', short: 'S', name: 'Sunday' },
+  { code: 'MO', short: 'M', name: 'Monday' },
+  { code: 'TU', short: 'T', name: 'Tuesday' },
+  { code: 'WE', short: 'W', name: 'Wednesday' },
+  { code: 'TH', short: 'R', name: 'Thursday' },
+  { code: 'FR', short: 'F', name: 'Friday' },
+  { code: 'SA', short: 'S', name: 'Saturday' },
+];
 
 /**
  * Everything the form edits, in the shapes its inputs actually hold — dates as
@@ -138,6 +156,12 @@ export type EventFormValue = {
   calendarId: number | null;
   /** A key from `REPEAT_OPTIONS`, or `CUSTOM_REPEAT`. */
   repeat: string;
+  /** The selected days when `repeat === 'weekly'`. Always Sunday-first and
+   *  non-empty for values built by this module. */
+  weeklyDays: WeekdayCode[];
+  /** How the series stops. Kept even while Repeat is Never so switching a
+   * cadence off and back on does not discard what was typed. */
+  repeatEnd: RepeatEnd;
   /** The raw RRULE behind a `custom` repeat, for showing it in words. Display
    *  only — never parsed to decide what the app can express. */
   recurrence: string | null;
@@ -449,6 +473,53 @@ function addDays(date: string, days: number): string {
   return `${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}-${pad(at.getUTCDate())}`;
 }
 
+/** A form date's weekday. Inputs produced by this module are real dates; the
+ * Monday fallback only keeps a half-typed native date from breaking render. */
+export function weekdayCodeForDate(date: string): WeekdayCode {
+  const [y, m, d] = date.split('-').map(Number);
+  const at = new Date(y, m - 1, d, 12);
+  const index = Number.isFinite(at.getTime()) ? at.getDay() : 1;
+  return WEEKDAY_OPTIONS[index]?.code ?? 'MO';
+}
+
+/** Stable Sunday-first order and no duplicates, regardless of click/NLP order. */
+export function normalizedWeeklyDays(days: readonly WeekdayCode[]): WeekdayCode[] {
+  const selected = new Set(days);
+  return WEEKDAY_OPTIONS.map((day) => day.code).filter((day) => selected.has(day));
+}
+
+/** Set comparison in display order. Exported because recurrence's
+ * unchanged-means-absent wire rule depends on the days as well as the select. */
+export function sameWeeklyDays(a: readonly WeekdayCode[], b: readonly WeekdayCode[]): boolean {
+  const left = normalizedWeeklyDays(a);
+  const right = normalizedWeeklyDays(b);
+  return left.length === right.length && left.every((day, i) => day === right[i]);
+}
+
+/** Value equality for the tagged repeat-ending union. */
+export function sameRepeatEnd(a: RepeatEnd, b: RepeatEnd): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'on' && b.kind === 'on') return a.date === b.date;
+  if (a.kind === 'after' && b.kind === 'after') return a.count === b.count;
+  return true;
+}
+
+/** The repeat-ending error a Save must name instead of silently repairing. */
+export function repeatEndProblem(value: EventFormValue): string | null {
+  if (value.repeat === 'never' || value.repeat === CUSTOM_REPEAT
+      || value.repeatEnd.kind === 'never') return null;
+  if (value.repeatEnd.kind === 'after') {
+    return Number.isInteger(value.repeatEnd.count) && value.repeatEnd.count >= 1
+      ? null
+      : 'End after must be at least 1 occurrence.';
+  }
+  const end = utcOf(value.repeatEnd.date);
+  const start = utcOf(value.date);
+  if (!Number.isFinite(end)) return 'Choose a valid repeat end date.';
+  if (end < start) return 'The repeat end date cannot be before the event starts.';
+  return null;
+}
+
 /**
  * Where the end date goes when the start date moves from `from` to `to`.
  *
@@ -465,6 +536,36 @@ export function shiftedEndDate(from: string, to: string, endDate: string): strin
   const span = (utcOf(endDate) - utcOf(from)) / DAY_MS;
   if (!Number.isInteger(span) || span < 0 || !Number.isFinite(utcOf(to))) return endDate;
   return addDays(to, span);
+}
+
+/** Toggle one weekly button. The last selected day cannot be removed. If the
+ * event's first date is no longer in the pattern, move the whole date span to
+ * the next selected day; otherwise DTSTART would create a stray first
+ * occurrence outside the cadence shown by the buttons. */
+export function toggledWeeklyDay(value: EventFormValue, code: WeekdayCode): EventFormValue {
+  const selected = value.weeklyDays.includes(code);
+  if (selected && value.weeklyDays.length === 1) return value;
+  const weeklyDays = normalizedWeeklyDays(selected
+    ? value.weeklyDays.filter((day) => day !== code)
+    : [...value.weeklyDays, code]);
+  if (weeklyDays.includes(weekdayCodeForDate(value.date))) {
+    return { ...value, weeklyDays };
+  }
+  const current = WEEKDAY_OPTIONS.findIndex((day) => day.code === weekdayCodeForDate(value.date));
+  const offsets = weeklyDays.map((day) => {
+    const target = WEEKDAY_OPTIONS.findIndex((candidate) => candidate.code === day);
+    return (target - current + 7) % 7;
+  }).filter((offset) => offset > 0);
+  const nextDate = addDays(value.date, Math.min(...offsets));
+  return {
+    ...value,
+    weeklyDays,
+    date: nextDate,
+    endDate: shiftedEndDate(value.date, nextDate, value.endDate),
+    repeatEnd: value.repeatEnd.kind === 'on'
+      ? { kind: 'on', date: shiftedEndDate(value.date, nextDate, value.repeatEnd.date) }
+      : value.repeatEnd,
+  };
 }
 
 /** The next half-hour boundary strictly after `nowMs`: 09:12 and 09:30 both
@@ -519,6 +620,8 @@ export function blankValueAt(
     description: '',
     calendarId,
     repeat: 'never',
+    weeklyDays: [weekdayCodeForDate(dateOf(startMs))],
+    repeatEnd: { kind: 'never' },
     recurrence: null,
     // Nobody, until the user types somebody in. The guest editor is on this
     // path now; `toEventInput` sends the list only when it differs from this
@@ -717,11 +820,12 @@ export function valueFromDetail(
   startMs: number,
   endMs: number,
 ): EventFormValue {
+  const displayedDate = detail.is_all_day
+    ? occurrenceDate(detail.start_date, detail.start_ms, startMs)
+    : dateOf(startMs);
   return {
     title: detail.title ?? '',
-    date: detail.is_all_day
-      ? occurrenceDate(detail.start_date, detail.start_ms, startMs)
-      : dateOf(startMs),
+    date: displayedDate,
     // Inclusive on both arms, and inclusive already on the all-day one:
     // `end_date` is the last day a person would point at, worked out from the
     // exclusive `end_ms` once, on the Rust side, in the calendar's zone.
@@ -741,6 +845,10 @@ export function valueFromDetail(
     description: detail.description ?? '',
     calendarId: detail.calendar_id,
     repeat: detail.repeat,
+    weeklyDays: detail.weekly_days.length > 0
+      ? normalizedWeeklyDays(detail.weekly_days)
+      : [weekdayCodeForDate(displayedDate)],
+    repeatEnd: { ...detail.repeat_end },
     recurrence: detail.recurrence,
     // **Everyone** — see `EventFormValue.guests` for how this differs from
     // `mailableGuests`.
@@ -1070,13 +1178,37 @@ export const endAfterStart = (value: EventFormValue): boolean => {
  */
 export function toEventInput(value: EventFormValue, initial: EventFormValue): EventInput {
   const blank = (s: string) => (s.trim() === '' ? null : s);
+  const repeatChanged = value.repeat !== initial.repeat
+    || (value.repeat === 'weekly' && !sameWeeklyDays(value.weeklyDays, initial.weeklyDays))
+    || (value.repeat !== 'never' && value.repeat !== CUSTOM_REPEAT
+      && !sameRepeatEnd(value.repeatEnd, initial.repeatEnd));
+  const authoredRepeat = {
+    repeat: value.repeat,
+    ...(value.repeat === 'weekly'
+      ? { weeklyDays: normalizedWeeklyDays(value.weeklyDays) }
+      : {}),
+    ...(value.repeat !== 'never' && value.repeat !== CUSTOM_REPEAT
+      && value.repeatEnd.kind !== 'never'
+      ? { repeatEnd: { ...value.repeatEnd } }
+      : {}),
+  };
+  const repeatFields = value.isEdit
+    ? (repeatChanged
+        ? authoredRepeat
+        : {})
+    : (value.repeat === 'never'
+        ? {}
+        : authoredRepeat);
   return {
     summary: blank(value.title),
     location: blank(value.location),
     description: blank(value.description),
     when: whenOf(value),
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    ...(value.repeat === initial.repeat ? {} : { repeat: value.repeat }),
+    // A create has no rule to leave untouched. This matters for quick-add and
+    // paste-style seeds whose repeat value is already populated when the full
+    // editor opens: comparing only with `initial` would omit that real choice.
+    ...repeatFields,
     // **Unchanged means absent**, the same three-state `repeat` runs on, and
     // on an edit it is load bearing rather than tidy: `attendees` is a
     // whole-list replace on Google's side, so a payload that carried the list

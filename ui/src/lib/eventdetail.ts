@@ -8,6 +8,17 @@ export type Attendee = {
   is_self: boolean;
 };
 
+/** iCalendar's weekday vocabulary, shared by the weekly picker and the
+ * command boundary. Sunday-first display order is defined in `eventform.ts`. */
+export type WeekdayCode = 'SU' | 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA';
+
+/** The finite endings RFC 5545 allows on a recurrence. `never` means the
+ * series is unbounded; `on` is an inclusive calendar date. */
+export type RepeatEnd =
+  | { kind: 'never' }
+  | { kind: 'on'; date: string }
+  | { kind: 'after'; count: number };
+
 export type EventDetail = {
   id: number;
   calendar_id: number;
@@ -48,18 +59,22 @@ export type EventDetail = {
    *  cannot represent back to the user in words. Display only — never parse it
    *  to decide what the app can express; that is `repeat`'s job. */
   recurrence: string | null;
-  /** Which Repeat option represents `recurrence` exactly, or `'custom'` for a
+  /** Which Repeat option represents `recurrence` completely, or `'custom'` for a
    *  rule this app cannot express.
    *
-   *  Computed on the Rust side by `write::repeat_from_rrule`, which decides by
-   *  *exact string equality* against the rules `write::rrule_for` authors.
-   *  Never re-derive it here: the whole point of exact equality is that one
-   *  authority decides what omacal can express, and a second copy of the table
-   *  in TypeScript drifts the moment either side gains an option. It fails
+   *  Computed on the Rust side by `write::repeat_from_rrule`, which matches
+   *  base rules exactly and strictly parses only plain weekly BYDAY rules.
+   *  Never re-derive it here: one authority decides what omacal can express,
+   *  and a second copy in TypeScript drifts the moment either side gains an
+   *  option. It fails
    *  silently when it does — an unrepresentable rule read as a representable
    *  one means the next save rewrites "every 2nd Tuesday" as "weekly", and
    *  mails the whole guest list about it. */
   repeat: string;
+  /** Weekdays from an exactly representable weekly `BYDAY` rule. Empty for a
+   *  plain weekly rule, whose day comes from DTSTART. */
+  weekly_days: WeekdayCode[];
+  repeat_end: RepeatEnd;
   color: string | null;
   organizer_email: string | null;
   self_response: string | null;
@@ -103,7 +118,8 @@ export type Occurrence = {
  * What `create_event` takes on the Rust side (`write::EventInput`) — the
  * UI's own vocabulary, not an RRULE: `repeat` is one of `'never'`,
  * `'daily'`, `'weekdays'`, `'weekly'`, `'monthly'`, `'yearly'`, mapped to an
- * actual rule by `write::rrule_for`. Omit it entirely to create a one-off
+ * actual rule by `write::rrule_for` (refined by `weeklyDays` for BYDAY).
+ * Omit it entirely to create a one-off
  * event; `'never'` and "omitted" are the same thing on a create, since there
  * is no existing rule to leave alone.
  */
@@ -114,6 +130,10 @@ export type EventInput = {
   when: WhenInput;
   tz: string;
   repeat?: string;
+  /** Present with `repeat: 'weekly'` when the user chose the weekly pattern. */
+  weeklyDays?: WeekdayCode[];
+  /** Present when the repeat controls were created or changed. */
+  repeatEnd?: RepeatEnd;
   /**
    * The guest list the event should end up with, or **absent** when the user
    * did not touch it.

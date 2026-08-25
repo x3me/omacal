@@ -200,6 +200,32 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_weekly_pattern_yields_each_selected_day_and_no_others() {
+        let s = Series {
+            dtstart_ms: MON_0900_SOFIA, dtstart_tz: "Europe/Sofia",
+            duration_ms: 30 * 60_000, is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"]),
+        };
+        let out = expand(
+            &s,
+            MON_0900_SOFIA - HOUR,
+            MON_0900_SOFIA + 7 * DAY,
+            50,
+        )
+        .unwrap()
+        .intervals;
+        let starts = out.iter().map(|interval| interval.start_ms).collect::<Vec<_>>();
+        assert_eq!(
+            starts,
+            [
+                MON_0900_SOFIA,
+                MON_0900_SOFIA + 2 * DAY,
+                MON_0900_SOFIA + 4 * DAY,
+            ]
+        );
+    }
+
+    #[test]
     fn every_instance_keeps_the_series_duration() {
         let s = Series {
             dtstart_ms: MON_0900_SOFIA, dtstart_tz: "Europe/Sofia",

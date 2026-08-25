@@ -409,6 +409,20 @@ pub(crate) struct EventInput {
     /// Absent when the user did not touch Repeat.
     #[serde(default)]
     pub repeat: Option<String>,
+    /// The selected days for a custom weekly cadence, as iCalendar's
+    /// two-letter weekday codes. Meaningful only when `repeat == "weekly"`.
+    ///
+    /// This is structured rather than an RRULE fragment on purpose: serde
+    /// rejects an unknown code at the command boundary, and the builder below
+    /// owns ordering, de-duplication and iCalendar syntax. An empty list falls
+    /// back to ordinary weekly rather than clearing recurrence.
+    #[serde(default)]
+    pub weekly_days: Option<Vec<WeekdayCode>>,
+    /// How a repeating series stops. Absent and `never` both mean an
+    /// unbounded rule; the explicit variant is useful on the read side and
+    /// keeps the TypeScript union symmetric with [`RepeatEnd`].
+    #[serde(default)]
+    pub repeat_end: Option<RepeatEnd>,
     /// Absent when the user did not touch the guest list — see
     /// [`EventFields::guests`], which this becomes unchanged. `#[serde(default)]`
     /// so every payload written before this field existed still deserializes,
@@ -421,6 +435,68 @@ pub(crate) struct EventInput {
     /// editing (a drag).
     #[serde(default)]
     pub reminders: Option<RemindersInput>,
+}
+/// A weekday as the UI names it and iCalendar writes it. The explicit serde
+/// names are the command-boundary contract; accepting a free-form `String`
+/// here would let a typo become an invalid RRULE sent to Google.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub(crate) enum WeekdayCode {
+    #[serde(rename = "SU")]
+    Su,
+    #[serde(rename = "MO")]
+    Mo,
+    #[serde(rename = "TU")]
+    Tu,
+    #[serde(rename = "WE")]
+    We,
+    #[serde(rename = "TH")]
+    Th,
+    #[serde(rename = "FR")]
+    Fr,
+    #[serde(rename = "SA")]
+    Sa,
+}
+
+/// The two RFC 5545 termination forms omacal can author, plus the ordinary
+/// unbounded case. Internally tagged so malformed combinations (a date on an
+/// `after`, a count on an `on`) fail at the command boundary rather than being
+/// guessed at while building an RRULE.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RepeatEnd {
+    Never,
+    On { date: String },
+    After { count: u32 },
+}
+
+impl Default for RepeatEnd {
+    fn default() -> Self {
+        Self::Never
+    }
+}
+
+impl WeekdayCode {
+    const ALL: [Self; 7] = [Self::Su, Self::Mo, Self::Tu, Self::We, Self::Th, Self::Fr, Self::Sa];
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::Su => "SU",
+            Self::Mo => "MO",
+            Self::Tu => "TU",
+            Self::We => "WE",
+            Self::Th => "TH",
+            Self::Fr => "FR",
+            Self::Sa => "SA",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|candidate| *candidate == self).unwrap_or(0)
+    }
+
+    fn from_text(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|day| day.text() == text)
+    }
 }
 
 /// [`When`] as the UI sends it. A separate type for the same reason
@@ -452,22 +528,34 @@ pub(crate) enum WhenInput {
 /// `"never"` maps to `Some(None)` — clear the rule — because [`rrule_for`]
 /// returns `None` for it. That is the one case worth staring at: an absent
 /// `repeat` and a `repeat` of `"never"` must not collapse together.
-pub(crate) fn fields_from_input(input: EventInput) -> EventFields {
-    EventFields {
+pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String> {
+    let when = match input.when {
+        WhenInput::Timed { start_ms, end_ms } => When::Timed { start_ms, end_ms },
+        WhenInput::AllDay { start_date, end_date } => When::AllDay { start_date, end_date },
+    };
+    let recurrence = input
+        .repeat
+        .as_deref()
+        .map(|repeat| {
+            rrule_for_input(
+                repeat,
+                input.weekly_days.as_deref(),
+                input.repeat_end.as_ref(),
+                &when,
+                &input.tz,
+            )
+        })
+        .transpose()?;
+    Ok(EventFields {
         summary: input.summary,
         location: input.location,
         description: input.description,
-        when: match input.when {
-            WhenInput::Timed { start_ms, end_ms } => When::Timed { start_ms, end_ms },
-            WhenInput::AllDay { start_date, end_date } => {
-                When::AllDay { start_date, end_date }
-            }
-        },
+        when,
         tz: input.tz,
-        recurrence: input.repeat.map(|r| rrule_for(&r)),
+        recurrence,
         guests: input.guests,
         reminders: input.reminders,
-    }
+    })
 }
 
 /// The rule omacal writes for each Repeat option. `never` is `None`.
@@ -483,6 +571,221 @@ pub(crate) fn rrule_for(repeat: &str) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// The RRULE for a command payload. `rrule_for` remains the dropdown's base
+/// vocabulary; this adds the two structured refinements the form can author:
+/// a weekly day pattern and an optional COUNT/UNTIL termination.
+fn rrule_for_input(
+    repeat: &str,
+    weekly_days: Option<&[WeekdayCode]>,
+    repeat_end: Option<&RepeatEnd>,
+    when: &When,
+    tz: &str,
+) -> Result<Option<String>, String> {
+    let Some(mut rule) = rrule_for(repeat) else {
+        if matches!(repeat_end, Some(end) if end != &RepeatEnd::Never) {
+            return Err("a repeat ending needs a repeating schedule".into());
+        }
+        return Ok(None);
+    };
+
+    if repeat == "weekly" {
+        if let Some(days) = weekly_days {
+            // Canonical Sunday-first order and no duplicates, independent of
+            // click or NLP order. Besides producing stable rules, this gives
+            // the read side one finite, fully representable grammar to recognise.
+            let mut selected = [false; 7];
+            for day in days {
+                selected[day.index()] = true;
+            }
+            let days = WeekdayCode::ALL
+                .into_iter()
+                .filter(|day| selected[day.index()])
+                .map(WeekdayCode::text)
+                .collect::<Vec<_>>();
+            if !days.is_empty() {
+                rule.push_str(";BYDAY=");
+                rule.push_str(&days.join(","));
+            }
+        }
+    }
+
+    match repeat_end.unwrap_or(&RepeatEnd::Never) {
+        RepeatEnd::Never => {}
+        RepeatEnd::After { count } => {
+            if *count == 0 {
+                return Err("a repeating event must occur at least once".into());
+            }
+            rule.push_str(&format!(";COUNT={count}"));
+        }
+        RepeatEnd::On { date } => {
+            let end: jiff::civil::Date = date
+                .parse()
+                .map_err(|_| format!("{date} is not a valid repeat end date"))?;
+            let start_text = match when {
+                When::Timed { start_ms, .. } => date_in_zone(*start_ms, tz),
+                When::AllDay { start_date, .. } => start_date.clone(),
+            };
+            let start: jiff::civil::Date = start_text
+                .parse()
+                .map_err(|_| format!("{start_text} is not a valid event start date"))?;
+            if end < start {
+                return Err("the repeat end date cannot be before the event starts".into());
+            }
+
+            let until = match when {
+                When::AllDay { .. } => end.strftime("%Y%m%d").to_string(),
+                When::Timed { .. } => end
+                    .at(23, 59, 59, 0)
+                    .in_tz(tz)
+                    .map_err(|_| format!("unknown time zone {tz}"))?
+                    .timestamp()
+                    .in_tz("UTC")
+                    .expect("UTC always resolves")
+                    .strftime("%Y%m%dT%H%M%SZ")
+                    .to_string(),
+            };
+            rule.push_str(";UNTIL=");
+            rule.push_str(&until);
+        }
+    }
+    Ok(Some(rule))
+}
+
+fn parse_weekdays(list: &str) -> Option<Vec<WeekdayCode>> {
+    if list.is_empty() { return None; }
+    let mut selected = [false; 7];
+    for raw in list.split(',') {
+        let day = WeekdayCode::from_text(raw)?;
+        if selected[day.index()] {
+            return None;
+        }
+        selected[day.index()] = true;
+    }
+    Some(
+        WeekdayCode::ALL
+            .into_iter()
+            .filter(|day| selected[day.index()])
+            .collect(),
+    )
+}
+
+fn basic_date(value: &str) -> Option<jiff::civil::Date> {
+    if value.len() != 8 || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8]).parse().ok()
+}
+
+fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
+    let b = value.as_bytes();
+    if b.len() != 16 || b[8] != b'T' || b[15] != b'Z'
+        || !b[..8].iter().chain(&b[9..15]).all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &value[..4], &value[4..6], &value[6..8],
+        &value[9..11], &value[11..13], &value[13..15],
+    )
+    .parse()
+    .ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecurrenceControls {
+    pub repeat: String,
+    pub weekly_days: Vec<String>,
+    pub repeat_end: RepeatEnd,
+}
+
+/// Reads exactly the recurrence grammar the editor can write: one of its five
+/// cadences, an optional weekly BYDAY list, and at most one COUNT or UNTIL.
+/// Parts may arrive in any order because other calendar clients reorder them;
+/// unknown, duplicate, contradictory or value-type-mismatched parts make the
+/// whole rule custom. That all-or-nothing rule is what prevents a title-only
+/// save from simplifying somebody else's recurrence behind their back.
+pub(crate) fn recurrence_controls_from_rrule(
+    rule: Option<&str>,
+    is_all_day: bool,
+    tz: &str,
+) -> RecurrenceControls {
+    let custom = || RecurrenceControls {
+        repeat: "custom".into(), weekly_days: vec![], repeat_end: RepeatEnd::Never,
+    };
+    let Some(rule) = rule else {
+        return RecurrenceControls {
+            repeat: "never".into(), weekly_days: vec![], repeat_end: RepeatEnd::Never,
+        };
+    };
+    let Some(body) = rule.strip_prefix("RRULE:") else { return custom(); };
+
+    let mut freq: Option<&str> = None;
+    let mut byday: Option<&str> = None;
+    let mut count: Option<&str> = None;
+    let mut until: Option<&str> = None;
+    for part in body.split(';') {
+        let Some((key, value)) = part.split_once('=') else { return custom(); };
+        if value.is_empty() { return custom(); }
+        let slot = match key {
+            "FREQ" => &mut freq,
+            "BYDAY" => &mut byday,
+            "COUNT" => &mut count,
+            "UNTIL" => &mut until,
+            _ => return custom(),
+        };
+        if slot.replace(value).is_some() { return custom(); }
+    }
+    if count.is_some() && until.is_some() { return custom(); }
+
+    let days = match byday {
+        Some(list) => match parse_weekdays(list) {
+            Some(days) => days,
+            None => return custom(),
+        },
+        None => vec![],
+    };
+    let repeat = match (freq, byday) {
+        (Some("DAILY"), None) => "daily",
+        (Some("WEEKLY"), None) => "weekly",
+        (Some("WEEKLY"), Some(_)) => {
+            if days == [WeekdayCode::Mo, WeekdayCode::Tu, WeekdayCode::We,
+                        WeekdayCode::Th, WeekdayCode::Fr] {
+                "weekdays"
+            } else {
+                "weekly"
+            }
+        }
+        (Some("MONTHLY"), None) => "monthly",
+        (Some("YEARLY"), None) => "yearly",
+        _ => return custom(),
+    };
+
+    let repeat_end = if let Some(raw) = count {
+        match raw.parse::<u32>().ok().filter(|n| *n > 0) {
+            Some(count) => RepeatEnd::After { count },
+            None => return custom(),
+        }
+    } else if let Some(raw) = until {
+        if is_all_day {
+            match basic_date(raw) {
+                Some(date) => RepeatEnd::On { date: date.to_string() },
+                None => return custom(),
+            }
+        } else {
+            let Some(ts) = basic_utc_timestamp(raw) else { return custom(); };
+            let Ok(local) = ts.in_tz(tz) else { return custom(); };
+            RepeatEnd::On { date: local.date().to_string() }
+        }
+    } else {
+        RepeatEnd::Never
+    };
+
+    RecurrenceControls {
+        repeat: repeat.into(),
+        weekly_days: days.into_iter().map(|day| day.text().to_string()).collect(),
+        repeat_end,
+    }
 }
 
 /// The `UNTIL` value that ends a series immediately before `before_ms`.
@@ -613,28 +916,12 @@ pub(crate) fn has_count(rule: &str) -> bool {
         .any(|part| part.split('=').next().unwrap_or_default().eq_ignore_ascii_case("COUNT"))
 }
 
-/// Which Repeat option, if any, represents `rule` exactly.
-///
-/// Exact string equality against what [`rrule_for`] authors, deliberately —
-/// not a parse. A rule carrying `INTERVAL`, `COUNT`, `UNTIL`, `EXDATE` or a
-/// `BYDAY` we did not write is `custom`, and the UI must then refuse to
-/// overwrite it. Being generous here (parsing `FREQ` and ignoring the rest)
-/// is exactly how "every 2nd Tuesday" becomes "weekly" behind the user's back.
-///
-/// Called once, on the read side: `events::event_detail_impl` puts the answer
-/// on `EventDetail::repeat` so the Repeat control has it without re-deriving
-/// it. No write command needs it — a write is told which option the user
-/// picked and maps it forward through [`rrule_for`].
-pub(crate) fn repeat_from_rrule(rule: Option<&str>) -> String {
-    let Some(rule) = rule else {
-        return "never".into();
-    };
-    for candidate in ["daily", "weekdays", "weekly", "monthly", "yearly"] {
-        if rrule_for(candidate).as_deref() == Some(rule) {
-            return candidate.into();
-        }
-    }
-    "custom".into()
+/// Which Repeat option represents `rule` completely. Kept as a small wrapper
+/// for callers/tests interested in only that one field; the full read side
+/// uses [`recurrence_controls_from_rrule`] once and takes all three controls.
+#[cfg(test)]
+pub(crate) fn repeat_from_rrule(rule: Option<&str>, is_all_day: bool, tz: &str) -> String {
+    recurrence_controls_from_rrule(rule, is_all_day, tz).repeat
 }
 
 #[cfg(test)]
@@ -976,6 +1263,8 @@ mod tests {
             },
             tz: "Europe/Sofia".into(),
             repeat: None,
+            weekly_days: None,
+            repeat_end: None,
             guests: None,
             reminders: None,
         }
@@ -998,9 +1287,129 @@ mod tests {
     fn every_rule_we_author_reads_back_as_itself() {
         for r in ["daily", "weekdays", "weekly", "monthly", "yearly"] {
             let rule = rrule_for(r).unwrap();
-            assert_eq!(repeat_from_rrule(Some(&rule)), r, "round trip failed for {r}");
+            assert_eq!(repeat_from_rrule(Some(&rule), false, "UTC"), r, "round trip failed for {r}");
         }
-        assert_eq!(repeat_from_rrule(None), "never");
+        assert_eq!(repeat_from_rrule(None, false, "UTC"), "never");
+    }
+
+    #[test]
+    fn every_nonempty_weekday_pattern_round_trips_without_losing_a_day() {
+        for mask in 1_u8..128 {
+            let days = WeekdayCode::ALL
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, day)| (mask & (1 << i) != 0).then_some(day))
+                .collect::<Vec<_>>();
+            let rule = rrule_for_input(
+                "weekly", Some(&days), None, &base().when, "UTC",
+            ).unwrap().unwrap();
+            let expected = days.iter().map(|day| day.text().to_string()).collect::<Vec<_>>();
+            let controls = recurrence_controls_from_rrule(Some(&rule), false, "UTC");
+            assert_eq!(controls.weekly_days, expected, "{rule}");
+            // Monday–Friday is also the existing "Every weekday" preset.
+            // The labels may alias, but the selected days must never change.
+            let expected_repeat = if rule == "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR" {
+                "weekdays"
+            } else {
+                "weekly"
+            };
+            assert_eq!(controls.repeat, expected_repeat, "{rule}");
+        }
+    }
+
+    #[test]
+    fn weekly_days_are_canonical_and_duplicate_clicks_cannot_duplicate_byday() {
+        let rule = rrule_for_input(
+            "weekly",
+            Some(&[WeekdayCode::Fr, WeekdayCode::Mo, WeekdayCode::Fr, WeekdayCode::We]),
+            None,
+            &base().when,
+            "UTC",
+        ).unwrap();
+        assert_eq!(rule.as_deref(), Some("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"));
+    }
+
+    #[test]
+    fn the_weekly_pattern_wire_shape_is_typed_and_builds_byday() {
+        let input: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "UTC",
+            "repeat": "weekly",
+            "weeklyDays": ["FR", "MO", "WE"]
+        }))
+        .unwrap();
+        assert_eq!(
+            fields_from_input(input).unwrap().recurrence,
+            Some(Some("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR".into()))
+        );
+
+        let invalid = serde_json::from_value::<EventInput>(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_i64, "endMs": 2_i64 },
+            "tz": "UTC", "repeat": "weekly", "weeklyDays": ["XX"]
+        }));
+        assert!(invalid.is_err(), "an unknown weekday must fail before a write");
+    }
+
+    #[test]
+    fn repeat_endings_build_valid_rules_and_read_back_without_loss() {
+        let counted: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "Europe/Sofia", "repeat": "weekly",
+            "weeklyDays": ["MO", "WE", "FR"],
+            "repeatEnd": { "kind": "after", "count": 8 }
+        })).unwrap();
+        let counted_rule = fields_from_input(counted).unwrap().recurrence.unwrap().unwrap();
+        assert_eq!(counted_rule, "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=8");
+        let controls = recurrence_controls_from_rrule(
+            Some(&counted_rule), false, "Europe/Sofia",
+        );
+        assert_eq!(controls.repeat, "weekly");
+        assert_eq!(controls.weekly_days, ["MO", "WE", "FR"]);
+        assert_eq!(controls.repeat_end, RepeatEnd::After { count: 8 });
+
+        let timed: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "Europe/Sofia", "repeat": "daily",
+            "repeatEnd": { "kind": "on", "date": "2026-08-10" }
+        })).unwrap();
+        let timed_rule = fields_from_input(timed).unwrap().recurrence.unwrap().unwrap();
+        assert_eq!(timed_rule, "RRULE:FREQ=DAILY;UNTIL=20260810T205959Z");
+        assert_eq!(
+            recurrence_controls_from_rrule(Some(&timed_rule), false, "Europe/Sofia").repeat_end,
+            RepeatEnd::On { date: "2026-08-10".into() },
+        );
+
+        let all_day: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "allDay", "startDate": "2026-08-03",
+                      "endDate": "2026-08-04" },
+            "tz": "Not/AZone", "repeat": "monthly",
+            "repeatEnd": { "kind": "on", "date": "2026-12-31" }
+        })).unwrap();
+        let all_day_rule = fields_from_input(all_day).unwrap().recurrence.unwrap().unwrap();
+        assert_eq!(all_day_rule, "RRULE:FREQ=MONTHLY;UNTIL=20261231");
+        assert_eq!(
+            recurrence_controls_from_rrule(Some(&all_day_rule), true, "Not/AZone").repeat_end,
+            RepeatEnd::On { date: "2026-12-31".into() },
+        );
+    }
+
+    #[test]
+    fn invalid_repeat_endings_are_refused_before_any_write() {
+        for end in [
+            serde_json::json!({ "kind": "after", "count": 0 }),
+            serde_json::json!({ "kind": "on", "date": "2026-02-31" }),
+            serde_json::json!({ "kind": "on", "date": "2026-01-01" }),
+        ] {
+            let input: EventInput = serde_json::from_value(serde_json::json!({
+                "when": { "kind": "allDay", "startDate": "2026-08-03",
+                          "endDate": "2026-08-04" },
+                "tz": "UTC", "repeat": "daily", "repeatEnd": end,
+            })).unwrap();
+            assert!(fields_from_input(input).is_err(), "accepted {end}");
+        }
     }
 
     /// The property that stops a silent overwrite: a rule the dropdown cannot
@@ -1011,11 +1420,15 @@ mod tests {
         for exotic in [
             "RRULE:FREQ=MONTHLY;BYDAY=-1FR",
             "RRULE:FREQ=WEEKLY;INTERVAL=2",
-            "RRULE:FREQ=DAILY;COUNT=5",
-            "RRULE:FREQ=WEEKLY;BYDAY=MO,WE",
-            "RRULE:FREQ=WEEKLY;UNTIL=20261231T000000Z",
+            "RRULE:FREQ=WEEKLY;BYDAY=MO,MO",
+            "RRULE:FREQ=WEEKLY;BYDAY=1MO",
+            "RRULE:FREQ=WEEKLY;BYDAY=MO,WE;WKST=SU",
+            "RRULE:FREQ=WEEKLY;BYDAY=XX",
+            "RRULE:FREQ=DAILY;COUNT=0",
+            "RRULE:FREQ=DAILY;COUNT=5;UNTIL=20261231T000000Z",
+            "RRULE:FREQ=DAILY;UNTIL=20261231",
         ] {
-            assert_eq!(repeat_from_rrule(Some(exotic)), "custom", "{exotic}");
+            assert_eq!(repeat_from_rrule(Some(exotic), false, "UTC"), "custom", "{exotic}");
         }
     }
 
@@ -1165,16 +1578,16 @@ mod tests {
     fn an_absent_repeat_and_an_explicit_never_are_different_things() {
         let mut input = sample_input();
         input.repeat = None;
-        assert_eq!(fields_from_input(input).recurrence, None);
+        assert_eq!(fields_from_input(input).unwrap().recurrence, None);
 
         let mut input = sample_input();
         input.repeat = Some("never".into());
-        assert_eq!(fields_from_input(input).recurrence, Some(None));
+        assert_eq!(fields_from_input(input).unwrap().recurrence, Some(None));
 
         let mut input = sample_input();
         input.repeat = Some("weekly".into());
         assert_eq!(
-            fields_from_input(input).recurrence,
+            fields_from_input(input).unwrap().recurrence,
             Some(Some("RRULE:FREQ=WEEKLY".into()))
         );
     }
@@ -1196,7 +1609,7 @@ mod tests {
         )
         .expect("the timed payload the UI sends must deserialize");
         assert_eq!(
-            fields_from_input(timed).when,
+            fields_from_input(timed).unwrap().when,
             When::Timed { start_ms: 1_785_398_400_000, end_ms: 1_785_400_200_000 }
         );
 
@@ -1207,7 +1620,7 @@ mod tests {
         )
         .expect("the all-day payload the UI sends must deserialize");
         assert_eq!(
-            fields_from_input(all_day).when,
+            fields_from_input(all_day).unwrap().when,
             When::AllDay { start_date: "2026-08-10".into(), end_date: "2026-08-11".into() }
         );
     }
@@ -1223,7 +1636,7 @@ mod tests {
         )
         .expect("the reminders payload the UI sends must deserialize");
         assert_eq!(
-            fields_from_input(input).reminders,
+            fields_from_input(input).unwrap().reminders,
             Some(RemindersInput {
                 use_default: false,
                 overrides: vec![ReminderInput { method: "popup".into(), minutes: 15 }],

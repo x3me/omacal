@@ -3654,6 +3654,53 @@ test.describe('EventForm', () => {
     await expect(custom).toHaveText('Custom · Every 2 weeks');
   });
 
+  test('Weekly exposes SMTWRFS buttons and saves the pushed day pattern', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('weekly');
+
+    const days = page.getByRole('group', { name: 'Repeat on' });
+    await expect(days.getByRole('button')).toHaveCount(7);
+    await expect(days.getByRole('button', { name: 'Wednesday' })).toHaveAttribute('aria-pressed', 'true');
+    await days.getByRole('button', { name: 'Monday' }).click();
+    await days.getByRole('button', { name: 'Friday' }).click();
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields.repeat).toBe('weekly');
+    expect(saved.fields.weeklyDays).toEqual(['MO', 'WE', 'FR']);
+  });
+
+  test('a repeating event can end on a date or after a number of occurrences', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('weekly');
+
+    const ends = page.getByLabel('Repeat ends');
+    await expect(ends).toHaveValue('never');
+    await ends.selectOption('on');
+    await page.getByLabel('Repeat end date').fill('2026-09-30');
+    await page.getByRole('button', { name: 'Create' }).click();
+    let [saved] = await saves(page);
+    expect(saved.fields.repeatEnd).toEqual({ kind: 'on', date: '2026-09-30' });
+
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('daily');
+    await page.getByLabel('Repeat ends').selectOption('after');
+    await page.getByLabel('Number of occurrences').fill('12');
+    await page.getByRole('button', { name: 'Create' }).click();
+    [saved] = (await saves(page)).slice(-1);
+    expect(saved.fields.repeatEnd).toEqual({ kind: 'after', count: 12 });
+  });
+
+  test('an invalid repeat ending is named and never saved', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('daily');
+    await page.getByLabel('Repeat ends').selectOption('after');
+    await page.getByLabel('Number of occurrences').fill('0');
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.getByTestId('form-error')).toContainText('at least 1 occurrence');
+    expect(await saves(page)).toEqual([]);
+  });
+
   test('an event with guests says the choice is on the buttons, not on Save', async ({ page }) => {
     // **This replaces "Saving will notify 4 guests."** That sentence was true
     // when `update_event` was handed `all` unconditionally; spec §3 makes it a
@@ -3744,6 +3791,7 @@ test.describe('EventForm', () => {
     await page.getByRole('button', { name: 'Save' }).click();
     const [saved] = await saves(page);
     expect(saved.fields.repeat).toBe('weekly');
+    expect(saved.fields.weeklyDays).toEqual(['WE']);
   });
 
   /**

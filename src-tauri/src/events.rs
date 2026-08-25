@@ -45,14 +45,18 @@ pub struct EventDetail {
     /// the UI.
     ///
     /// Deliberately not derivable from `recurrence` on the TypeScript side.
-    /// That function decides by *exact string equality* against what
-    /// [`crate::write::rrule_for`] authors, and the point of exact equality is
-    /// that one authority decides what omacal can express — a second copy of
-    /// the table in the UI drifts the moment either side gains an option, and
-    /// the failure mode is silent: a rule the app cannot express gets treated
-    /// as one it can, and the next save overwrites "every 2nd Tuesday" with
-    /// "weekly" for the whole guest list.
+    /// The Rust authority matches base rules exactly and admits only one
+    /// strictly parsed extension: plain weekly `BYDAY`, whose every fact is
+    /// represented by `weekly_days`, plus COUNT/UNTIL endings represented by
+    /// `repeat_end`. A second copy in the UI could drift and
+    /// silently turn "every 2nd Tuesday" into "weekly" on the next save.
     pub repeat: String,
+    /// The Sunday-first weekday codes in a plain weekly `BYDAY` rule. Empty
+    /// for bare weekly (whose day is DTSTART) and for every other cadence.
+    pub weekly_days: Vec<String>,
+    /// Whether the representable recurrence is unbounded, ends on a calendar
+    /// date, or stops after a fixed number of occurrences.
+    pub repeat_end: crate::write::RepeatEnd,
     pub color: Option<String>,
     pub organizer_email: Option<String>,
     pub self_response: Option<String>,
@@ -155,6 +159,9 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         None => (None, None),
     };
 
+    let recurrence_controls = crate::write::recurrence_controls_from_rrule(
+        event.recurrence.as_deref(), event.is_all_day, &event.start_tz,
+    );
     Ok(EventDetail {
         id: event.id,
         calendar_id: event.calendar_id,
@@ -168,7 +175,9 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         end_date,
         is_all_day: event.is_all_day,
         is_recurring,
-        repeat: crate::write::repeat_from_rrule(event.recurrence.as_deref()),
+        repeat: recurrence_controls.repeat,
+        weekly_days: recurrence_controls.weekly_days,
+        repeat_end: recurrence_controls.repeat_end,
         recurrence: event.recurrence,
         color: event.color_hex,
         organizer_email: event.organizer_email,
@@ -740,7 +749,8 @@ pub async fn create_event(
     fields: crate::write::EventInput,
     send_updates: String,
 ) -> Result<EventDetail, String> {
-    create_impl(&state, calendar_id, crate::write::fields_from_input(fields), &send_updates)
+    let fields = crate::write::fields_from_input(fields)?;
+    create_impl(&state, calendar_id, fields, &send_updates)
         .await
         .map_err(|e| crate::errors::user_facing(&e))
         .inspect(|_| crate::upcoming::refresh_soon(state.pool.clone(), state.demo))
@@ -1253,12 +1263,13 @@ pub async fn update_event(
     fields: crate::write::EventInput,
     send_updates: String,
 ) -> Result<EventDetail, String> {
+    let fields = crate::write::fields_from_input(fields)?;
     update_impl(
         &state,
         id,
         &scope,
         occurrence_start_ms,
-        crate::write::fields_from_input(fields),
+        fields,
         &send_updates,
     )
     .await
@@ -3442,8 +3453,8 @@ mod tests {
     /// *show*, this tells it whether the Repeat control may be used at all.
     ///
     /// Computed here rather than in TypeScript on purpose — `repeat_from_rrule`
-    /// decides by exact string equality against what `rrule_for` authors, and a
-    /// second copy of that table in the UI would drift. Three different rules
+    /// owns both the exact base rules and the strict plain-weekly grammar, and
+    /// a second copy of either in the UI would drift. Three different rules
     /// producing three different answers is what makes this test able to fail:
     /// a stub returning any one constant is caught by the other two.
     #[tokio::test]
@@ -3457,6 +3468,12 @@ mod tests {
 
         // A rule `rrule_for` authors, matched exactly.
         assert_eq!(detail_for(Some("RRULE:FREQ=WEEKLY")).await.repeat, "weekly");
+        let patterned = detail_for(Some("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR")).await;
+        assert_eq!(patterned.repeat, "weekly");
+        assert_eq!(patterned.weekly_days, ["MO", "WE", "FR"]);
+        let counted = detail_for(Some("RRULE:FREQ=DAILY;COUNT=8")).await;
+        assert_eq!(counted.repeat, "daily");
+        assert_eq!(counted.repeat_end, crate::write::RepeatEnd::After { count: 8 });
         // A rule it does not, and could not: the form must refuse to overwrite it.
         assert_eq!(
             detail_for(Some("RRULE:FREQ=WEEKLY;INTERVAL=2")).await.repeat,
@@ -3590,7 +3607,8 @@ mod tests {
         let mut expected = [
             "id", "calendar_id", "title", "description", "location",
             "conference_uri", "start_ms", "end_ms", "start_date", "end_date",
-            "is_all_day", "is_recurring", "recurrence", "repeat", "color",
+            "is_all_day", "is_recurring", "recurrence", "repeat", "weekly_days",
+            "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit",
             "attendees", "reminders", "calendar_default_reminders",
         ];

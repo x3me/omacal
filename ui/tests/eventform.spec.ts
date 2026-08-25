@@ -3,8 +3,11 @@ import { offerableCalendarId, type Calendar } from '../src/lib/calendars';
 import type { EventDetail } from '../src/lib/eventdetail';
 import {
   addGuest, blankValue, blankValueAt, endAfterStart, isAddress, mailableGuests, pastedValue,
-  previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests, shiftedEndDate,
-  toEventInput, toggledGuestOptional, valueFromDetail, whenOf, type EventFormValue,
+  previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
+  repeatEndProblem, sameRepeatEnd, sameWeeklyDays, shiftedEndDate,
+  toEventInput, toggledGuestOptional,
+  toggledWeeklyDay, valueFromDetail, weekdayCodeForDate, whenOf,
+  type EventFormValue,
 } from '../src/lib/eventform';
 
 /** How long a **timed** value is, in ms.
@@ -61,6 +64,93 @@ test.describe('offerableCalendarId', () => {
     // returning a reader here would defeat the whole function.
     expect(offerableCalendarId(3, [cal(3, 'reader'), cal(4, 'freeBusyReader')])).toBeNull();
     expect(offerableCalendarId(null, [])).toBeNull();
+  });
+});
+
+test.describe('custom weekly patterns', () => {
+  const wednesday = (): EventFormValue => ({
+    ...blankValueAt(new Date(2026, 7, 5, 9).getTime(), 1),
+    date: '2026-08-05',
+    endDate: '2026-08-05',
+    weeklyDays: ['WE'],
+  });
+
+  test('a create sends the selected days with weekly, in stable calendar order', () => {
+    const initial = wednesday();
+    const value: EventFormValue = {
+      ...initial, repeat: 'weekly', weeklyDays: ['FR', 'MO', 'WE'],
+    };
+    const sent = toEventInput(value, initial);
+    expect(sent.repeat).toBe('weekly');
+    expect(sent.weeklyDays).toEqual(['MO', 'WE', 'FR']);
+  });
+
+  test('an unchanged edit sends no recurrence, while a day change sends the whole pattern', () => {
+    const initial = { ...wednesday(), isEdit: true, isRecurring: true, repeat: 'weekly' };
+    expect(toEventInput(initial, initial).repeat).toBeUndefined();
+    expect(toEventInput(initial, initial).weeklyDays).toBeUndefined();
+
+    const changed: EventFormValue = { ...initial, weeklyDays: ['MO', 'WE', 'FR'] };
+    const sent = toEventInput(changed, initial);
+    expect(sent.repeat).toBe('weekly');
+    expect(sent.weeklyDays).toEqual(['MO', 'WE', 'FR']);
+  });
+
+  test('the last button stays selected and removing the start day advances DTSTART', () => {
+    const only = wednesday();
+    expect(toggledWeeklyDay(only, 'WE')).toBe(only);
+
+    const two: EventFormValue = { ...only, weeklyDays: ['WE', 'FR'] };
+    const friday = toggledWeeklyDay(two, 'WE');
+    expect(friday.weeklyDays).toEqual(['FR']);
+    expect(friday.date).toBe('2026-08-07');
+    expect(friday.endDate).toBe('2026-08-07');
+    expect(weekdayCodeForDate(friday.date)).toBe('FR');
+    expect(sameWeeklyDays(['FR', 'MO'], ['MO', 'FR'])).toBe(true);
+  });
+});
+
+test.describe('repeat endings', () => {
+  const recurring = (): EventFormValue => ({
+    ...blankValueAt(new Date(2026, 7, 5, 9).getTime(), 1),
+    date: '2026-08-05', endDate: '2026-08-05', repeat: 'weekly', weeklyDays: ['WE'],
+  });
+
+  test('creates COUNT and UNTIL inputs and treats ending-only edits as recurrence changes', () => {
+    const initial = recurring();
+    const counted: EventFormValue = { ...initial, repeatEnd: { kind: 'after', count: 12 } };
+    expect(toEventInput(counted, initial)).toMatchObject({
+      repeat: 'weekly', weeklyDays: ['WE'], repeatEnd: { kind: 'after', count: 12 },
+    });
+
+    const editing: EventFormValue = {
+      ...initial, isEdit: true, isRecurring: true,
+      repeatEnd: { kind: 'on', date: '2026-10-31' },
+    };
+    expect(toEventInput(editing, editing).repeat).toBeUndefined();
+    const unbounded: EventFormValue = { ...editing, repeatEnd: { kind: 'never' } };
+    expect(toEventInput(unbounded, editing)).toMatchObject({ repeat: 'weekly' });
+    expect(toEventInput(unbounded, editing).repeatEnd).toBeUndefined();
+
+    // The hidden old boundary must not travel beside `repeat: never` when a
+    // bounded series is turned off. That pair is contradictory and the
+    // backend deliberately refuses it.
+    const stopped: EventFormValue = { ...editing, repeat: 'never' };
+    expect(toEventInput(stopped, editing).repeat).toBe('never');
+    expect(toEventInput(stopped, editing).repeatEnd).toBeUndefined();
+  });
+
+  test('validates count/date endings and compares tagged values exactly', () => {
+    expect(repeatEndProblem({ ...recurring(), repeatEnd: { kind: 'after', count: 0 } }))
+      .toContain('at least 1');
+    expect(repeatEndProblem({
+      ...recurring(), repeatEnd: { kind: 'on', date: '2026-08-04' },
+    })).toContain('cannot be before');
+    expect(repeatEndProblem({
+      ...recurring(), repeatEnd: { kind: 'on', date: '2026-08-05' },
+    })).toBeNull();
+    expect(sameRepeatEnd({ kind: 'after', count: 4 }, { kind: 'after', count: 4 })).toBe(true);
+    expect(sameRepeatEnd({ kind: 'after', count: 4 }, { kind: 'after', count: 5 })).toBe(false);
   });
 });
 
@@ -473,7 +563,8 @@ const timedDetail = (startMs: number, endMs: number): EventDetail => ({
   id: 1, calendar_id: 1, title: 'Standup', description: null, location: null,
   conference_uri: null, start_ms: startMs, end_ms: endMs,
   start_date: null, end_date: null, is_all_day: false,
-  is_recurring: false, recurrence: null, repeat: 'never', color: null,
+  is_recurring: false, recurrence: null, repeat: 'never', weekly_days: [],
+  repeat_end: { kind: 'never' }, color: null,
   organizer_email: null, self_response: null, can_respond: true, can_edit: true,
   attendees: [],
   reminders: { use_default: true, overrides: [] }, calendar_default_reminders: [],
@@ -1068,7 +1159,8 @@ const allDayDetail = (startDate: string, lastDate: string, startMs: number, endM
   id: 1, calendar_id: 1, title: 'Berlin trip', description: null, location: null,
   conference_uri: null, start_ms: startMs, end_ms: endMs,
   start_date: startDate, end_date: lastDate,
-  is_all_day: true, is_recurring: false, recurrence: null, repeat: 'never', color: null,
+  is_all_day: true, is_recurring: false, recurrence: null, repeat: 'never', weekly_days: [],
+  repeat_end: { kind: 'never' }, color: null,
   organizer_email: null, self_response: null, can_respond: true, can_edit: true,
   attendees: [],
   reminders: { use_default: true, overrides: [] }, calendar_default_reminders: [],

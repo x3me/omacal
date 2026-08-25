@@ -12,9 +12,10 @@
   import SaveConfirm from './SaveConfirm.svelte';
   import type { SendUpdates } from './eventdetail';
   import {
-    CUSTOM_REPEAT, REPEAT_OPTIONS, addGuest, endAfterStart, isAddress, mailableGuests,
-    previewSpan, removableGuest, removeGuest, ruleInWords, shiftedEndDate, toEventInput,
-    toggledGuestOptional, timeProblem, toggledAllDay,
+    CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
+    mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest, removeGuest, ruleInWords,
+    repeatEndProblem, shiftedEndDate, toEventInput, toggledGuestOptional, toggledWeeklyDay, timeProblem,
+    toggledAllDay, weekdayCodeForDate,
     type EventFormResult, type EventFormValue, type Scope,
   } from './eventform';
 
@@ -119,6 +120,8 @@
     // `value.guests` with `initial.guests`, and that union is only honest
     // while `initial.guests` stays exactly what the form opened with.
     guests: [...initial.guests],
+    weeklyDays: [...initial.weeklyDays],
+    repeatEnd: { ...initial.repeatEnd },
   });
   let scope = $state<Scope>('this');
 
@@ -153,7 +156,7 @@
   let error = $state<string | null>(null);
   /** Which time input the current `error` is about, so it can be marked rather
    *  than only described. Cleared with `error` on any input. */
-  let invalidField = $state<'start' | 'end' | 'guest' | null>(null);
+  let invalidField = $state<'start' | 'end' | 'guest' | 'repeatEnd' | null>(null);
 
   /** What is in the add-a-guest box. Not part of `value`: an address nobody has
    *  pressed Add on is not on the guest list, and a save must not quietly
@@ -290,10 +293,42 @@
    *  never asked for. Bound one-way plus `onchange` rather than `bind:value`,
    *  because both fields have to move in the same update. */
   function moveStartDate(next: string) {
-    value.endDate = shiftedEndDate(value.date, next, value.endDate);
+    const previousDate = value.date;
+    const previousDay = weekdayCodeForDate(value.date);
+    const nextDay = weekdayCodeForDate(next);
+    value.endDate = shiftedEndDate(previousDate, next, value.endDate);
+    if (value.repeatEnd.kind === 'on') {
+      value.repeatEnd = {
+        kind: 'on',
+        date: shiftedEndDate(previousDate, next, value.repeatEnd.date),
+      };
+    }
     value.date = next;
+    // Keep the hidden default on the date the form now shows. Once a weekly
+    // pattern is visible, a one-day pattern follows a moved DTSTART; a
+    // multi-day pattern keeps its choices and includes the new first day so
+    // the series cannot begin with a stray occurrence outside its cadence.
+    if (value.repeat !== 'weekly'
+        || (value.weeklyDays.length === 1 && value.weeklyDays[0] === previousDay)) {
+      value.weeklyDays = [nextDay];
+    } else if (!value.weeklyDays.includes(nextDay)) {
+      value.weeklyDays = normalizedWeeklyDays([...value.weeklyDays, nextDay]);
+    }
   }
 
+  function chooseRepeatEnd(kind: string) {
+    if (kind === 'on') {
+      value.repeatEnd = value.repeatEnd.kind === 'on'
+        ? value.repeatEnd
+        : { kind: 'on', date: value.date };
+    } else if (kind === 'after') {
+      value.repeatEnd = value.repeatEnd.kind === 'after'
+        ? value.repeatEnd
+        : { kind: 'after', count: 10 };
+    } else {
+      value.repeatEnd = { kind: 'never' };
+    }
+  }
   function save() {
     error = null;
     invalidField = null;
@@ -321,6 +356,12 @@
       error = value.isAllDay
         ? 'The last day cannot be before the first day.'
         : 'The end time must be after the start time.';
+      return;
+    }
+    const repeatProblem = repeatEndProblem(value);
+    if (repeatProblem) {
+      error = repeatProblem;
+      invalidField = 'repeatEnd';
       return;
     }
     const result = { calendarId: value.calendarId, scope, fields: toEventInput(value, initial) };
@@ -603,6 +644,58 @@
         {/each}
       </select>
     </label>
+    {#if value.repeat === 'weekly'}
+      <div class="weekdayfield">
+        <span class="lab">Repeat on</span>
+        <div class="weekdayrow" role="group" aria-label="Repeat on">
+          {#each WEEKDAY_OPTIONS as day (day.code)}
+            <button
+              type="button"
+              class:active={value.weeklyDays.includes(day.code)}
+              aria-label={day.name}
+              aria-pressed={value.weeklyDays.includes(day.code)}
+              title={day.name}
+              onclick={() => (value = toggledWeeklyDay(value, day.code))}
+            >{day.short}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    {#if value.repeat !== 'never' && value.repeat !== CUSTOM_REPEAT}
+      <div class="repeatendfield">
+        <span class="lab">Ends</span>
+        <div class="repeatendrow">
+          <select
+            aria-label="Repeat ends"
+            value={value.repeatEnd.kind}
+            onchange={(e) => chooseRepeatEnd(e.currentTarget.value)}
+          >
+            <option value="never">Never</option>
+            <option value="on">On date</option>
+            <option value="after">After</option>
+          </select>
+          {#if value.repeatEnd.kind === 'on'}
+            <input
+              type="date"
+              aria-label="Repeat end date"
+              aria-invalid={invalidField === 'repeatEnd' ? 'true' : undefined}
+              bind:value={value.repeatEnd.date}
+            />
+          {:else if value.repeatEnd.kind === 'after'}
+            <label class="aftercount">
+              <input
+                type="number"
+                step="1"
+                aria-label="Number of occurrences"
+                aria-invalid={invalidField === 'repeatEnd' ? 'true' : undefined}
+                bind:value={value.repeatEnd.count}
+              />
+              <span>occurrences</span>
+            </label>
+          {/if}
+        </div>
+      </div>
+    {/if}
     {#if isCustom}
       <p class="hint">
         omacal cannot write this rule. Choosing any other option replaces it.
@@ -835,6 +928,23 @@
   textarea { resize: vertical; line-height: 1.45; }
   .title { font-size: 13px; }
 
+  .weekdayfield { display: flex; flex-direction: column; gap: 4px; }
+  .weekdayrow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .weekdayrow button { min-width: 0; height: 28px; padding: 0; border-radius: 999px;
+                       border: 1px solid var(--hairline); color: var(--muted);
+                       background: color-mix(in srgb, var(--text) 3%, transparent);
+                       font: 600 11px/1 inherit; cursor: pointer; }
+  .weekdayrow button:hover { color: var(--text); border-color: var(--muted); }
+  .weekdayrow button.active { color: var(--on-accent); border-color: var(--accent);
+                              background: var(--accent); }
+
+  .repeatendfield { display: flex; flex-direction: column; gap: 4px; }
+  .repeatendrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+                  align-items: center; gap: 6px; }
+  .repeatendrow > select:only-child { grid-column: 1 / -1; }
+  .aftercount { display: flex; align-items: center; gap: 5px; min-width: 0;
+                color: var(--muted); font-size: 10px; }
+  .aftercount input { width: 58px; flex: none; }
   .allday { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
   .allday input { width: auto; }
 
