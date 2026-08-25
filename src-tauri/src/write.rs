@@ -1383,7 +1383,7 @@ mod tests {
             "conference": "zoom"
         }))
         .unwrap();
-        let zoom = fields_from_input(zoom);
+        let zoom = fields_from_input(zoom).unwrap();
         assert!(zoom.create_zoom, "zoom did not become an external create operation");
         assert!(zoom.conference.is_none(), "zoom leaked into Google conferenceData");
     }
