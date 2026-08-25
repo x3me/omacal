@@ -1658,6 +1658,19 @@ test.describe('App', () => {
     expect(synced, 'nothing was created, so nothing may sync as if it was').toBe(0);
   });
 
+  test('saving the Zoom choice carries its API-create instruction to the event command', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('n');
+    await newForm(page).getByLabel('Title', { exact: true }).fill('Zoom planning');
+    await newForm(page).getByLabel('Add video call').selectOption('zoom');
+    await newForm(page).getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(newForm(page)).toHaveCount(0);
+
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.conference).toBe('zoom');
+    expect(args.fields.location).toBeNull();
+  });
+
   /**
    * The whole chain of the default-calendar setting, in one pass: chosen in
    * Settings, told to `App` through `onsettingschange`, honoured by the next

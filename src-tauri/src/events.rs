@@ -775,7 +775,7 @@ pub async fn create_event(
 async fn create_impl(
     state: &AppState,
     calendar_id: i64,
-    fields: crate::write::EventFields,
+    mut fields: crate::write::EventFields,
     send_updates: &str,
 ) -> anyhow::Result<EventDetail> {
     if state.demo {
@@ -786,16 +786,6 @@ async fn create_impl(
     // row is read (reminders spec §4).
     if let Some(r) = &fields.reminders {
         crate::write::validate_reminders(r).map_err(|m| anyhow::anyhow!(m))?;
-    }
-
-    // A CalDAV calendar takes the resource path: rewrite, etag-guarded PUT,
-    // resync. `send_updates` does not travel — CalDAV has no notify question,
-    // and the form never asks one on these calendars.
-    if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
-        if fields.conference.is_some() {
-            anyhow::bail!("Google Meet can only be added to a Google calendar");
-        }
-        return crate::caldav_write::create(state, calendar_id, fields).await;
     }
 
     let (cal_google_id, access_role, account_email, cal_tz) =
@@ -813,9 +803,28 @@ async fn create_impl(
         anyhow::bail!("this calendar is not writable from omacal");
     }
 
+    // A CalDAV calendar takes the resource path: rewrite, etag-guarded PUT,
+    // resync. Zoom is independent of the calendar provider, so it is
+    // materialised into Location first; Google Meet remains unavailable here.
+    // `send_updates` does not travel — CalDAV has no notify question, and the
+    // form never asks one on these calendars.
+    if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
+        if fields.conference.is_some() {
+            anyhow::bail!("Google Meet can only be added to a Google calendar");
+        }
+        materialize_zoom(&mut fields, false).await?;
+        return crate::caldav_write::create(state, calendar_id, fields).await;
+    }
+
     let cfg = crate::load_config()?;
     let token = crate::access_token_for(state, &cfg, &account_email).await?;
     let client = omacal_google::CalendarClient::new(crate::GOOGLE_CALENDAR_API, &token);
+
+    // Google credentials are proven usable before the external Zoom resource
+    // is created. There is no cross-provider transaction, but this ordering
+    // avoids the common orphan: an otherwise-valid form on a disconnected
+    // calendar account.
+    materialize_zoom(&mut fields, false).await?;
 
     let id = create_via_client(
         &state.pool, calendar_id, &cal_google_id, &cal_tz, fields, send_updates, &client,
@@ -832,6 +841,36 @@ async fn create_impl(
         tracing::error!(%e, id, "created and stored, but the read-back failed");
         anyhow::anyhow!(CREATED_NOT_STORED)
     })
+}
+
+/// Turns the one-shot Zoom instruction into the durable attendee URL calendar
+/// providers understand. On a Google edit, selecting Zoom also removes any
+/// structured conference previously attached to the event; on a create (or a
+/// CalDAV edit), there is no Google conference operation to send.
+async fn materialize_zoom(
+    fields: &mut crate::write::EventFields,
+    remove_google_conference: bool,
+) -> anyhow::Result<()> {
+    if !fields.create_zoom {
+        return Ok(());
+    }
+    let join_url = crate::zoom::create_meeting(fields).await?;
+    fields.location = Some(location_with_zoom(fields.location.as_deref(), &join_url));
+    fields.create_zoom = false;
+    fields.conference = remove_google_conference.then_some(crate::write::ConferenceAction::Remove);
+    Ok(())
+}
+
+fn location_with_zoom(location: Option<&str>, join_url: &str) -> String {
+    let clean = location.unwrap_or_default().trim();
+    if clean.contains(join_url) {
+        return clean.to_string();
+    }
+    if clean.is_empty() {
+        format!("Zoom: {join_url}")
+    } else {
+        format!("{clean} · Zoom: {join_url}")
+    }
 }
 
 /// The request-building and local write-back half of [`create_impl`], with
@@ -1068,6 +1107,7 @@ pub(crate) fn edit_patch_body(
         // own settings, not against a before-side this struct would carry.
         reminders: None,
         conference: None,
+        create_zoom: false,
     };
 
     let anchor = if is_recurring(&ev.recurrence, &ev.recurring_event_id) {
@@ -1317,7 +1357,7 @@ async fn update_impl(
     id: i64,
     scope: &str,
     occurrence_start_ms: i64,
-    fields: crate::write::EventFields,
+    mut fields: crate::write::EventFields,
     send_updates: &str,
 ) -> anyhow::Result<EventDetail> {
     if state.demo {
@@ -1339,25 +1379,6 @@ async fn update_impl(
     // (reminders spec §4).
     if let Some(r) = &fields.reminders {
         crate::write::validate_reminders(r).map_err(|m| anyhow::anyhow!(m))?;
-    }
-
-    // The CalDAV path, decided off the event's own calendar — see
-    // `create_impl` for the shape.
-    {
-        let cal_id: Option<i64> =
-            sqlx::query_scalar("SELECT calendar_id FROM events WHERE id = ?1")
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await?;
-        if let Some(cal_id) = cal_id {
-            if crate::caldav_write::is_caldav_calendar(&state.pool, cal_id).await? {
-                if fields.conference.is_some() {
-                    anyhow::bail!("Google Meet can only be added to a Google calendar");
-                }
-                return crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields)
-                    .await;
-            }
-        }
     }
 
     let (ev, access_role, cal_google_id, account_email) =
@@ -1382,9 +1403,22 @@ async fn update_impl(
         .await?
         .ok_or_else(|| anyhow::anyhow!("that calendar is no longer here"))?;
 
+    // The CalDAV path, now that the row and its writability have both been
+    // established. Zoom is provider-independent and becomes a Location URL;
+    // Google Meet still has no meaning in an ICS rewrite.
+    if crate::caldav_write::is_caldav_calendar(&state.pool, ev.calendar_id).await? {
+        if fields.conference.is_some() {
+            anyhow::bail!("Google Meet can only be added to a Google calendar");
+        }
+        materialize_zoom(&mut fields, false).await?;
+        return crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields).await;
+    }
+
     let cfg = crate::load_config()?;
     let token = crate::access_token_for(state, &cfg, &account_email).await?;
     let client = omacal_google::CalendarClient::new(crate::GOOGLE_CALENDAR_API, &token);
+
+    materialize_zoom(&mut fields, true).await?;
 
     update_via_client(
         &state.pool,
@@ -3840,7 +3874,22 @@ mod tests {
                 }],
             }),
             conference: None,
+            create_zoom: false,
         }
+    }
+
+    #[test]
+    fn a_created_zoom_link_keeps_the_place_and_is_never_appended_twice() {
+        let link = "https://us02web.zoom.us/j/123456789?pwd=x";
+        assert_eq!(location_with_zoom(None, link), format!("Zoom: {link}"));
+        assert_eq!(
+            location_with_zoom(Some("Board room"), link),
+            format!("Board room · Zoom: {link}")
+        );
+        assert_eq!(
+            location_with_zoom(Some(&format!("Board room · Zoom: {link}")), link),
+            format!("Board room · Zoom: {link}")
+        );
     }
 
     /// The `start` and `end` a timed pair renders to, through the very
@@ -4369,6 +4418,7 @@ mod tests {
             // Likewise untouched, for the same reason.
             reminders: None,
             conference: None,
+            create_zoom: false,
         }
     }
 

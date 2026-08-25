@@ -108,6 +108,14 @@ used an earlier build: correcting a typo in an address no longer notifies
 everyone. The organizer cannot be removed, and removing *yourself* is offered
 but is not the same as declining — that is what the RSVP buttons are for.
 
+**Video calls** — **Add Video Call** offers Google Meet and Zoom. Google Meet
+is created through the target Google Calendar; Zoom uses its own one-time PKCE
+connection under **Settings → Accounts**, then creates a unique scheduled
+meeting as the event is saved. The returned attendee link is attached to the
+event before invitations go out. Pasting an existing `zoom.us` link remains a
+no-login fallback, and existing meeting links are never removed when Zoom is
+disconnected.
+
 **Invitations** — a new invitation posts a desktop notification the moment
 sync sees it, and the notification **stays on screen until you deal with it**:
 on Omarchy, clicking it accepts the whole series (right-click dismisses
@@ -224,6 +232,21 @@ keyring and your calendar data stays in a local database: there are no
 servers behind this app. Setup walkthrough:
 [`docs/running-on-macos.md`](docs/running-on-macos.md) (the Cloud-project
 steps are the same on Linux).
+
+### Optional Zoom meeting creation
+
+Automatic Zoom creation uses a separate native/public OAuth client; it never
+uses the Google credentials above and has no client secret. Register a
+user-managed OAuth app in the Zoom App Marketplace with Authorization Code +
+PKCE, allow the loopback redirect `http://127.0.0.1`, and grant the granular
+scope `meeting:write:meeting`. Add its public client id to the same file:
+
+    zoom_public_client_id = "YOUR_ZOOM_PUBLIC_CLIENT_ID"
+
+Restart omacal, then choose **Settings → Accounts → Connect Zoom**. The access
+and rotating refresh tokens live only in the OS keyring. A source build can use
+the compile-time `OMACAL_ZOOM_PUBLIC_CLIENT_ID` instead; as with Google, a
+present `config.toml` wins over embedded values.
 
 ## Design and history
 

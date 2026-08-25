@@ -10,6 +10,7 @@
   import { REMINDER_UNITS, reminderAmountOf, reminderMax, reminderUnitOf } from './reminders';
   import { offerableCalendarId, writableCalendars, type Calendar } from './calendars';
   import SaveConfirm from './SaveConfirm.svelte';
+  import { getZoomStatus, type ZoomStatus } from './zoom';
   import type { SendUpdates } from './eventdetail';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
@@ -129,6 +130,8 @@
   // preview and save validation never read a stale second source of truth.
   // svelte-ignore state_referenced_locally
   let zoomDraft = $state(initial.videoCall?.provider === 'zoom' ? initial.videoCall.uri ?? '' : '');
+  let zoomStatus = $state<ZoomStatus | null>(null);
+  const zoomCanCreate = $derived(zoomStatus?.configured === true && zoomStatus.connected === true);
   const videoChoice = $derived(value.videoCall?.provider ?? 'none');
   let scope = $state<Scope>('this');
 
@@ -179,6 +182,10 @@
   let listDismissed = $state(false);
   /** The keyboard's row in the list, `-1` when the pointer owns it. */
   let hi = $state(-1);
+
+  onMount(() => {
+    getZoomStatus().then((status) => (zoomStatus = status)).catch(() => (zoomStatus = null));
+  });
 
   /**
    * Who to offer for what is typed so far: substring match on address or
@@ -337,11 +344,11 @@
     }
   }
 
-  /** Selects the conferencing provider without pretending Zoom can be
-   * manufactured from calendar credentials. Google Meet is a server-side
-   * create request; Zoom is a real meeting URL, scheduled in Zoom and pasted
-   * here. Restoring the provider the form opened with restores its URI and
-   * source too, which makes switching away and back a no-op on the wire. */
+  /** Selects the conferencing provider. Google Meet is created through the
+   * calendar account; a blank Zoom value asks the independently-connected
+   * Zoom account to create one, while a pasted URL remains the fallback.
+   * Restoring the provider the form opened with restores its URI and source
+   * too, which makes switching away and back a no-op on the wire. */
   function chooseVideoCall(choice: string) {
     if (choice === videoChoice || choice === 'other') return;
     if (choice === 'none') {
@@ -383,7 +390,7 @@
       error = 'There is no calendar here you can write to.';
       return;
     }
-    const videoProblem = videoCallProblem(value, provider);
+    const videoProblem = videoCallProblem(value, provider, zoomCanCreate);
     if (videoProblem) {
       error = videoProblem;
       invalidField = 'video';
@@ -613,7 +620,7 @@
             type="url"
             aria-label="Zoom meeting link"
             aria-invalid={invalidField === 'video' ? 'true' : undefined}
-            placeholder="https://zoom.us/j/…"
+            placeholder={zoomCanCreate ? 'Existing Zoom link (optional)' : 'https://zoom.us/j/…'}
             value={zoomDraft}
             oninput={(e) => updateZoomCall(e.currentTarget.value)}
           />
@@ -621,7 +628,15 @@
             >Schedule ↗</a
           >
         </div>
-        <p class="videohint">Schedule in Zoom, then paste its invite link here.</p>
+        {#if zoomCanCreate && zoomDraft.trim() === ''}
+          <p class="videohint">A unique Zoom meeting will be created when you save.</p>
+        {:else if zoomCanCreate}
+          <p class="videohint">This existing Zoom link will be used; clear it to create a new meeting.</p>
+        {:else if zoomStatus?.configured}
+          <p class="videohint">Connect Zoom in Settings → Accounts, or paste an existing link.</p>
+        {:else}
+          <p class="videohint">Configure Zoom in Settings → Accounts, or paste an existing link.</p>
+        {/if}
       {:else if videoChoice === 'other'}
         <p class="videohint">This event’s existing video call will be preserved.</p>
       {/if}
