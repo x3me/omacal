@@ -40,8 +40,8 @@ export type Shortcut = {
    *  than in a second map beside it — that map was `KEY_VIEW`, and a table
    *  that lists a key without saying what it does is half the drift back. */
   view?: View;
-  /** Whether the handler must consume the keystroke. See `App` for the one
-   *  case, which is `/` and WebKitGTK. */
+  /** Whether the handler must consume the keystroke. `/` and `q` protect the
+   * fields they mount and focus in WebKitGTK. */
   consumes?: true;
 };
 
@@ -60,6 +60,7 @@ export const SHORTCUTS = [
   { id: 'search',   key: '/', label: '/', group: 'Getting around', consumes: true },
 
   { id: 'create',   key: 'n', label: 'n', group: 'Doing things' },
+  { id: 'quickCreate', key: 'q', label: 'q', group: 'Doing things', consumes: true },
   { id: 'list',     key: 'f', label: 'f', group: 'Doing things' },
   { id: 'help',     key: '?', label: '?', group: 'Doing things' },
 ] as const satisfies readonly Shortcut[];
@@ -89,6 +90,7 @@ export const SHORTCUT_TEXT: Record<ShortcutId, string> = {
   next: 'Forward one step',
   today: 'Back to today',
   search: 'Search',
+  quickCreate: 'Quick add from natural language',
   create: 'New event',
   list: 'Switch between the grid and the list',
   help: 'This list',

@@ -35,6 +35,7 @@
   import EventPopover from './lib/EventPopover.svelte';
   import EventForm from './lib/EventForm.svelte';
   import SearchOverlay from './lib/SearchOverlay.svelte';
+  import QuickEventModal from './lib/QuickEventModal.svelte';
   import DeleteConfirm from './lib/DeleteConfirm.svelte';
   import MoveConfirm from './lib/MoveConfirm.svelte';
   import ViewSwitcher, { type View } from './lib/ViewSwitcher.svelte';
@@ -587,6 +588,13 @@
   /** The search overlay, open. Spec §1: it sits *over* the calendar, and
    *  closing without choosing changes nothing behind it. */
   let searchOpen = $state(false);
+  /** Captured when quick-add opens so “tomorrow” and the default slot cannot
+   * move underneath a line left open across midnight. */
+  let quickAdd = $state<{ nowMs: number; anchorDayMs: number } | null>(null);
+
+  function openQuickAdd() {
+    quickAdd = { nowMs: Date.now(), anchorDayMs: createDayMs() };
+  }
 
   /**
    * A result was chosen (spec §6): move the calendar to that date **in the
@@ -967,6 +975,30 @@
     await refreshAfterWrite();
   }
 
+  /** Quick-add's direct create. It deliberately mirrors the create arm above,
+   * including the “created on Google but not stored yet” recovery: the event
+   * already exists in that case and retrying would duplicate it and its mail. */
+  async function saveQuick(result: EventFormResult) {
+    if (!quickAdd) return;
+    quickAdd = null;
+    busy = true;
+    error = null;
+    try {
+      await createEvent(result.calendarId, result.fields, result.notify);
+    } catch (e) {
+      error = String(e);
+      if (!String(e).startsWith('The event was created on Google')) return;
+    } finally {
+      busy = false;
+    }
+    await refreshAfterWrite();
+  }
+
+  function continueQuick(value: EventFormValue) {
+    quickAdd = null;
+    form = { mode: 'create', anchor: keyboardAnchor(), initial: value };
+  }
+
   /**
    * A drop that needs asking before it writes.
    *
@@ -1143,6 +1175,7 @@
     // keeps it out of every field, which is what makes a punctuation key safe
     // to claim. Its `consumes` flag is why — see below.
     search: () => (searchOpen = true),
+    quickCreate: openQuickAdd,
     create: newEventOnAnchor,
     // `F`, joining the same bare-key family as the rest (spec §1). It is a
     // no-op in Year and Big Year, where the control it duplicates is absent —
@@ -1161,7 +1194,7 @@
     // every view; the same guard set as the bare keys keeps a paste from
     // opening a second form over one already up.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v') {
-      if (copiedEvent && !form && !pendingDelete && !searchOpen && !helpOpen) {
+      if (copiedEvent && !form && !pendingDelete && !searchOpen && !quickAdd && !helpOpen) {
         e.preventDefault();
         pasteCopied();
       }
@@ -1183,7 +1216,7 @@
     // opening a second form on top of the first is the same mistake by
     // keyboard. Escape is unaffected: each panel listens for it on `window`
     // itself.
-    if (form || pendingDelete || searchOpen || helpOpen) return;
+    if (form || pendingDelete || searchOpen || quickAdd || helpOpen) return;
 
     // Lowercased, which is what makes `H` step like `h` — the old `switch`
     // did the same, and digits and punctuation are unaffected (`'?'` and
@@ -1220,6 +1253,7 @@
     onPrev={() => step(-1)}
     onNext={() => step(1)}
     onToday={goToday}
+    onQuickAdd={openQuickAdd}
     onSearch={() => (searchOpen = true)}
     onsettingschange={(s) => {
       defaultCalendarId = s.defaultCalendarId;
@@ -1318,6 +1352,19 @@
 
 {#if searchOpen}
   <SearchOverlay onclose={() => (searchOpen = false)} onpick={goToHit} />
+{/if}
+
+{#if quickAdd}
+  <QuickEventModal
+    nowMs={quickAdd.nowMs}
+    anchorDayMs={quickAdd.anchorDayMs}
+    calendarId={createCalendarId}
+    defaultDurationMinutes={30}
+    {calendars}
+    oncreate={saveQuick}
+    onedit={continueQuick}
+    onclose={() => (quickAdd = null)}
+  />
 {/if}
 
 {#if helpOpen}

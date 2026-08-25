@@ -15,7 +15,7 @@
     status, anchorMs, weekStartMs, busy, error, calendars, view, onpick,
     onsettingschange,
     listMode, onToggleList,
-    onPrev, onNext, onToday, onSearch, onSignIn, onSync, oncalendarchange,
+    onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange,
     onWhatsNew, onRestart, onUpdate,
     invites = [], declines = [], changes = [], oninvitesanswered = () => {},
     open = $bindable(false),
@@ -45,6 +45,8 @@
      *  header was emptied on purpose (settings spec §1) and putting a
      *  permanent input back into it would undo that. */
     onSearch: () => void;
+    /** Opens the centred natural-language quick-add editor. */
+    onQuickAdd: () => void;
     /** Passed straight through to `SettingsModal` — see its own comment. */
     onsettingschange?: (s: import('./settings').AppSettings) => void;
     onSignIn: () => void; onSync: () => void; oncalendarchange: () => void;
@@ -305,6 +307,7 @@
       </button>
     {/if}
 
+    <button class="quick" aria-label="Quick add event" title="Quick add (Q)" onclick={onQuickAdd}>＋</button>
     <button class="search" aria-label="Search" title="Search (/)" onclick={onSearch}>⌕</button>
 
     <div class="menuwrap">
@@ -514,7 +517,7 @@
 
   /* A glyph, not a field. The magnifier is the one control search gets in the
      header; the overlay is where the typing happens. */
-  .search { font-size: 16px; line-height: 1; padding: 2px 8px; }
+  .search, .quick { font-size: 16px; line-height: 1; padding: 2px 8px; }
 
   /* Beside the switcher rather than inside it, and styled to sit *next to* it
      rather than as a sixth slot: the toggle is orthogonal to the view (spec

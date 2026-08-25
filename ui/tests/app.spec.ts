@@ -1412,6 +1412,167 @@ test.describe('App', () => {
     expect(args.fields.summary).toBe('Lunch');
   });
 
+  test('q quick-add previews one line and creates it directly', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+
+    const quick = page.getByRole('dialog', { name: 'Quick add event' });
+    await expect(quick).toBeVisible();
+    const source = quick.getByLabel('Describe the event');
+    await expect(source).toBeFocused();
+    await source.fill('30 min at 2pm Meet with Tim invite tim@example.com +meet');
+
+    // The interpretation is a read-only receipt, not a compact second form.
+    await expect(quick.getByText('Meet with Tim', { exact: true })).toBeVisible();
+    await expect(quick.getByText('Google Meet', { exact: true })).toBeVisible();
+    await expect(quick.getByText(/tim@example\.com.*invitations will be emailed/)).toBeVisible();
+    await expect(quick.locator('.interpretation input, .interpretation select, .interpretation textarea'))
+      .toHaveCount(0);
+
+    await quick.getByRole('button', { name: 'Create & send 1 invite' }).click();
+    await expect(quick).toHaveCount(0);
+
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.calendarId).toBe(APP_PRIMARY_CALENDAR_ID);
+    expect(args.sendUpdates).toBe('all');
+    expect(args.fields.summary).toBe('Meet with Tim');
+    expect(args.fields.guests).toEqual([{ email: 'tim@example.com', optional: false }]);
+    expect(args.fields.conference).toBe('googleMeet');
+    expect(args.fields.when.endMs - args.fields.when.startMs).toBe(30 * 60_000);
+    expect(new Date(args.fields.when.startMs).getUTCHours()).toBe(14);
+  });
+
+  test('the header entry point opens quick-add too', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Quick add event' }).click();
+    await expect(page.getByRole('dialog', { name: 'Quick add event' })).toBeVisible();
+  });
+
+  test('Continue editing carries the interpretation into the full editor', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+    const quick = page.getByRole('dialog', { name: 'Quick add event' });
+    await quick.getByLabel('Describe the event').fill(
+      'tomorrow 3p 45m Design review invite ana@example.com +meet',
+    );
+    await quick.getByRole('button', { name: 'Continue editing' }).click();
+
+    const form = newForm(page);
+    await expect(quick).toHaveCount(0);
+    await expect(form).toBeVisible();
+    await expect(form.getByLabel('Title', { exact: true })).toHaveValue('Design review');
+    await expect(form.getByLabel('Add video call')).toHaveValue('googleMeet');
+    await expect(form.locator('[data-guest="ana@example.com"]')).toBeVisible();
+    await expect(form.getByText('A unique Google Meet link will be generated when you save.'))
+      .toBeVisible();
+  });
+
+  test('Tab selects Continue editing: Space opens it, while Enter creates directly', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+    let quick = page.getByRole('dialog', { name: 'Quick add event' });
+    let source = quick.getByLabel('Describe the event');
+    await source.fill('tomorrow 3p Design review');
+    await source.press('Tab');
+    await expect(quick.getByRole('button', { name: 'Continue editing' })).toBeFocused();
+    await page.keyboard.press('Space');
+    await expect(quick).toHaveCount(0);
+    await expect(newForm(page)).toBeVisible();
+    expect(await callsTo(page, 'create_event')).toEqual([]);
+
+    await newForm(page).getByRole('button', { name: 'Cancel' }).click();
+    await page.keyboard.press('q');
+    quick = page.getByRole('dialog', { name: 'Quick add event' });
+    source = quick.getByLabel('Describe the event');
+    await source.fill('tomorrow 3p Send directly');
+    await source.press('Tab');
+    await expect(quick.getByRole('button', { name: 'Continue editing' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(quick).toHaveCount(0);
+    await expect.poll(() => callsTo(page, 'create_event')).toHaveLength(1);
+    expect((await callsTo(page, 'create_event'))[0].fields.summary).toBe('Send directly');
+  });
+
+  test('quick-add previews and creates a bounded weekly series', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+    const quick = page.getByRole('dialog', { name: 'Quick add event' });
+    const source = quick.getByLabel('Describe the event');
+    await source.fill('MWF 9am Team sync until Sep 30');
+    await expect(quick.getByText('Weekly · Mon, Wed, Fri', { exact: true })).toBeVisible();
+    await expect(quick.getByText(/On Sep 30, 2024/)).toBeVisible();
+    await source.press('Enter');
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.repeatEnd).toEqual({ kind: 'on', date: '2024-09-30' });
+  });
+
+  test('MWF quick-add previews and hands the same weekly pattern to creation', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+    const quick = page.getByRole('dialog', { name: 'Quick add event' });
+    await quick.getByLabel('Describe the event').fill('MWF at 9am Team sync');
+    await expect(quick.getByText('Weekly · Mon, Wed, Fri', { exact: true })).toBeVisible();
+    // The app fixture freezes time on Monday 29 Jan; Monday belongs to MWF,
+    // so the first occurrence is today rather than needlessly skipping ahead.
+    await expect(quick.getByText(/Mon, Jan 29, 2024.*9:00 AM/)).toBeVisible();
+
+    await quick.getByRole('button', { name: 'Continue editing' }).click();
+    const form = newForm(page);
+    const repeatOn = form.getByRole('group', { name: 'Repeat on' });
+    for (const name of ['Monday', 'Wednesday', 'Friday']) {
+      await expect(repeatOn.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'true');
+    }
+    await expect(repeatOn.getByRole('button', { name: 'Tuesday' }))
+      .toHaveAttribute('aria-pressed', 'false');
+
+    await form.getByRole('button', { name: 'Create' }).click();
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.repeat).toBe('weekly');
+    expect(args.fields.weeklyDays).toEqual(['MO', 'WE', 'FR']);
+  });
+
+  test('Make it a zoom continues into the Zoom hook and saves a pasted link', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('q');
+    const quick = page.getByRole('dialog', { name: 'Quick add event' });
+    await quick.getByLabel('Describe the event').fill('tomorrow 3p 45m Design review make it a zoom');
+
+    // Calendar credentials cannot mint a Zoom meeting, so direct creation is
+    // blocked until the real link exists; the requested provider still rides
+    // into the ordinary editor rather than being discarded.
+    await expect(quick.getByRole('button', { name: 'Create event' })).toBeDisabled();
+    await expect(quick.getByText('Paste the Zoom meeting link before creating the event.'))
+      .toBeVisible();
+    await quick.getByRole('button', { name: 'Continue editing' }).click();
+
+    const form = newForm(page);
+    const video = form.getByLabel('Add video call');
+    await expect(video).toHaveValue('zoom');
+    await expect(video.locator('option')).toHaveText([
+      'Add Video Call', 'Google Meet', 'Zoom',
+    ]);
+    const zoom = form.getByLabel('Zoom meeting link');
+    await zoom.fill('https://us02web.zoom.us/j/987654321');
+    await form.getByRole('button', { name: 'Create', exact: true }).click();
+
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.summary).toBe('Design review');
+    expect(args.fields.location).toBe('Zoom: https://us02web.zoom.us/j/987654321');
+    expect(args.fields.conference).toBeUndefined();
+  });
+
+  test('Add Video Call generates Meet from an ordinary new event', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('n');
+    const form = newForm(page);
+    await form.getByLabel('Title', { exact: true }).fill('Planning');
+    await form.getByLabel('Add video call').selectOption('googleMeet');
+    await form.getByRole('button', { name: 'Create', exact: true }).click();
+
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.conference).toBe('googleMeet');
+  });
+
   /**
    * **A create can invite people, and only a deliberate answer mails them.**
    *
