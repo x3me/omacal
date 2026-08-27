@@ -2305,7 +2305,7 @@ async fn update_via_client(
         };
         omacal_store::upsert_event(pool, &row)
             .await
-            .map_err(|error| mark_calendar_write_committed(error.into()))?;
+            .map_err(mark_calendar_write_committed)?;
     }
 
     Ok(())
@@ -2649,7 +2649,7 @@ async fn split_series(
         Some(row) => {
             omacal_store::upsert_event(pool, &row)
                 .await
-                .map_err(|error| mark_calendar_write_committed(error.into()))?;
+                .map_err(mark_calendar_write_committed)?;
         }
         None => tracing::warn!(created = %created.id,
             "the new series was created but could not be stored locally; sync will pick it up"),
@@ -2678,7 +2678,7 @@ async fn split_series(
             Some(row) => {
                 omacal_store::upsert_event(pool, &row)
                     .await
-                    .map_err(|error| mark_calendar_write_committed(error.into()))?;
+                    .map_err(mark_calendar_write_committed)?;
             }
             None => tracing::warn!(master = %master.id,
                 "the series was split but the shortened original could not be stored locally; \
