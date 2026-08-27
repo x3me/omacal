@@ -13,7 +13,7 @@ use crate::AppState;
 const AUTH_ENDPOINT: &str = "https://zoom.us/oauth/authorize";
 const TOKEN_ENDPOINT: &str = "https://zoom.us/oauth/token";
 const API_ROOT: &str = "https://api.zoom.us/v2";
-const SCOPE: &str = "meeting:write:meeting";
+const SCOPE: &str = "meeting:write:meeting meeting:delete:meeting";
 const KEYRING_ACCOUNT: &str = "zoom:oauth";
 
 pub(crate) const NOT_CONFIGURED: &str =
@@ -71,7 +71,17 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 struct MeetingResponse {
+    id: Option<u64>,
     join_url: Option<String>,
+}
+
+/// The durable identity returned by Zoom. The URL is what calendar guests
+/// use; the numeric id is retained so a calendar write that fails before
+/// attaching that URL can remove the otherwise-orphaned Zoom resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatedZoomMeeting {
+    pub id: u64,
+    pub join_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -420,7 +430,7 @@ async fn send_create(
     api_root: &str,
     token: &str,
     request: &MeetingRequest,
-) -> anyhow::Result<(reqwest::StatusCode, Option<String>)> {
+) -> anyhow::Result<(reqwest::StatusCode, Option<MeetingResponse>)> {
     let url = format!("{}/users/me/meetings", api_root.trim_end_matches('/'));
     let response = reqwest::Client::new()
         .post(url)
@@ -441,7 +451,25 @@ async fn send_create(
         tracing::warn!(%e, "Zoom meeting response was not JSON");
         anyhow::anyhow!(CREATE_FAILED)
     })?;
-    Ok((status, body.join_url))
+    Ok((status, Some(body)))
+}
+
+async fn send_delete(
+    api_root: &str,
+    token: &str,
+    meeting_id: u64,
+) -> anyhow::Result<reqwest::StatusCode> {
+    let url = format!("{}/meetings/{meeting_id}", api_root.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .delete(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!(%e, meeting_id, "Zoom meeting cleanup endpoint was unreachable");
+            anyhow::anyhow!("Zoom meeting cleanup failed")
+        })?;
+    Ok(response.status())
 }
 
 fn valid_join_url(raw: &str) -> bool {
@@ -452,26 +480,58 @@ fn valid_join_url(raw: &str) -> bool {
     url.scheme() == "https" && (host == "zoom.us" || host.ends_with(".zoom.us"))
 }
 
-/// Creates the Zoom resource and returns its attendee-facing URL. The caller
-/// owns attaching that URL to the calendar event. A 401 receives one forced
-/// refresh and one retry; every other failure is final, so a click never
-/// creates two meetings merely because the server returned an error.
-pub(crate) async fn create_meeting(fields: &EventFields) -> anyhow::Result<String> {
+/// Creates the Zoom resource and returns both its durable id and its
+/// attendee-facing URL. The caller owns attaching that URL to the calendar
+/// event. A 401 receives one forced refresh and one retry; every other failure
+/// is final, so a click never creates two meetings merely because the server
+/// returned an error.
+pub(crate) async fn create_meeting(fields: &EventFields) -> anyhow::Result<CreatedZoomMeeting> {
     let request = request_for(fields)?;
     let mut token = access_token(false).await?;
-    let (mut status, mut join_url) = send_create(API_ROOT, &token, &request).await?;
+    let (mut status, mut response) = send_create(API_ROOT, &token, &request).await?;
     if status == reqwest::StatusCode::UNAUTHORIZED {
         token = access_token(true).await?;
-        (status, join_url) = send_create(API_ROOT, &token, &request).await?;
+        (status, response) = send_create(API_ROOT, &token, &request).await?;
     }
     if !status.is_success() {
         anyhow::bail!(CREATE_FAILED);
     }
-    let join_url = join_url.filter(|u| valid_join_url(u)).ok_or_else(|| {
-        tracing::warn!("Zoom meeting response omitted a valid join_url");
+    let response = response.ok_or_else(|| anyhow::anyhow!(CREATE_FAILED))?;
+    let id = response.id.filter(|id| *id > 0).ok_or_else(|| {
+        tracing::warn!("Zoom meeting response omitted a valid id");
         anyhow::anyhow!(CREATE_FAILED)
     })?;
-    Ok(join_url)
+    let Some(join_url) = response.join_url.filter(|u| valid_join_url(u)) else {
+        tracing::warn!(
+            meeting_id = id,
+            "Zoom meeting response omitted a valid join_url"
+        );
+        // The meeting exists and its id is usable even though its attendee URL
+        // is not. Do not knowingly leave that resource behind.
+        if let Err(e) = delete_meeting(id).await {
+            tracing::warn!(%e, meeting_id = id,
+                "could not clean up a Zoom meeting with an invalid response");
+        }
+        anyhow::bail!(CREATE_FAILED);
+    };
+    Ok(CreatedZoomMeeting { id, join_url })
+}
+
+/// Deletes a Zoom meeting that could not be attached to a calendar event.
+/// `404` is success: it is already absent. As with creation, one 401 refreshes
+/// the rotating OAuth credentials and retries exactly once.
+pub(crate) async fn delete_meeting(meeting_id: u64) -> anyhow::Result<()> {
+    let mut token = access_token(false).await?;
+    let mut status = send_delete(API_ROOT, &token, meeting_id).await?;
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        token = access_token(true).await?;
+        status = send_delete(API_ROOT, &token, meeting_id).await?;
+    }
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    tracing::warn!(%status, meeting_id, "Zoom rejected meeting cleanup");
+    anyhow::bail!("Zoom meeting cleanup failed")
 }
 
 #[cfg(test)]
@@ -502,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn authorize_url_is_pkce_and_requests_only_meeting_creation() {
+    fn authorize_url_is_pkce_and_requests_only_meeting_lifecycle_access() {
         let raw = authorize_url(
             "https://zoom.example/authorize",
             "public client",
@@ -523,7 +583,7 @@ mod tests {
         );
         assert_eq!(
             query.get("scope").map(String::as_str),
-            Some("meeting:write:meeting")
+            Some("meeting:write:meeting meeting:delete:meeting")
         );
         assert_eq!(query.get("state").map(String::as_str), Some("csrf"));
     }
@@ -616,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn meeting_create_sends_the_bearer_and_reads_only_the_join_url() {
+    async fn meeting_create_sends_the_bearer_and_retains_the_cleanup_id() {
         let server = MockServer::start().await;
         let request = request_for(&fields()).unwrap();
         Mock::given(method("POST"))
@@ -630,14 +690,79 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let (status, url) = send_create(&server.uri(), "access-token", &request)
+        let (status, response) = send_create(&server.uri(), "access-token", &request)
             .await
             .unwrap();
         assert_eq!(status, reqwest::StatusCode::CREATED);
+        let response = response.unwrap();
+        assert_eq!(response.id, Some(123456789));
         assert_eq!(
-            url.as_deref(),
+            response.join_url.as_deref(),
             Some("https://us02web.zoom.us/j/123456789?pwd=x")
         );
+    }
+
+    #[tokio::test]
+    async fn meeting_delete_sends_the_bearer_to_the_retained_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/meetings/123456789"))
+            .and(header("authorization", "Bearer access-token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let status = send_delete(&server.uri(), "access-token", 123456789)
+            .await
+            .unwrap();
+        assert_eq!(status, reqwest::StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn meeting_delete_can_treat_an_already_absent_meeting_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/meetings/123456789"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let status = send_delete(&server.uri(), "access-token", 123456789)
+            .await
+            .unwrap();
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// Manual release evidence, deliberately ignored by ordinary CI. This is
+    /// the one test wiremock cannot replace: Zoom must accept the ephemeral
+    /// loopback redirect for the Marketplace app, mint real tokens, create a
+    /// meeting, and delete that same resource again. It never prints tokens.
+    #[tokio::test]
+    #[ignore = "requires OMACAL_LIVE_ZOOM=1, a Marketplace public client id, and browser consent"]
+    async fn live_marketplace_pkce_loopback_and_meeting_round_trip() {
+        assert_eq!(
+            std::env::var("OMACAL_LIVE_ZOOM").as_deref(),
+            Ok("1"),
+            "set OMACAL_LIVE_ZOOM=1 only for an intentional live test"
+        );
+        let status = connect_zoom_impl().await.unwrap();
+        assert!(status.configured && status.connected);
+
+        let mut live = fields();
+        let start_ms = crate::now_ms() + 10 * 60_000;
+        live.summary = Some("omacal Zoom Marketplace live E2E".into());
+        live.description = None;
+        live.when = When::Timed {
+            start_ms,
+            end_ms: start_ms + 30 * 60_000,
+        };
+
+        let created = create_meeting(&live).await.unwrap();
+        let valid = created.id > 0 && valid_join_url(&created.join_url);
+        let cleanup = delete_meeting(created.id).await;
+        cleanup.expect("live test created a meeting but could not delete it");
+        assert!(valid, "Zoom returned an invalid meeting id or join URL");
     }
 
     #[test]

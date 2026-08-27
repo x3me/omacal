@@ -1036,8 +1036,9 @@ async fn create_impl(
         if fields.conference.is_some() {
             anyhow::bail!("Google Meet can only be added to a Google calendar");
         }
-        materialize_zoom(&mut fields, false).await?;
-        return crate::caldav_write::create(state, calendar_id, fields, uid).await;
+        let created_zoom = materialize_zoom(&mut fields, false).await?;
+        let result = crate::caldav_write::create(state, calendar_id, fields, uid).await;
+        return finish_zoom_calendar_write(created_zoom.as_ref(), result).await;
     }
 
     let cfg = crate::load_config()?;
@@ -1048,23 +1049,23 @@ async fn create_impl(
     // is created. There is no cross-provider transaction, but this ordering
     // avoids the common orphan: an otherwise-valid form on a disconnected
     // calendar account.
-    materialize_zoom(&mut fields, false).await?;
+    let created_zoom = materialize_zoom(&mut fields, false).await?;
 
-    let id = create_via_client(
-        &state.pool, calendar_id, &cal_google_id, &cal_tz, fields, send_updates, &client,
-    )
-    .await?;
+    let result = async {
+        let id = create_via_client(
+            &state.pool, calendar_id, &cal_google_id, &cal_tz, fields, send_updates, &client,
+        )
+        .await?;
 
-    // The same guard one level up: the row is created AND stored by now, so a
-    // failed read-back must not read as a failed create either. (The stored
-    // half makes the sentence's "next sync" a mild overstatement — a mere
-    // reload would show it — but "already saved, do not create it again" is
-    // the part that matters, and one sentence for one situation beats two the
-    // safelist has to carry.)
-    event_detail_impl(state, id).await.map_err(|e| {
-        tracing::error!(%e, id, "created and stored, but the read-back failed");
-        anyhow::anyhow!(CREATED_NOT_STORED)
-    })
+        // The same guard one level up: the row is created AND stored by now,
+        // so a failed read-back must not read as a failed create either.
+        event_detail_impl(state, id).await.map_err(|e| {
+            tracing::error!(%e, id, "created and stored, but the read-back failed");
+            mark_calendar_write_committed(anyhow::anyhow!(CREATED_NOT_STORED))
+        })
+    }
+    .await;
+    finish_zoom_calendar_write(created_zoom.as_ref(), result).await
 }
 
 /// Turns the one-shot Zoom instruction into the durable attendee URL calendar
@@ -1074,15 +1075,90 @@ async fn create_impl(
 async fn materialize_zoom(
     fields: &mut crate::write::EventFields,
     remove_google_conference: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<crate::zoom::CreatedZoomMeeting>> {
     if !fields.create_zoom {
-        return Ok(());
+        return Ok(None);
     }
-    let join_url = crate::zoom::create_meeting(fields).await?;
-    fields.location = Some(location_with_zoom(fields.location.as_deref(), &join_url));
+    let created = crate::zoom::create_meeting(fields).await?;
+    fields.location = Some(location_with_zoom(fields.location.as_deref(), &created.join_url));
     fields.create_zoom = false;
     fields.conference = remove_google_conference.then_some(crate::write::ConferenceAction::Remove);
-    Ok(())
+    Ok(Some(created))
+}
+
+/// Marks an error that happened only after the provider accepted the calendar
+/// mutation carrying the Zoom URL. Its display delegates to the original so
+/// the user-facing allowlist keeps the same exact, secret-safe messages.
+#[derive(Debug)]
+pub(crate) struct CalendarWriteCommitted(anyhow::Error);
+
+impl std::fmt::Display for CalendarWriteCommitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CalendarWriteCommitted {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub(crate) fn mark_calendar_write_committed(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(CalendarWriteCommitted(error))
+}
+
+fn is_calendar_write_committed(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CalendarWriteCommitted>().is_some()
+}
+
+fn google_write_error(error: omacal_google::ApiError) -> anyhow::Error {
+    match error {
+        committed @ omacal_google::ApiError::WriteCommitted(_) => {
+            mark_calendar_write_committed(committed.into())
+        }
+        other => other.into(),
+    }
+}
+
+async fn finish_zoom_calendar_write<T>(
+    created: Option<&crate::zoom::CreatedZoomMeeting>,
+    result: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    finish_zoom_calendar_write_with(created, result, |id| async move {
+        crate::zoom::delete_meeting(id).await
+    })
+    .await
+}
+
+async fn finish_zoom_calendar_write_with<T, Delete, DeleteFuture>(
+    created: Option<&crate::zoom::CreatedZoomMeeting>,
+    result: anyhow::Result<T>,
+    delete: Delete,
+) -> anyhow::Result<T>
+where
+    Delete: FnOnce(u64) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let Some(created) = created else {
+        return Err(error);
+    };
+    if is_calendar_write_committed(&error) {
+        return Err(error);
+    }
+
+    if let Err(cleanup) = delete(created.id).await {
+        tracing::warn!(
+            error = %cleanup,
+            meeting_id = created.id,
+            "calendar write failed and its orphaned Zoom meeting could not be removed"
+        );
+    }
+    Err(error)
 }
 
 fn location_with_zoom(location: Option<&str>, join_url: &str) -> String {
@@ -1192,7 +1268,17 @@ async fn create_via_client(
     // makes it a choice; the form asks and this carries the answer. The other
     // caller of `insert_event` — the series split in [`split_series`] — passes
     // `"all"` for its own reasons. See `insert_event`'s own doc comment.
-    let created = client.insert_event(cal_google_id, &body, send_updates).await?;
+    let created = client
+        .insert_event(cal_google_id, &body, send_updates)
+        .await
+        .map_err(|error| match error {
+            omacal_google::ApiError::WriteCommitted(detail) => {
+                tracing::error!(%detail,
+                    "created on Google, but its response could not be read");
+                mark_calendar_write_committed(anyhow::anyhow!(CREATED_NOT_STORED))
+            }
+            other => other.into(),
+        })?;
 
     // **Past this line, no error may read as "the create failed."** The event
     // exists on Google and any invited guest has already been mailed; a
@@ -1209,7 +1295,7 @@ async fn create_via_client(
     let Some(row) = omacal_sync::to_stored(&created, calendar_id, cal_tz) else {
         tracing::error!(google_id = %created.id,
             "created on Google, but the response could not be mapped for storage");
-        anyhow::bail!(CREATED_NOT_STORED);
+        return Err(mark_calendar_write_committed(anyhow::anyhow!(CREATED_NOT_STORED)));
     };
 
     match omacal_store::upsert_event(pool, &row).await {
@@ -1217,7 +1303,7 @@ async fn create_via_client(
         Err(e) => {
             tracing::error!(%e, google_id = %created.id,
                 "created on Google, but the local write failed");
-            anyhow::bail!(CREATED_NOT_STORED)
+            Err(mark_calendar_write_committed(anyhow::anyhow!(CREATED_NOT_STORED)))
         }
     }
 }
@@ -1729,16 +1815,26 @@ async fn update_impl(
         if fields.conference.is_some() {
             anyhow::bail!("Google Meet can only be added to a Google calendar");
         }
-        materialize_zoom(&mut fields, false).await?;
-        let detail =
-            crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields).await?;
-        // Fields first, then the collection. The other order would have the
-        // move's own resync write the *old* text into the new calendar and
-        // leave the edit to a second write.
-        return match move_to {
-            Some(target) => crate::caldav_write::move_to(state, id, target).await,
-            None => Ok(detail),
-        };
+        let created_zoom = materialize_zoom(&mut fields, false).await?;
+        let result = async {
+            let detail =
+                crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields).await?;
+            // Fields first, then the collection. The other order would have the
+            // move's own resync write the *old* text into the new calendar and
+            // leave the edit to a second write.
+            match move_to {
+                // The rewrite above already carried the Zoom URL into the
+                // resource, so a refused *move* is not a failed write: the
+                // meeting is on an event the user can see, and deleting it
+                // would strand that event on a dead link.
+                Some(target) => crate::caldav_write::move_to(state, id, target)
+                    .await
+                    .map_err(mark_calendar_write_committed),
+                None => Ok(detail),
+            }
+        }
+        .await;
+        return finish_zoom_calendar_write(created_zoom.as_ref(), result).await;
     }
 
     let cfg = crate::load_config()?;
@@ -1754,39 +1850,50 @@ async fn update_impl(
         .clone()
         .unwrap_or_else(|| ev.google_id.clone());
 
-    materialize_zoom(&mut fields, true).await?;
+    let created_zoom = materialize_zoom(&mut fields, true).await?;
 
-    update_via_client(
-        &state.pool,
-        scope,
-        occurrence_start_ms,
-        ev,
-        &cal_google_id,
-        &cal_tz,
-        fields,
-        send_updates,
-        &client,
-    )
-    .await?;
-
-    // Fields first, then the calendar — `create_impl`'s order for the same
-    // reason: the patch is addressed to the resource on the calendar it is
-    // still on, and re-deriving that path after the move would be a second
-    // authority on where the event lives.
-    if let Some(target) = move_to {
-        move_via_client(
+    let result = async {
+        update_via_client(
             &state.pool,
-            source_calendar_id,
+            scope,
+            occurrence_start_ms,
+            ev,
             &cal_google_id,
-            &master_google_id,
-            target,
+            &cal_tz,
+            fields,
             send_updates,
             &client,
         )
         .await?;
-    }
 
-    event_detail_impl(state, id).await
+        // Fields first, then the calendar — `create_impl`'s order for the same
+        // reason: the patch is addressed to the resource on the calendar it is
+        // still on, and re-deriving that path after the move would be a second
+        // authority on where the event lives.
+        //
+        // Marked committed for the same reason as the CalDAV path: the patch
+        // above already put the Zoom URL on the event, so a refused move must
+        // not take the meeting down with it.
+        if let Some(target) = move_to {
+            move_via_client(
+                &state.pool,
+                source_calendar_id,
+                &cal_google_id,
+                &master_google_id,
+                target,
+                send_updates,
+                &client,
+            )
+            .await
+            .map_err(mark_calendar_write_committed)?;
+        }
+
+        event_detail_impl(state, id)
+            .await
+            .map_err(mark_calendar_write_committed)
+    }
+    .await;
+    finish_zoom_calendar_write(created_zoom.as_ref(), result).await
 }
 
 /// What a move earns when the event is one occurrence of a series.
@@ -2121,6 +2228,9 @@ async fn update_via_client(
         .await
     {
         Ok(p) => p,
+        Err(committed @ omacal_google::ApiError::WriteCommitted(_)) => {
+            return Err(mark_calendar_write_committed(committed.into()));
+        }
         Err(omacal_google::ApiError::PreconditionFailed) => {
             // **A guest-list change is not retried. It is reported.**
             //
@@ -2163,7 +2273,8 @@ async fn update_via_client(
             );
             client
                 .patch_event(cal_google_id, &event_id, &retry, send_updates, row.etag.as_deref())
-                .await?
+                .await
+                .map_err(google_write_error)?
         }
         Err(e) => return Err(e.into()),
     };
@@ -2192,7 +2303,9 @@ async fn update_via_client(
                 row
             }
         };
-        omacal_store::upsert_event(pool, &row).await?;
+        omacal_store::upsert_event(pool, &row)
+            .await
+            .map_err(|error| mark_calendar_write_committed(error.into()))?;
     }
 
     Ok(())
@@ -2458,7 +2571,18 @@ async fn split_series(
     // mailed regardless would make that choice a lie on one scope in three:
     // the user would press "Save without notifying" and every guest would be
     // told twice — once by the tail's creation, once by the truncation.
-    let created = client.insert_event(cal_google_id, &body, send_updates).await?;
+    let created = match client.insert_event(cal_google_id, &body, send_updates).await {
+        Ok(created) => created,
+        Err(omacal_google::ApiError::WriteCommitted(detail)) => {
+            tracing::error!(%detail,
+                "series tail was created, but its response could not be read");
+            return Err(mark_calendar_write_committed(anyhow::anyhow!(
+                "the new series was created but the original could not be shortened — \
+                 you now have two overlapping series and should delete one"
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     // ---- 2. The original, shortened. --------------------------------------
     // Past this point the tail exists on Google, so every failure below is the
@@ -2505,10 +2629,10 @@ async fn split_series(
         .map_err(|e| {
             tracing::error!(master = %master.id, created = %created.id, %e,
                 "series split created the new series but could not shorten the original");
-            anyhow::anyhow!(
+            mark_calendar_write_committed(anyhow::anyhow!(
                 "the new series was created but the original could not be shortened — \
                  you now have two overlapping series and should delete one"
-            )
+            ))
         })?;
 
     // ---- 3. Only now, the local store. ------------------------------------
@@ -2523,7 +2647,9 @@ async fn split_series(
     // and failing here would claim the split did not happen when it did.
     match omacal_sync::to_stored(&created, ev.calendar_id, cal_tz) {
         Some(row) => {
-            omacal_store::upsert_event(pool, &row).await?;
+            omacal_store::upsert_event(pool, &row)
+                .await
+                .map_err(|error| mark_calendar_write_committed(error.into()))?;
         }
         None => tracing::warn!(created = %created.id,
             "the new series was created but could not be stored locally; sync will pick it up"),
@@ -2550,7 +2676,9 @@ async fn split_series(
     if master.id == ev.google_id {
         match omacal_sync::to_stored(&patched, ev.calendar_id, cal_tz) {
             Some(row) => {
-                omacal_store::upsert_event(pool, &row).await?;
+                omacal_store::upsert_event(pool, &row)
+                    .await
+                    .map_err(|error| mark_calendar_write_committed(error.into()))?;
             }
             None => tracing::warn!(master = %master.id,
                 "the series was split but the shortened original could not be stored locally; \
@@ -3131,6 +3259,99 @@ mod tests {
         );
     }
     use omacal_store::Attendee;
+
+    fn created_zoom(id: u64) -> crate::zoom::CreatedZoomMeeting {
+        crate::zoom::CreatedZoomMeeting {
+            id,
+            join_url: format!("https://zoom.us/j/{id}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_google_and_caldav_writes_each_delete_the_orphan_once() {
+        for provider in ["Google", "CalDAV"] {
+            let deleted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = deleted.clone();
+            let meeting = created_zoom(123);
+            let result: anyhow::Result<()> = Err(anyhow::anyhow!("{provider} write failed"));
+
+            let error = finish_zoom_calendar_write_with(Some(&meeting), result, move |id| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(id);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.to_string(), format!("{provider} write failed"));
+            assert_eq!(*deleted.lock().unwrap(), vec![123]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_committed_calendar_write_never_deletes_its_zoom_meeting() {
+        let deletes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = deletes.clone();
+        let meeting = created_zoom(456);
+        let result: anyhow::Result<()> = Err(mark_calendar_write_committed(anyhow::anyhow!(
+            CREATED_NOT_STORED
+        )));
+
+        let error = finish_zoom_calendar_write_with(Some(&meeting), result, move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), CREATED_NOT_STORED);
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_successful_calendar_write_never_runs_zoom_cleanup() {
+        let deletes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = deletes.clone();
+        let meeting = created_zoom(789);
+
+        let value = finish_zoom_calendar_write_with(Some(&meeting), Ok(42), move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn retrying_after_calendar_failures_cleans_each_new_zoom_resource() {
+        let deleted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for id in [1001, 1002] {
+            let seen = deleted.clone();
+            let meeting = created_zoom(id);
+            let result: anyhow::Result<()> = Err(anyhow::anyhow!("calendar refused write"));
+            finish_zoom_calendar_write_with(Some(&meeting), result, move |meeting_id| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(meeting_id);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap_err();
+        }
+        assert_eq!(*deleted.lock().unwrap(), vec![1001, 1002]);
+    }
 
     fn guest(is_self: bool) -> Attendee {
         Attendee {

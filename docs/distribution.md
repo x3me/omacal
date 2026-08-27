@@ -48,6 +48,10 @@ precedence pinned by four tests proven against two mutations):**
 
       OMACAL_ZOOM_PUBLIC_CLIENT_ID=… cargo tauri build
 
+  The exact Extreme Labs Marketplace fields, native loopback redirect,
+  technology-stack response, and production test checklist live in
+  [`zoom-marketplace.md`](zoom-marketplace.md).
+
 - **Precedence: `config.toml` wins when present**; the embedded pair is the
   fallback; only when neither exists does today's "no config at …" error
   appear. Developers and distro packagers keep using their own projects, and

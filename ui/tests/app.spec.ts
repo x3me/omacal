@@ -3028,11 +3028,13 @@ test.describe('App', () => {
     const quick = page.getByRole('dialog', { name: 'Quick add event' });
     await quick.getByLabel('Describe the event').fill('tomorrow 3p 45m Design review make it a zoom');
 
-    // Calendar credentials cannot mint a Zoom meeting, so direct creation is
-    // blocked until the real link exists; the requested provider still rides
-    // into the ordinary editor rather than being discarded.
+    // This fixture has no connected Zoom account, so direct creation is
+    // blocked until the user connects or supplies a real link; the requested
+    // provider still rides into the ordinary editor rather than being lost.
     await expect(quick.getByRole('button', { name: 'Create event' })).toBeDisabled();
-    await expect(quick.getByText('Paste the Zoom meeting link before creating the event.'))
+    await expect(quick.getByText(
+      'Connect Zoom in Settings → Accounts, or paste an existing Zoom meeting link.',
+    ))
       .toBeVisible();
     await quick.getByRole('button', { name: 'Continue editing' }).click();
 
