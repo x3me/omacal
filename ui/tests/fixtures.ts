@@ -1061,6 +1061,38 @@ function emptyBigYear(
  *  payload: every syncing calendar, dimmed when hidden. Four calendars so a
  *  spec can tell the three states apart — shown, hidden (listed, dimmed) and
  *  not syncing at all (not listed: there is nothing to show). */
+/** A week with more all-day events than the band draws: six across the
+ *  window (columns 7..13 of the padded payload, so each needs its own row)
+ *  and three lying in the left padding. Four rows are drawn, so "+2 more"
+ *  counts the two hidden window spans and none of the padding — the count
+ *  the band used to take from the payload, three weeks wide (2026-09-04,
+ *  Michael Brennan's "+70 more" that did nothing). */
+export const allDayOverflowWeek = (): WeekPayload => {
+  const w = labelledWeek(MON - 7 * 24 * H, 21);
+  const span = (id: number, title: string, from: number, to: number) => ev({
+    id, title, start_ms: MON + (from - 7) * 24 * H, end_ms: MON + (to - 6) * 24 * H,
+    is_all_day: true,
+  });
+  w.all_day_events = [
+    ...[0, 1, 2, 3, 4, 5].map((i) => span(800 + i, `Window span ${i + 1}`, 7, 13)),
+    ...[0, 1, 2].map((i) => span(810 + i, `Padding span ${i + 1}`, 0, 6)),
+  ];
+  // As `pack_lanes` would leave them: first-fit by start column, then
+  // sorted by (lane, start_col). The padding spans share rows 0-2 with the
+  // window spans because their columns do not overlap.
+  const at = (idx: number, lane: number, start_col: number, end_col: number) =>
+    ({ idx, lane, start_col, end_col, cont_left: false, cont_right: false });
+  w.all_day = [
+    at(6, 0, 0, 6), at(0, 0, 7, 13),
+    at(7, 1, 0, 6), at(1, 1, 7, 13),
+    at(8, 2, 0, 6), at(2, 2, 7, 13),
+    at(3, 3, 7, 13),
+    at(4, 4, 7, 13),
+    at(5, 5, 7, 13),
+  ];
+  return w;
+};
+
 /** See the `padded-allday` fixture. Columns are over the 21-day payload:
  *  the window is columns 7..13. */
 export const paddedAllDayWeek = (): WeekPayload => {
@@ -1891,6 +1923,9 @@ export const FIXTURES: Record<string, Record<string, any>> = {
      * flicker). */
     'padded-allday': {
       week: paddedAllDayWeek(), visibleStartMs: MON, visibleDays: 7,
+    },
+    'allday-overflow': {
+      week: allDayOverflowWeek(), visibleStartMs: MON, visibleDays: 7,
     },
     // The empty week under a three-day forecast: Mon/Tue/Wed carry distinct
     // skies, Thu onward is past the horizon and must carry nothing.

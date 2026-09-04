@@ -52,10 +52,11 @@ test.describe('the window on a padded week', () => {
       { ...lane(1, 3, 1), lane: 2 },
       { ...lane(5, 6, 2), lane: 1, cont_right: true },
     ]);
-    // Left whole: lanes index into the events, and the overflow is the
-    // wider packing's judgement.
+    // Left whole: lanes index into the events. The overflow is not passed
+    // through any more — it is the window's own hidden chips plus whatever
+    // the backend could not position — and here nothing is hidden.
     expect(w.all_day_events).toBe(week.all_day_events);
-    expect(w.overflow).toBe(week.overflow);
+    expect(w.overflow).toEqual(week.overflow);
   });
 
   test('the band\'s rows are the window\'s, at rest and while sliding, and never grow for the padding', () => {
@@ -65,12 +66,12 @@ test.describe('the window on a padded week', () => {
     // A and D — no free row, so it is left out rather than adding a row the
     // window does not have.
     const lanes = [lane(3, 9, 0), lane(8, 10, 1), lane(0, 2, 2), lane(1, 4, 3), lane(2, 5, 4)];
-    const rest = packBandLanes(lanes, 7, 7, false);
+    const rest = packBandLanes(lanes, 7, 7, false).lanes;
     expect(rest).toEqual([
       { ...lane(0, 2, 0), lane: 0, cont_left: true },
       { ...lane(1, 3, 1), lane: 1 },
     ]);
-    const sliding = packBandLanes(lanes, 7, 7, true);
+    const sliding = packBandLanes(lanes, 7, 7, true).lanes;
     expect(sliding).toEqual([
       { ...lane(3, 9, 0), lane: 0 },
       { ...lane(8, 10, 1), lane: 1 },
@@ -81,14 +82,54 @@ test.describe('the window on a padded week', () => {
     // payload packed over a wider range. Rows are the window's, whatever
     // the payload's own numbering says.
     const renumbered = lanes.map((l, i) => ({ ...l, lane: 3 - i }));
-    expect(packBandLanes(renumbered, 7, 7, false).map((l) => l.lane)).toEqual([0, 1]);
+    expect(packBandLanes(renumbered, 7, 7, false).lanes.map((l) => l.lane)).toEqual([0, 1]);
+  });
+
+  test('a row cap hides the chips that do not fit, and only the window\'s (#email 2026-09-04)', () => {
+    // Five spans across the whole window, so each needs its own row.
+    const five = [0, 1, 2, 3, 4].map((i) => lane(7, 13, i));
+    // Plus two lying wholly in the padding, which are nobody's "+N more":
+    // the count is about the week on screen.
+    const padding = [lane(0, 6, 5), lane(0, 6, 6)];
+    const capped = packBandLanes([...five, ...padding], 7, 7, false, 4);
+    expect(capped.lanes.map((l) => l.idx)).toEqual([0, 1, 2, 3]);
+    expect(capped.hidden).toEqual([4]);
+
+    // Expanded: no cap, nothing hidden, and the rows keep the same order.
+    const all = packBandLanes([...five, ...padding], 7, 7, false, Infinity);
+    expect(all.lanes.map((l) => l.lane)).toEqual([0, 1, 2, 3, 4]);
+    expect(all.hidden).toEqual([]);
+
+    // The cap holds the band's height while sliding too: the padding chips
+    // are drawn — they are what the track slides into — but only in rows
+    // the window's own chips already opened, never in a fifth.
+    const sliding = packBandLanes([...five, ...padding], 7, 7, true, 4);
+    expect(Math.max(...sliding.lanes.map((l) => l.lane))).toBe(3);
+    expect(sliding.lanes.filter((l) => l.idx > 4).map((l) => l.lane)).toEqual([0, 1]);
+    expect(sliding.hidden).toEqual([4]);
+  });
+
+  test('the window\'s hidden chips are what the band counts, not the payload\'s', () => {
+    // The count was taken from the payload's own `overflow`, which since the
+    // padded window covers three weeks — so a week showing everything could
+    // still say "+N more" about days nobody was looking at.
+    const week: WeekPayload = {
+      days: days(21),
+      all_day: [0, 1, 2, 3, 4].map((i) => lane(7, 13, i)),
+      all_day_events: [],
+      overflow: [],
+    };
+    expect(sliceWeek(week, 7, 7, 4).overflow).toEqual([4]);
+    expect(sliceWeek(week, 7, 7, Infinity).overflow).toEqual([]);
+    // Whatever the backend itself could not position is added, never lost.
+    expect(sliceWeek({ ...week, overflow: [99] }, 7, 7, 4).overflow).toEqual([4, 99]);
   });
 
   test('a lane already marked continuing stays so after the cut', () => {
     const week: WeekPayload = {
       days: days(21), all_day: [{ ...lane(7, 9), cont_left: true }], all_day_events: [], overflow: [],
     };
-    expect(sliceWeek(week, 7, 7).all_day).toEqual([{ ...lane(0, 2), cont_left: true }]);
+    expect(sliceWeek(week, 7, 7).all_day).toEqual([{ ...lane(0, 2), cont_left: true, lane: 0 }]);
   });
 
   test('the whole payload slices to itself', () => {

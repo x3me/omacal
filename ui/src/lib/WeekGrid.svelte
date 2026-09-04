@@ -11,7 +11,7 @@
   import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
   import { onPinch, type Pinch } from './pinch';
   import {
-    FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
+    BAND_ROWS, FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
     velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { Lane, WeekPayload, UiEvent } from './api';
@@ -119,7 +119,13 @@
   // A payload without the window — see `visibleIndex` — is shown whole.
   const visible = $derived(vis < 0 ? week.days.length : (visibleDays ?? week.days.length));
   const visStart = $derived(Math.max(vis, 0));
-  const visibleWeek = $derived(sliceWeek(week, visStart, visible));
+  /** Whether the band shows every row or folds the rest behind "+N more".
+   *  Sticky across navigation on purpose: a week with nothing hidden draws
+   *  the rows it needs either way, so leaving it open costs nothing and
+   *  closing it on every step would fight the user who opened it. */
+  let bandExpanded = $state(false);
+  const bandRows = $derived(bandExpanded ? Infinity : BAND_ROWS);
+  const visibleWeek = $derived(sliceWeek(week, visStart, visible, bandRows));
 
   // Every hour, not every second one: a rule at 10:00 with nothing at 11:00
   // makes a meeting's edge unplaceable by eye.
@@ -506,13 +512,23 @@
    *  reshuffle rows under the swipe — and only re-packed when the payload
    *  itself is replaced. At rest, the window's own rows (`sliceWeek`). */
   let panLanes = $state<Lane[]>([]);
+  /** And its "+N more", frozen with the rows for the same reason: a count
+   *  that changed per day crossed would take the row it sits on with it,
+   *  which is a height change under the gesture. */
+  let panHidden = $state<number[]>([]);
   $effect.pre(() => {
     const active = panActive;
     const lanes = week.all_day;
+    const rows = bandRows;
     if (!active) return;
-    panLanes = packBandLanes(lanes, untrack(() => visStart), untrack(() => visible), true);
+    const packed = packBandLanes(
+      lanes, untrack(() => visStart), untrack(() => visible), true, rows,
+    );
+    panLanes = packed.lanes;
+    panHidden = packed.hidden;
   });
   const renderedLanes = $derived(panActive ? panLanes : visibleWeek.all_day);
+  const renderedHidden = $derived(panActive ? panHidden : visibleWeek.overflow);
 
   /**
    * An in-flight drag, or `null`.
@@ -1325,7 +1341,9 @@
 <AllDayBand
   lanes={renderedLanes}
   events={week.all_day_events}
-  overflow={week.overflow}
+  overflow={renderedHidden}
+  expanded={bandExpanded}
+  onexpand={() => (bandExpanded = !bandExpanded)}
   columns={renderedDays.length}
   {visible}
   vis={renderVis}

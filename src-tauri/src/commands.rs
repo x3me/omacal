@@ -1,8 +1,20 @@
 use omacal_core::{expand, lay_out_day, pack_lanes, Interval, Lane, Placed, Segment, Series};
 
-/// How many rows of all-day spans the week's band draws before the rest
-/// become "+N more".
-const ALL_DAY_LANES: u8 = 4;
+/// How many rows of all-day spans the week's payload *positions*.
+///
+/// **Not the band's height.** The band draws four rows and folds the rest
+/// behind "+N more", which expands — and that is a UI decision, made in
+/// `weekwindow.ts` against the days actually on screen. Reported
+/// 2026-09-04 (Michael Brennan, by email, on 1.2.0): a week with many
+/// all-day events showed "+70 more" and clicking it did nothing. It could
+/// not do anything: the events were in the payload, but everything past the
+/// fourth row had been dropped by the packer here, so they had no columns
+/// to be drawn at.
+///
+/// Generous rather than unbounded, because the packer is O(rows) per
+/// segment and the input is somebody else's calendar; anything past this is
+/// still reported in `overflow`, which the UI adds to its own count.
+const ALL_DAY_LANES_MAX: u8 = 64;
 use omacal_store::StoredEvent;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -395,11 +407,12 @@ pub fn assemble_days(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str) 
         }
     }
 
-    // Four lanes, not two. Two meant a week with three leave markers on it
-    // spent its whole band saying "+1 more" — the band is content-sized, so
-    // the rows it does not draw are not buying the grid any space worth
-    // having. Four is where a glance stops being a glance (2026-08-31).
-    let (all_day, overflow) = pack_lanes(&segments, n as u16, ALL_DAY_LANES);
+    // Every span that can be positioned is positioned; how many rows to
+    // *show* is the band's own decision (see `ALL_DAY_LANES_MAX`). It was
+    // four here until 2026-09-04, and four is still what the band draws
+    // unexpanded — the difference is that the fifth row now exists to be
+    // expanded into, rather than being discarded before the UI sees it.
+    let (all_day, overflow) = pack_lanes(&segments, n as u16, ALL_DAY_LANES_MAX);
 
     let days = (0..n)
         .map(|d| {

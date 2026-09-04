@@ -5185,3 +5185,50 @@ test.describe('WeekGrid: the all-day band while sliding', () => {
     expect((await rowsOf(page)).height).toBe(rest.height);
   });
 });
+
+test.describe('WeekGrid: more all-day events than the band draws', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=WeekGrid&f=${f}`;
+  const more = (page: Page) => page.locator('.band .more');
+
+  test('"+N more" expands the band and folds it back', async ({ page }) => {
+    // Reported by email 2026-09-04 (Michael Brennan, on 1.2.0): a week with
+    // many all-day events showed "+70 more" and clicking it did nothing.
+    // Six spans cross this window and four rows are drawn.
+    await page.goto(show('allday-overflow'));
+    const chips = page.locator('.band .chip');
+    await expect(chips).toHaveCount(4);
+    await expect(more(page)).toHaveText('+2 more');
+    // The count is the window's: the three spans in the padding are not
+    // hidden events of the week on screen, and never were.
+    await expect(more(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(chips.filter({ hasText: 'Padding span' })).toHaveCount(0);
+
+    await more(page).click();
+    await expect(chips).toHaveCount(6);
+    await expect(more(page)).toHaveText('Show fewer');
+    await expect(more(page)).toHaveAttribute('aria-expanded', 'true');
+    // Six rows, so every hidden span is now on one of its own.
+    const rows = await page.locator('.band .rows').evaluate(
+      (el) => new Set([...el.querySelectorAll('.chip')].map((c) => (c as HTMLElement).style.gridRow)).size,
+    );
+    expect(rows).toBe(6);
+    // And it scrolls rather than pushing the hour grid off the window.
+    expect(await page.locator('.band .track').evaluate((el) => getComputedStyle(el).overflowY))
+      .toBe('auto');
+
+    await more(page).click();
+    await expect(chips).toHaveCount(4);
+    await expect(more(page)).toHaveText('+2 more');
+  });
+
+  test('the fold is a control, not a label, and only where it can answer', async ({ page }) => {
+    // `AllDayBand` mounted without `onexpand` keeps the inert label it had —
+    // the rule `MonthGrid`'s row-level "+N more" is written under: a label
+    // that cannot answer a click must not invite one.
+    await page.goto(show('allday-overflow'));
+    expect(await more(page).evaluate((el) => el.tagName)).toBe('BUTTON');
+    await page.goto('/tests/harness/index.html?c=AllDayBand&f=overflow');
+    const bare = page.locator('.band .more');
+    if (await bare.count()) expect(await bare.evaluate((el) => el.tagName)).toBe('DIV');
+  });
+});
