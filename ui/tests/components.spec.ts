@@ -5287,3 +5287,39 @@ test.describe('EventPopover: who said no', () => {
     await expect(page.locator('.tally')).toHaveText('1 of 2 guests declined');
   });
 });
+
+test.describe('WeekGrid: the day header on one line', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=WeekGrid&f=${f}`;
+
+  test('name, number and sky share a row, and the number never moves for the sky', async ({ page }) => {
+    // Asked for 2026-09-04: two rows at the top of every week, one of which
+    // held only "FRI". The number stays centred whether or not the day has a
+    // forecast, which is what the old absolutely-positioned `.wx` bought and
+    // the three grid tracks buy now.
+    await page.goto(show('weather'));
+    const head = page.locator('.head:not(.gutter)').first();
+    const rows = await head.evaluate((el) => {
+      const box = (s: string) => {
+        const n = el.querySelector(s);
+        return n ? n.getBoundingClientRect() : null;
+      };
+      const dow = box('.dow')!, num = box('b')!, wx = box('.wx');
+      return {
+        oneLine: Math.abs(dow.top - num.top) < num.height && !!wx && Math.abs(wx!.top - num.top) < num.height,
+        headHeight: el.getBoundingClientRect().height,
+      };
+    });
+    expect(rows.oneLine).toBe(true);
+
+    // Mon/Tue/Wed carry a forecast in this fixture and the rest do not
+    // (`WEEK_WEATHER`), so the centres must still agree across the week.
+    const centres = await page.locator('.head:not(.gutter)').evaluateAll((els) => els.map((el) => {
+      const head = el.getBoundingClientRect();
+      const num = el.querySelector('b')!.getBoundingClientRect();
+      return Math.round((num.left + num.right) / 2 - (head.left + head.right) / 2);
+    }));
+    expect(new Set(centres).size, `number centres differ across the week: ${centres}`).toBe(1);
+    expect(await page.locator('.head .wx').count()).toBeGreaterThan(0);
+    expect(await page.locator('.head .wx').count()).toBeLessThan(centres.length);
+  });
+});

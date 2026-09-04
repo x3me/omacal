@@ -1311,23 +1311,25 @@
   {#each renderedDays as d (d.start_ms)}
     <div class="head" class:today={d.start_ms === todayStart}
          class:keyboard={keyboardCursor?.dayStartMs === d.start_ms}>
-      <span>{dayName(d.start_ms)}</span>
-      <span class="daterow">
-        <b>{new Date(d.start_ms).getDate()}</b>
-        {#if weather?.get(dateKey(d.start_ms))}
-          {@const wx = weather.get(dateKey(d.start_ms))!}
-          <!-- Beside the number, not below it: a third line taxed every
-               header for a decoration. Absolutely offset from center so the
-               number sits exactly where a weatherless day's does — a week
-               half-covered by the forecast must not have its numbers
-               zigzag. Sized to the number's own 15px, per the field note.
-               Absent for any day the forecast does not cover — the past,
-               the far future — so the header never guesses. -->
-          <span class="wx">
-            <WeatherGlyph bucket={wx.bucket} size={15} />{formatTemp(wx.tmax, temperatureUnit())}°
-          </span>
-        {/if}
-      </span>
+      <!-- One line since 2026-09-04, by request: the day name, the number and
+           the sky side by side rather than the name stacked over the other
+           two. It gives the grid back a row's worth of height at the top of
+           every week. Three grid tracks (1fr / auto / 1fr) rather than a
+           flow, because the number must sit at the column's centre whether
+           or not that day has a forecast — a week half-covered by weather
+           must not have its numbers zigzag, which is the invariant the old
+           absolutely-positioned `.wx` existed to keep. -->
+      <span class="dow">{dayName(d.start_ms)}</span>
+      <b>{new Date(d.start_ms).getDate()}</b>
+      {#if weather?.get(dateKey(d.start_ms))}
+        {@const wx = weather.get(dateKey(d.start_ms))!}
+        <!-- Absent for any day the forecast does not cover — the past, the
+             far future — so the header never guesses; the empty third track
+             holds the number in place regardless. -->
+        <span class="wx">
+          <WeatherGlyph bucket={wx.bucket} size={15} />{formatTemp(wx.tmax, temperatureUnit())}°
+        </span>
+      {/if}
     </div>
   {/each}
   </div></div>
@@ -1557,24 +1559,28 @@
 
   .head { text-align: center; font-size: 11px; color: var(--muted);
           letter-spacing: .05em; padding-bottom: 8px; }
-  /* The sky, beside the number at the number's own size, in the day name's
-     muted voice. Offset from the column's center rather than flowed, so the
-     number never moves for it; vertically centered on the number's line
-     (the today circle included). Tabular °digits, so a week of
-     temperatures forms a row the eye can run across. */
-  .wx { position: absolute; left: 50%; top: 50%; translate: 16px -50%;
-        display: inline-flex; align-items: center; gap: 3px;
+  /* The day headers only: `.gutter.head` above the ruler carries the two
+     zone labels and wants none of this. The outer tracks are equal, so the
+     number holds the column's centre whatever sits beside it, and a
+     container query rather than a window one because what runs out of room
+     is the *column*, which the window's width alone cannot say (seven of
+     them, or three, or one). */
+  .head:not(.gutter) { display: grid; grid-template-columns: 1fr auto 1fr;
+                       align-items: center; column-gap: 6px;
+                       container-type: inline-size; }
+  .dow { justify-self: end; }
+  /* The sky, at the number's own size, in the day name's muted voice.
+     Tabular °digits, so a week of temperatures forms a row the eye can run
+     across. Dropped below a column width that cannot hold it: a clipped
+     forecast is worth less than the date it would crowd. */
+  .wx { justify-self: start; display: inline-flex; align-items: center; gap: 3px;
         font-size: 15px; font-weight: 500; letter-spacing: -.02em;
         color: var(--muted); font-variant-numeric: tabular-nums; }
-  .head b { display: block; font-size: 15px; color: var(--text);
-            font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
+  @container (max-width: 104px) { .wx { display: none; } }
+  .head b { font-size: 15px; color: var(--text);
+            font-weight: 500; letter-spacing: -.02em; }
   .head.today b { background: var(--accent); color: var(--on-accent); width: 23px; height: 23px;
-                  line-height: 23px; border-radius: 50%; margin: 2px auto 0; font-weight: 600; }
-  /* A positioning context only — block, not flex, so a weatherless header
-     renders byte-for-byte as before this row existed (the empty-week
-     golden holds it to that). The forecast hangs off the number's right
-     via the absolute `.wx` below. */
-  .daterow { display: block; position: relative; }
+                  line-height: 23px; border-radius: 50%; font-weight: 600; }
   .head.keyboard:not(.today) b { color: var(--accent); font-weight: 650; }
 
   /* No column borders: the grid reads through alignment, not rules (spec §7.1). */
