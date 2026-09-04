@@ -308,17 +308,46 @@ fn column_for(bounds: &[i64], ms: i64) -> Option<usize> {
     Some(bounds.partition_point(|&b| b <= ms) - 1)
 }
 
-/// The column a timed occurrence should be drawn in, or `None` if it does not
-/// touch the week at all.
+/// **Every** column a timed occurrence touches, as an inclusive range.
 ///
-/// Normally that is the column containing its start. An event that began before
-/// the week and runs into it — Sunday 23:00 to Monday 01:00, on the Monday the
-/// week begins — has no such column, and dropping it made the event vanish
-/// entirely. It is clamped into column 0 instead, where `lay_out_day` clips the
-/// geometry to the column's own bounds.
+/// It used to be one column, the one holding the start, and the rest of the
+/// event was simply not drawn: 23:00 to 02:00 appeared on its first day and
+/// the next day showed nothing (issue #42, @xmha97, confirmed here). The
+/// geometry was never the problem — `lay_out_day` clamps a span to the
+/// column's own bounds, and has a test saying so — so an occurrence now goes
+/// into each column it overlaps and each one clips its own piece.
+///
+/// Both edges of the window are clamped rather than dropped. An event that
+/// began before it and runs in — Sunday 23:00 to Monday 01:00, on the Monday
+/// a week begins — belongs to column 0, and one running out the far end
+/// belongs to the last; dropping either made the event vanish entirely.
+///
+/// The end is exclusive, so a meeting ending at midnight stops on its own
+/// day, and a zero-length event still occupies the instant it names.
+/// The single column a timed occurrence *starts* in, for Month.
+///
+/// Month deliberately keeps the old rule that Week outgrew (see
+/// [`timed_columns`]). A month cell has no geometry, only a list of lines
+/// reading "23:00 Title": drawn under Tuesday, that line says the event
+/// starts at 23:00 on Tuesday, which it does not. In the day grid the
+/// block's *position* carries the truth — a piece at the top of Tuesday is
+/// visibly the tail of something — and in a cell there is no position to
+/// carry it. So the crossing shows where it begins, and the grid is where
+/// you see the rest.
 fn timed_column(bounds: &[i64], iv: &Interval) -> Option<usize> {
     column_for(bounds, iv.start_ms)
         .or_else(|| (iv.start_ms < bounds[0] && iv.end_ms > bounds[0]).then_some(0))
+}
+
+fn timed_columns(bounds: &[i64], iv: &Interval) -> std::ops::Range<usize> {
+    let n = bounds.len().saturating_sub(1);
+    let end = iv.end_ms.max(iv.start_ms + 1);
+    if n == 0 || end <= bounds[0] || iv.start_ms >= bounds[n] {
+        return 0..0;
+    }
+    let first = column_for(bounds, iv.start_ms).unwrap_or(0);
+    let last = column_for(bounds, end - 1).unwrap_or(n - 1);
+    first..last + 1
 }
 
 /// Each column's own civil date in the **display** zone, `yyyy-mm-dd` — the
@@ -418,8 +447,16 @@ pub fn assemble_days(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str) 
                 let (start_col, end_col) = all_day_columns(src, &iv, &col_dates);
                 segments.push(Segment { idx: all_day_events.len(), start_col, end_col });
                 all_day_events.push(to_ui(src, iv.start_ms, iv.end_ms));
-            } else if let Some(col) = timed_column(&bounds, &iv) {
-                day_events[col].push(to_ui(src, iv.start_ms, iv.end_ms));
+            } else {
+                // The same occurrence in each column it touches, carrying its
+                // **true** span every time rather than the piece's: the two
+                // halves of a midnight crossing are one event, and `id` plus
+                // `start_ms` is what says so everywhere else in the app — the
+                // popover it opens, the RSVP override it wears, the drag it
+                // answers. `lay_out_day` clamps each copy to its own column.
+                for col in timed_columns(&bounds, &iv) {
+                    day_events[col].push(to_ui(src, iv.start_ms, iv.end_ms));
+                }
             }
         }
     }
@@ -1076,6 +1113,80 @@ mod tests {
         assert_eq!(w.days[6].events.len(), 1);
         let p = w.days[6].placed[0];
         assert!(p.top + p.height <= 1.0001, "block overflows the column");
+    }
+
+    /// **Issue #42.** A meeting from 23:00 to 02:00 is drawn on both days:
+    /// the hour before midnight on the first, the two hours after it on the
+    /// second. It used to appear on the first day only, and the rest of the
+    /// meeting was simply not drawn.
+    #[test]
+    fn a_timed_event_crossing_midnight_is_drawn_on_both_days() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("night", MON + 23 * H, MON + DAY + 2 * H, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1, "the evening piece");
+        assert_eq!(w.days[1].events.len(), 1, "the morning piece");
+        assert!(w.days[2].events.is_empty(), "and no further");
+
+        // Both pieces are the same occurrence — same row, same start — which
+        // is what the popover, the RSVP override and the drag all key on.
+        assert_eq!(w.days[0].events[0].id, w.days[1].events[0].id);
+        assert_eq!(w.days[0].events[0].start_ms, w.days[1].events[0].start_ms);
+        assert_eq!(w.days[1].events[0].start_ms, MON + 23 * H, "the true start, not the piece's");
+
+        let evening = w.days[0].placed[0];
+        assert!((evening.top - 23.0 / 24.0).abs() < 1e-4, "top {}", evening.top);
+        assert!((evening.height - 1.0 / 24.0).abs() < 1e-4, "height {}", evening.height);
+        let morning = w.days[1].placed[0];
+        assert!(morning.top.abs() < 1e-6, "top {}", morning.top);
+        assert!((morning.height - 2.0 / 24.0).abs() < 1e-4, "height {}", morning.height);
+    }
+
+    /// The boundary itself: a meeting that ends *at* midnight ends on its own
+    /// day. An inclusive end would have drawn a sliver on every following
+    /// morning, which is the bug in the other direction.
+    #[test]
+    fn a_timed_event_ending_at_midnight_stays_on_its_day() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("late", MON + 22 * H, MON + DAY, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1);
+        assert!(w.days[1].events.is_empty(), "midnight belongs to the day that ends");
+    }
+
+    /// "This should also work for events spanning multiple days" — the middle
+    /// days are full, the edges are partial.
+    #[test]
+    fn a_timed_event_spanning_days_is_drawn_on_every_one() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("conf", MON + 9 * H, MON + 2 * DAY + 17 * H, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1);
+        assert_eq!(w.days[1].events.len(), 1);
+        assert_eq!(w.days[2].events.len(), 1);
+        assert!(w.days[3].events.is_empty());
+        let middle = w.days[1].placed[0];
+        assert!(middle.top.abs() < 1e-6 && (middle.height - 1.0).abs() < 1e-4,
+                "a whole middle day: top {} height {}", middle.top, middle.height);
+    }
+
+    /// Month keeps the old rule on purpose: a cell has no geometry, only the
+    /// line "23:00 Title", and under the next day that line would be false.
+    #[test]
+    fn month_shows_a_midnight_crossing_on_its_starting_day_only() {
+        const H: i64 = 3_600_000;
+        // 31 Aug 2026 23:00 UTC to 1 Sep 02:00 — inside the September grid,
+        // whose first row carries the leading days of the previous month.
+        let start = MON + 4 * 7 * DAY - DAY + 23 * H;
+        let evs = vec![ev("night", start, start + 3 * H, false)];
+        let m = assemble_month(&evs, 2026, 9, "UTC", crate::settings::WeekStart::Monday);
+        let with_it: Vec<_> = m
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .filter(|c| !c.timed.is_empty())
+            .collect();
+        assert_eq!(with_it.len(), 1, "one cell, the day it starts on");
     }
 
     /// An event that ends before the week begins still has no column.
