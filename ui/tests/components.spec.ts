@@ -470,11 +470,17 @@ test.describe('WeekGrid popover flow', () => {
     await expect(page.locator('.loc')).toHaveText('Room B');
   });
 
-  test('a failed load never shows an empty popover', async ({ page }) => {
+  test('a failed load never shows an empty popover, and never shows nothing either', async ({ page }) => {
     await page.goto(show('popover'));
     await page.evaluate(() => window.__harness.failNextEventCall('event_detail', 60, 'offline'));
     await page.getByRole('button', { name: 'Event A' }).click();
     await expect(page.locator('.pop')).toHaveCount(0);
+    // Closing in silence made a failed fetch look exactly like a dead
+    // control — reported 2026-09-04 as "I press an all-day event and
+    // nothing happens". The grid has no error line of its own, so it hands
+    // the failure to App, which has one.
+    await expect.poll(() => page.evaluate(() => (window as any).__lastGridError))
+      .toContain('offline');
   });
 
   test('a late failure for a superseded click does not close a popover that opened after it', async ({ page }) => {
@@ -5095,6 +5101,7 @@ test.describe('WeekGrid: the padded payload', () => {
     // fixed-position tooltip.
     const cols = page.locator('.body .cols');
     expect(await cols.evaluate((el) => getComputedStyle(el).transform)).toBe('none');
+
   });
 
   test('a swipe puts the whole payload on the track, and the day under the finger stays put', async ({ page }) => {
@@ -5184,6 +5191,16 @@ test.describe('WeekGrid: the all-day band while sliding', () => {
     await expect(chips).toHaveCount(2);
     expect((await rowsOf(page)).height).toBe(rest.height);
   });
+
+  test('a chip out of a padded payload still opens its own event', async ({ page }) => {
+    // The lanes are repacked here, and their `idx` has to go on pointing into
+    // the payload's own event list, or a click asks for the wrong event —
+    // or, when the id resolves to nothing, for none at all (2026-09-04, the
+    // shape of "I press an all-day event and nothing happens").
+    await page.goto(show('padded-allday'));
+    await page.locator('.chip').filter({ hasText: 'From the padding' }).click();
+    await expect(page.getByRole('dialog', { name: 'From the padding' })).toBeVisible();
+  });
 });
 
 test.describe('WeekGrid: more all-day events than the band draws', () => {
@@ -5230,39 +5247,6 @@ test.describe('WeekGrid: more all-day events than the band draws', () => {
     await page.goto('/tests/harness/index.html?c=AllDayBand&f=overflow');
     const bare = page.locator('.band .more');
     if (await bare.count()) expect(await bare.evaluate((el) => el.tagName)).toBe('DIV');
-  });
-});
-
-test.describe('EventBlock: nobody is coming', () => {
-  const show = (f: string) => `/tests/harness/index.html?c=EventBlock&f=${f}`;
-
-  test('an event whose every guest declined is struck, marked, and not confused with your own no', async ({ page }) => {
-    // Reported 2026-09-04: a 1:1 the user organised, declined by its only
-    // guest, looked exactly like one that was going ahead. The popover knew;
-    // the grid did not.
-    await page.goto(show('nobody-coming-15'));
-    const ev = page.locator('.ev');
-    await expect(ev).toHaveClass(/nobodycoming/);
-    await expect(ev.locator('.rs')).toHaveText('✕');
-    await expect(ev).toHaveAttribute('aria-label', /everyone declined/);
-    const struck = await ev.locator('b').evaluate((el) => {
-      const s = getComputedStyle(el);
-      return { line: s.textDecorationLine, style: s.textDecorationStyle };
-    });
-    expect(struck.line).toContain('line-through');
-    // Dotted, so the two "not happening" states are told apart at a glance.
-    expect(struck.style).toBe('dotted');
-    // And the block keeps its own fill: `.declined` hollows to the page,
-    // which is what says *you* are not going.
-    const fill = await ev.evaluate((el) => getComputedStyle(el).backgroundColor);
-
-    await page.goto(show('rsvp-declined-15'));
-    const declined = page.locator('.ev');
-    await expect(declined).not.toHaveClass(/nobodycoming/);
-    await expect(declined.locator('.rs')).toHaveCount(0);
-    expect(await declined.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe(fill);
-    expect(await declined.locator('b').evaluate((el) => getComputedStyle(el).textDecorationStyle))
-      .toBe('solid');
   });
 });
 

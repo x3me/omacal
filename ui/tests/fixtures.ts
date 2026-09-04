@@ -1671,6 +1671,15 @@ POPOVER_DETAILS[APP_GUESTS_ID] = detail({
 /** One guest, not two: the person doing the moving is never counted. */
 export const APP_GUESTS_COUNT = 1;
 
+/** The all-day chips of the `padded-allday` WeekGrid fixture, so a spec can
+ *  click one and get a popover rather than the silent nothing a missing
+ *  detail produces (2026-09-04: that silence was the bug report). */
+POPOVER_DETAILS[701] = detail({
+  id: 701, title: 'From the padding', can_edit: true, is_all_day: true,
+  start_ms: MON - 4 * 24 * H, end_ms: MON + 3 * 24 * H,
+  start_date: '2024-01-25', end_date: '2024-01-31',
+});
+
 /** The reported case (2026-09-04): a meeting the user organised and accepted,
  *  whose only guest declined. The popover names it above the guest list. */
 export const APP_ALL_DECLINED_ID = 9241;

@@ -203,6 +203,9 @@ if (name === 'App') {
         target,
         props: {
           onpan: (days: unknown) => { (window as any).__lastPan = days; },
+          // A click the grid could not answer — the detail behind it would
+          // not load. Captured like the rest: the grid says it, App shows it.
+          onerror: (message: unknown) => { (window as any).__lastGridError = message; },
           ...props,
           get week() { return week; },
           // `endMs` is present only when the grid names one — a sweep does, a

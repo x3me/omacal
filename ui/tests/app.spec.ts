@@ -15,6 +15,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
+  APP_ALLDAY_ID,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -4639,5 +4640,32 @@ test.describe('App: zooming the hours', () => {
     await expect(page.locator('.col')).toHaveCount(7);
     expect(await colHeight(page)).toBe(1680);
     expect(await lastStored(page)).toBeNull();
+  });
+});
+
+test.describe('App: a click that cannot be answered says so', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+  });
+
+  test('an all-day chip whose detail will not load leaves an error, not silence', async ({ page }) => {
+    // The shape of the 2026-09-04 report: pressing an all-day event did
+    // nothing at all. The click was reaching the grid and the detail fetch
+    // was failing, and the app kept that to itself.
+    await page.goto(app('writable'));
+    const chip = page.getByRole('button', { name: 'Diwali' });
+    await expect(chip).toBeVisible();
+    await page.evaluate((id) => window.__harness.failNextEventCall(
+      'event_detail', id, 'that event is no longer here',
+    ), APP_ALLDAY_ID);
+
+    await chip.click();
+    await expect(page.locator('.err')).toContainText('Could not open "Diwali"');
+    await expect(page.locator('.err')).toContainText('no longer here');
+    await expect(page.locator('.pop')).toHaveCount(0);
+
+    // And the next click, with the failure spent, opens normally.
+    await chip.click();
+    await expect(page.getByRole('dialog', { name: 'Diwali' })).toBeVisible();
   });
 });

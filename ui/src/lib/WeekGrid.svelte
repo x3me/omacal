@@ -26,7 +26,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, weather = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onmove, ondraftmove = null, onresponded }: {
+  let { week, weather = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -102,6 +102,10 @@
      *  the same split `oncreate`/`onedit`/`ondelete` already use. `WeekGrid`
      *  contains no `invoke`, and that is a property worth keeping. */
     onmove: (event: UiEvent, span: { startMs: number; endMs: number }) => void;
+    /** A click that could not be answered — the event's detail would not
+     *  load. Handed up because `App` owns the one error line the window
+     *  has; the grid has nowhere of its own to say it. */
+    onerror?: ((message: string) => void) | null;
     /** Told after a successful RSVP, so `App` reloads the payload. The
      *  `responseOverrides` restyle below is display only: the struck block
      *  still carries the master's row id, and reopening it fetched the
@@ -831,11 +835,18 @@
     let d: EventDetail;
     try {
       d = await getEventDetail(event.id);
-    } catch {
+    } catch (e) {
       // Nothing to show. Close rather than leave an empty shell open, but
       // only if the user hasn't already clicked something else while this
-      // was in flight.
-      if (isSelected(event)) closePopover();
+      // was in flight — **and say so**. Closing silently made a failed
+      // fetch indistinguishable from a dead control: reported 2026-09-04
+      // as "I press an all-day event and nothing happens", which is
+      // exactly what a click looks like when the detail behind it cannot
+      // be read and the app keeps that to itself.
+      if (isSelected(event)) {
+        closePopover();
+        onerror?.(`Could not open "${event.title}" · ${String(e)}`);
+      }
       return;
     }
     if (!isSelected(event)) return; // superseded while loading
