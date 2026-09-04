@@ -107,9 +107,10 @@ export type AppSettings = {
    *  Quit lives. Turning it off is for setups where something else carries
    *  those actions, like Omarchy 4's bar widget. */
   trayIcon: boolean;
-  /** Whether the tray wears today's date instead of the app's mark. A tray
-   *  host draws icons and nothing else, so the date has to *be* the icon. */
-  trayDate: boolean;
+  /** Whether the surfaces that can show today's date do: the tray icon,
+   *  which *becomes* the date because a tray host draws icons and nothing
+   *  else, and the Omarchy bar widget, which reads it from the feed. */
+  showDate: boolean;
   /** Which palette the app wears. `'auto'` by default — omacal has no theme
    *  of its own and wears Omarchy's, which is exactly why the other two rows
    *  exist: off Omarchy there was no theme to wear and dark was the only
@@ -172,10 +173,11 @@ export const setNotificationsEnabled = (on: boolean) =>
 
 /** Stores the tray-icon preference; the backend also applies it to the
  *  running tray immediately, so the icon reacts to the click. */
-/** Stores the tray's face. The backend redresses the tray on the spot, so
- *  the choice shows without waiting for its minute tick. */
-export const setTrayDate = (on: boolean) =>
-  invoke<AppSettings>('set_tray_date', { on });
+/** Stores whether today's date is shown. The backend redresses the tray on
+ *  the spot and rewrites the widget's feed, so the choice shows on both
+ *  surfaces without waiting for either one's tick. */
+export const setShowDate = (on: boolean) =>
+  invoke<AppSettings>('set_show_date', { on });
 
 export const setTrayIcon = (on: boolean) =>
   invoke<AppSettings>('set_tray_icon', { on });

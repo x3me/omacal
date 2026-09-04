@@ -563,7 +563,7 @@ type StubSettings = {
   notificationsEnabled: boolean;
   minSyncIntervalMs: number;
   listMode: boolean;
-  trayDate: boolean;
+  showDate: boolean;
   hourHeight: number;
   fallbackReminderMinutes: number[];
   defaultCalendarId: number | null;
@@ -600,7 +600,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   defaultEventDurationMinutes: 60,
   listMode: false,
   // The mark, which is what the tray has always worn.
-  trayDate: false,
+  showDate: false,
   // The grid's own 70, so every column golden holds.
   hourHeight: 70,
   // The clock the app has always drawn, so every existing spec and every
@@ -900,8 +900,8 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_list_mode':
         settings = saveSettings({ ...settings, listMode: args.on as boolean });
         return { ...settings };
-      case 'set_tray_date':
-        settings = saveSettings({ ...settings, trayDate: args.on as boolean });
+      case 'set_show_date':
+        settings = saveSettings({ ...settings, showDate: args.on as boolean });
         return { ...settings };
       case 'set_hour_height':
         // The backend clamps; the stub stores what it was told, so a spec

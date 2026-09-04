@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omacal.upcoming",
   "name": "OmaCal upcoming events",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "author": "OmaCal",
   "description": "Current and upcoming Google Calendar events, fed by the OmaCal app",
   "kinds": [

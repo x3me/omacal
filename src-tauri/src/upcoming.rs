@@ -52,6 +52,25 @@ pub struct Feed {
     /// know, and a pre-tasks reader keeps working untouched.
     #[serde(default)]
     pub tasks: Vec<FeedTask>,
+    /// Today, for a reader that wants to draw it: the day of the month in
+    /// the *display* zone, and whether the user asked for it to be shown.
+    ///
+    /// The number is published rather than left to the reader's own clock
+    /// because the zone is the app's setting, not the desktop's — a widget
+    /// computing its own date would disagree with the grid beside it for
+    /// hours at a time. Another added field, so a reader that predates it
+    /// keeps working (2026-09-04).
+    #[serde(default)]
+    pub today: Option<FeedToday>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct FeedToday {
+    /// `1..=31` in the display zone at generation time.
+    pub day: u32,
+    /// The user's `show_date` setting. The reader draws the day only when
+    /// this is true; the tray obeys the same switch.
+    pub show: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -261,7 +280,9 @@ pub(crate) fn assemble(
     });
     events.truncate(CAP);
 
-    Feed { version: VERSION, generated_ms: now_ms, events, tasks: Vec::new() }
+    // `assemble` stays pure over its events — the tasks and today's date are
+    // both filled in by `current`, which has the pool the settings live in.
+    Feed { version: VERSION, generated_ms: now_ms, events, tasks: Vec::new(), today: None }
 }
 
 /// How far ahead a due date still counts as "worth a glance in the bar".
@@ -356,6 +377,10 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     // without a single CalDAV account contributes an empty list for free.
     let task_rows = omacal_store::tasks_for_ui(pool, now_ms).await?;
     feed.tasks = assemble_tasks(&task_rows, now_ms);
+    feed.today = Some(FeedToday {
+        day: crate::today_of_month(now_ms, &jiff::tz::TimeZone::system()),
+        show: crate::settings::read_settings(pool).await.show_date,
+    });
     Ok(feed)
 }
 
@@ -717,5 +742,30 @@ mod tests {
             assert!(p.ends_with("omacal/upcoming.json"));
             assert!(p.is_absolute());
         }
+    }
+}
+
+#[cfg(test)]
+mod today_field_tests {
+    use super::*;
+
+    /// The widget's copy of today comes from the same switch the tray obeys,
+    /// and carries the day rather than leaving the reader to compute one: the
+    /// zone is the app's setting, and a widget reading the desktop's clock
+    /// would disagree with the grid beside it for hours at a time.
+    #[tokio::test]
+    async fn the_feed_publishes_today_and_the_switch() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let now = 1_788_564_600_000; // 2026-09-04T23:30:00Z
+        let expected = crate::today_of_month(now, &jiff::tz::TimeZone::system());
+
+        let off = current(&pool, now).await.unwrap().today.unwrap();
+        assert_eq!(off.day, expected, "the day is published either way");
+        assert!(!off.show, "a fresh install shows the mark, not the date");
+
+        crate::settings::write(&pool, "show_date", "1").await.unwrap();
+        let on = current(&pool, now).await.unwrap().today.unwrap();
+        assert!(on.show, "the switch reaches the widget through the feed");
+        assert_eq!(on.day, expected);
     }
 }

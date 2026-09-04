@@ -66,6 +66,20 @@ Panel {
   readonly property var nextEvent: Model.nextAhead(events, nowMs)
   readonly property bool empty: panelSections.length === 0
 
+  // Today's date beside the mark, when OmaCal's own Appearance switch asks
+  // for it (2026-09-04). The *number* comes from the feed rather than from
+  // this widget's clock: the zone is the app's setting, and a widget reading
+  // the desktop's would disagree with the grid beside it for hours at a
+  // time. `setting("showDate")` is the local opt-out, for a bar that wants
+  // the app's tray to carry the date and not the bar.
+  readonly property var todayFeed: feed && feed.today ? feed.today : null
+  readonly property bool barVertical: root.bar ? root.bar.vertical === true : false
+  readonly property bool showDate: todayFeed !== null
+    && todayFeed.show === true
+    && root.setting("showDate", true) === true
+    && !barVertical
+  readonly property string dateText: todayFeed && todayFeed.day > 0 ? String(todayFeed.day) : ""
+
   // The bar glyph turns urgent-coloured when a meeting is less than ten
   // minutes out — the glanceable version of "wrap this conversation up".
   readonly property bool imminent: nextEvent !== null
@@ -255,15 +269,35 @@ Panel {
     active: root.imminent
     dimmed: !root.appRunning || root.events === null || root.events.length === 0
     tooltipText: root.heroMeta()
+    // Wider only when the date rides along: the slot is the icon's own, and
+    // a button that reserved room for a number nobody asked for would take
+    // panel width from its neighbours. `dateMetrics` measures the glyphs
+    // rather than guessing at them, so "9" and "31" each get what they need.
+    slotSize: Style.bar.iconSlot
+      + (root.showDate ? dateMetrics.width + Style.space(4) : 0)
     // The app's own mark, not a generic glyph: with the tray icon off this
     // is omacal's one presence in the bar. Monochrome like its neighbours;
-    // urgent-tinted when a meeting is imminent, as the glyph was.
+    // urgent-tinted when a meeting is imminent, as the glyph was — and the
+    // date, when shown, is tinted with it: one voice, not two.
     iconComponent: Component {
       Item {
-        OmacalMark {
+        Row {
           anchors.centerIn: parent
-          iconSize: Style.space(12)
-          color: root.imminent ? root.urgent : button.foreground
+          spacing: root.showDate ? Style.space(4) : 0
+          OmacalMark {
+            anchors.verticalCenter: parent.verticalCenter
+            iconSize: Style.space(12)
+            color: root.imminent ? root.urgent : button.foreground
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.showDate
+            text: root.dateText
+            color: root.imminent ? root.urgent : button.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.weight: Font.DemiBold
+          }
         }
       }
     }
@@ -271,6 +305,16 @@ Panel {
       if (buttonCode === Qt.MiddleButton) root.openApp()
       else root.toggle()
     }
+  }
+
+  // Off-screen, and only to measure: the button's width has to be known
+  // before the label is laid out inside it.
+  TextMetrics {
+    id: dateMetrics
+    text: root.dateText
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+    font.weight: Font.DemiBold
   }
 
   KeyboardPanel {

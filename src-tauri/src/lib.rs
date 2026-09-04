@@ -893,6 +893,45 @@ fn sync_result(total: u64, failed: &[String]) -> anyhow::Result<u64> {
 ///
 /// Extracted so the year views and the sync loop cannot disagree about where
 /// the edge is: both render decisions ("is this date fetched?") and fetch
+/// The day of the month `now_ms` falls on, in the display zone.
+///
+/// Shared by the two surfaces that draw it — the tray icon and the bar
+/// widget's feed — so they cannot disagree about which day it is. Falls back to a day no icon exists for — which draws the mark — when
+/// the instant cannot be read at all, rather than guessing a date.
+pub(crate) fn today_of_month(now_ms: i64, tz: &jiff::tz::TimeZone) -> u32 {
+    jiff::Timestamp::from_millisecond(now_ms)
+        .map(|t| t.to_zoned(tz.clone()).day() as u32)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod today_of_month_tests {
+    use super::today_of_month;
+
+    /// The date the tray wears is the date in the menu's own zone, not UTC's.
+    /// 2026-09-04T23:30Z is already the 5th in Kolkata and still the 4th in
+    /// Sofia; a tray that read UTC would show the wrong number for a third
+    /// of every day to anyone east of it.
+    #[test]
+    fn the_day_is_read_in_the_menus_zone() {
+        let ms = 1_788_564_600_000; // 2026-09-04T23:30:00Z
+        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        let kolkata = jiff::tz::TimeZone::get("Asia/Kolkata").unwrap();
+        assert_eq!(today_of_month(ms, &sofia), 5, "02:30 on the 5th in Sofia");
+        assert_eq!(today_of_month(ms, &kolkata), 5, "05:00 on the 5th in Kolkata");
+        let earlier = ms - 4 * 3_600_000; // 19:30Z, the 4th in both
+        assert_eq!(today_of_month(earlier, &sofia), 4);
+        assert_eq!(today_of_month(earlier, &kolkata), 5, "01:00 on the 5th there");
+    }
+
+    /// An instant no clock produces falls back to a day outside the month,
+    /// which `icon_for` answers with the mark rather than a panic.
+    #[test]
+    fn an_unreadable_instant_asks_for_no_date() {
+        assert_eq!(today_of_month(i64::MAX, &jiff::tz::TimeZone::UTC), 0);
+    }
+}
+
 /// decisions ("what should I ask Google for?") must read one definition.
 pub(crate) fn synced_window(now_ms: i64) -> (i64, i64) {
     const DAY: i64 = 24 * 3_600_000;
@@ -1582,7 +1621,7 @@ pub fn run() {
             tasks::task_lists,
             settings::set_list_mode,
             settings::set_hour_height,
-            settings::set_tray_date,
+            settings::set_show_date,
             settings::set_fallback_reminders,
             settings::set_default_calendar,
             settings::set_default_event_duration,

@@ -656,21 +656,12 @@ fn apply(app: &AppHandle, feed: &crate::upcoming::Feed, now_ms: i64,
     // against the icon currently shown is not something the tray can be
     // asked for.
     tray.set_icon(Some(if date_icon {
-        crate::tray_date::icon_for(today_of_month(now_ms, &tz))
+        crate::tray_date::icon_for(crate::today_of_month(now_ms, &tz))
     } else {
         crate::tray_date::mark()
     }))?;
 
     Ok(())
-}
-
-/// The day of the month `now_ms` falls on, in the zone the menu is written
-/// in. Falls back to a day no icon exists for — which draws the mark — when
-/// the instant cannot be read at all, rather than guessing a date.
-fn today_of_month(now_ms: i64, tz: &jiff::tz::TimeZone) -> u32 {
-    jiff::Timestamp::from_millisecond(now_ms)
-        .map(|t| t.to_zoned(tz.clone()).day() as u32)
-        .unwrap_or(0)
 }
 
 /// Recomputes the snapshot and dresses the tray with it.
@@ -699,7 +690,7 @@ pub(crate) fn refresh(app: &AppHandle) {
             }
         };
         let settings = crate::settings::read_settings(&pool).await;
-        if let Err(e) = apply(&app, &feed, now, settings.time_format, settings.tray_date) {
+        if let Err(e) = apply(&app, &feed, now, settings.time_format, settings.show_date) {
             tracing::warn!(%e, "could not update the tray menu");
         }
     });
@@ -774,7 +765,7 @@ mod tests {
     }
 
     fn feed(events: Vec<FeedEvent>) -> Feed {
-        Feed { version: 1, generated_ms: T0, events, tasks: Vec::new() }
+        Feed { version: 1, generated_ms: T0, events, tasks: Vec::new(), today: None }
     }
 
     /// The wearer's zone. Fixed rather than `TimeZone::system()` so these
@@ -1157,30 +1148,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod today_of_month_tests {
-    use super::*;
-
-    /// The date the tray wears is the date in the menu's own zone, not UTC's.
-    /// 2026-09-04T23:30Z is already the 5th in Kolkata and still the 4th in
-    /// Sofia; a tray that read UTC would show the wrong number for a third
-    /// of every day to anyone east of it.
-    #[test]
-    fn the_day_is_read_in_the_menus_zone() {
-        let ms = 1_788_564_600_000; // 2026-09-04T23:30:00Z
-        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
-        let kolkata = jiff::tz::TimeZone::get("Asia/Kolkata").unwrap();
-        assert_eq!(today_of_month(ms, &sofia), 5, "02:30 on the 5th in Sofia");
-        assert_eq!(today_of_month(ms, &kolkata), 5, "05:00 on the 5th in Kolkata");
-        let earlier = ms - 4 * 3_600_000; // 19:30Z, the 4th in both
-        assert_eq!(today_of_month(earlier, &sofia), 4);
-        assert_eq!(today_of_month(earlier, &kolkata), 5, "01:00 on the 5th there");
-    }
-
-    /// An instant no clock produces falls back to a day outside the month,
-    /// which `icon_for` answers with the mark rather than a panic.
-    #[test]
-    fn an_unreadable_instant_asks_for_no_date() {
-        assert_eq!(today_of_month(i64::MAX, &jiff::tz::TimeZone::UTC), 0);
-    }
-}
