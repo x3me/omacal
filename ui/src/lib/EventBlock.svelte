@@ -126,6 +126,7 @@
      `transform` is absent rather than `none` while idle. -->
 <button
   class="ev {event.response}"
+  class:nobodycoming={event.all_guests_declined}
   class:dragging={preview !== null}
   class:keyboard={keyboardSelected}
   data-kbd-selected-event={keyboardSelected ? '' : undefined}
@@ -142,7 +143,7 @@
     left:calc({left}% + 3px); width:calc({width}% - 6px);
     --cal:{event.color}; z-index:{placed.column + 1};
   "
-  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}"
+  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}"
   onclick={open}
   onmouseenter={showTip}
   onmouseleave={hideTip}
@@ -161,7 +162,13 @@
   <!-- `?` means MAYBE — the answer niki gave, in the letter Google and
        Outlook both use for it (2026-08-10, by request). An unanswered invite
        carries no letter: its dashed ring is the whole of "nothing yet". -->
-  {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
+  <!-- The corner carries one letter, and "nobody is coming" outranks "you
+       said maybe": it is rarer, it is about the meeting rather than about
+       you, and it is the one that wants acting on. `✕` is the popover's own
+       glyph for a declined guest, so the mark on the block and the marks in
+       the guest list behind it are the same character. -->
+  {#if event.all_guests_declined}<i class="rs" title="Everyone declined">✕</i>
+  {:else if event.response === 'tentative'}<i class="rs">?</i>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
   {#if showMeta && meta}<em>{meta}</em>{/if}
@@ -277,6 +284,15 @@
                  color: color-mix(in srgb, var(--cal) 22%, var(--muted));
                  --spine: color-mix(in srgb, var(--cal) 45%, var(--bg)); }
   .ev.declined b { text-decoration: line-through; }
+
+  /* Everyone else said no (2026-09-04). Struck like a declined event,
+     because that is what "not happening" already looks like here — but the
+     fill stays, which is what keeps the two apart: `.declined` hollows to
+     the page and means *you* are not going, while this is still your event,
+     in its own colour, with nobody coming to it. The strike is dotted for
+     the same reason: near enough to read at a glance, different enough to
+     tell apart when the two sit in one column. */
+  .ev.nobodycoming b { text-decoration: line-through; text-decoration-style: dotted; }
 
   /* Deepens the fill on hover so an expanded block reads as lifted above the
      ones it covers. Every state is already opaque at rest, so this is emphasis

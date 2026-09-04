@@ -51,6 +51,19 @@ pub struct UiEvent {
     /// list row's Join reads this first and falls back to a recognised
     /// meeting URL in `location` — the popover's exact derivation.
     pub conference: Option<String>,
+    /// **Every invitee other than you has said no**, and there was at least
+    /// one to say it. A meeting nobody is coming to, which until now was
+    /// visible only by opening the event and reading the guest list
+    /// (2026-09-04, Plamen: a 1:1 he organised, declined, looked exactly
+    /// like one that was going ahead).
+    ///
+    /// Deliberately not "the organizer's guests declined": whether you own
+    /// the event or were invited to it, an event whose every other invitee
+    /// has declined is not happening, and `to_ui` has no account email to
+    /// decide ownership with anyway (`events::is_organizer` needs one). The
+    /// signed-in user's own row is excluded through `is_self`, so your own
+    /// "no" — which already strikes the block through — never sets this.
+    pub all_guests_declined: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +131,10 @@ fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
         attendees: src.attendees.len() as u32,
         recurring: src.recurrence.is_some() || src.recurring_event_id.is_some(),
         conference: src.conference_uri.clone(),
+        all_guests_declined: {
+            let mut others = src.attendees.iter().filter(|a| !a.is_self).peekable();
+            others.peek().is_some() && others.all(|a| a.response_status == "declined")
+        },
     }
 }
 
@@ -2277,5 +2294,76 @@ mod shifted_day_tests {
     #[test]
     fn an_unknown_zone_still_yields_a_boundary() {
         assert_eq!(day_start_shifted(1_000 * DAY_MS, -3, "Mars/Olympus"), 997 * DAY_MS);
+    }
+}
+
+#[cfg(test)]
+mod all_guests_declined_tests {
+    use super::*;
+    use omacal_store::Attendee;
+
+    fn guest(response: &str, is_self: bool) -> Attendee {
+        Attendee {
+            email: format!("{response}-{is_self}@x.com"),
+            display_name: None,
+            response_status: response.into(),
+            optional: false,
+            is_self,
+            comment: None,
+            additional_guests: 0,
+        }
+    }
+
+    fn with(attendees: Vec<Attendee>) -> bool {
+        let mut src = omacal_store::StoredEvent {
+            id: 1, calendar_id: 1, google_id: "g".into(), summary: Some("Meeting".into()),
+            location: None, start_utc: 0, end_utc: 3_600_000,
+            start_tz: "UTC".into(), end_tz: "UTC".into(),
+            is_all_day: false, recurrence: None,
+            recurring_event_id: None, original_start_utc: None,
+            status: "confirmed".into(), self_response: Some("accepted".into()),
+            conference_uri: None, color_hex: None, calendar_timezone: "UTC".into(),
+            description: None, etag: None, sequence: 0, organizer_email: None,
+            guests_can_modify: false, attendees: Vec::new(),
+            reminders: Default::default(), calendar_default_reminders: Vec::new(),
+        };
+        src.attendees = attendees;
+        to_ui(&src, src.start_utc, src.end_utc).all_guests_declined
+    }
+
+    /// The reported case: a 1:1 the user organised and accepted, and the one
+    /// guest said no. Nothing on the block said so before this flag.
+    #[test]
+    fn one_guest_who_declined_is_everyone() {
+        assert!(with(vec![guest("accepted", true), guest("declined", false)]));
+    }
+
+    /// One "no" among several is not this. Partial declines live in the guest
+    /// list, where each is named; marking the block for them would put a
+    /// strike through half a busy week.
+    #[test]
+    fn one_no_among_others_is_not() {
+        assert!(!with(vec![
+            guest("accepted", true),
+            guest("declined", false),
+            guest("accepted", false),
+        ]));
+        assert!(!with(vec![guest("accepted", true), guest("needsAction", false)]));
+    }
+
+    /// **Your own no is not everyone's.** It already hollows the block and
+    /// strikes the title; setting this as well would mark every event you
+    /// have ever declined as abandoned by its guests.
+    #[test]
+    fn the_users_own_decline_is_excluded() {
+        assert!(!with(vec![guest("declined", true)]));
+        assert!(!with(vec![guest("declined", true), guest("accepted", false)]));
+    }
+
+    /// A solo event has nobody to decline it. `attendees` is empty for one,
+    /// and an empty list must not read as "all of them said no".
+    #[test]
+    fn a_solo_event_is_never_marked() {
+        assert!(!with(Vec::new()));
     }
 }

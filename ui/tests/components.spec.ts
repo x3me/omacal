@@ -5232,3 +5232,58 @@ test.describe('WeekGrid: more all-day events than the band draws', () => {
     if (await bare.count()) expect(await bare.evaluate((el) => el.tagName)).toBe('DIV');
   });
 });
+
+test.describe('EventBlock: nobody is coming', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=EventBlock&f=${f}`;
+
+  test('an event whose every guest declined is struck, marked, and not confused with your own no', async ({ page }) => {
+    // Reported 2026-09-04: a 1:1 the user organised, declined by its only
+    // guest, looked exactly like one that was going ahead. The popover knew;
+    // the grid did not.
+    await page.goto(show('nobody-coming-15'));
+    const ev = page.locator('.ev');
+    await expect(ev).toHaveClass(/nobodycoming/);
+    await expect(ev.locator('.rs')).toHaveText('✕');
+    await expect(ev).toHaveAttribute('aria-label', /everyone declined/);
+    const struck = await ev.locator('b').evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { line: s.textDecorationLine, style: s.textDecorationStyle };
+    });
+    expect(struck.line).toContain('line-through');
+    // Dotted, so the two "not happening" states are told apart at a glance.
+    expect(struck.style).toBe('dotted');
+    // And the block keeps its own fill: `.declined` hollows to the page,
+    // which is what says *you* are not going.
+    const fill = await ev.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+    await page.goto(show('rsvp-declined-15'));
+    const declined = page.locator('.ev');
+    await expect(declined).not.toHaveClass(/nobodycoming/);
+    await expect(declined.locator('.rs')).toHaveCount(0);
+    expect(await declined.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe(fill);
+    expect(await declined.locator('b').evaluate((el) => getComputedStyle(el).textDecorationStyle))
+      .toBe('solid');
+  });
+});
+
+test.describe('EventPopover: who said no', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
+
+  test('the guest list is summed above itself, and only when somebody declined', async ({ page }) => {
+    // On a long guest list "how many are out" was a counting exercise.
+    await page.goto(show('everyone-declined'));
+    await expect(page.locator('.tally')).toHaveText('The other guest declined');
+    // Emphasised, because every guest being out is the state worth a look.
+    await expect(page.locator('.tally')).toHaveClass(/none/);
+
+    await page.goto(show('some-declined'));
+    await expect(page.locator('.tally')).toHaveText('1 of 3 guests declined');
+    await expect(page.locator('.tally')).not.toHaveClass(/none/);
+
+    // Nobody out, no row: "0 declined" on every event in the app is furniture.
+    await page.goto(show('standup'));
+    await expect(page.locator('.guest')).toHaveCount(3);
+    await expect(page.locator('.tally')).toHaveCount(1); // petya declined
+    await expect(page.locator('.tally')).toHaveText('1 of 2 guests declined');
+  });
+});

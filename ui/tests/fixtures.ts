@@ -87,6 +87,9 @@ const ev = (o: Partial<UiEvent> & { title: string; start_ms: number; end_ms: num
   attendees: 0,
   recurring: false,
   conference: null,
+  // Nobody has declined: the quiet default again, and the one every fixture
+  // that predates the mark describes.
+  all_guests_declined: false,
   ...o,
 });
 
@@ -1668,6 +1671,19 @@ POPOVER_DETAILS[APP_GUESTS_ID] = detail({
 /** One guest, not two: the person doing the moving is never counted. */
 export const APP_GUESTS_COUNT = 1;
 
+/** The reported case (2026-09-04): a meeting the user organised and accepted,
+ *  whose only guest declined. The popover names it above the guest list. */
+export const APP_ALL_DECLINED_ID = 9241;
+POPOVER_DETAILS[APP_ALL_DECLINED_ID] = detail({
+  id: APP_ALL_DECLINED_ID, title: 'Plamen - Teodor 1:1', can_edit: true,
+  calendar_id: APP_PRIMARY_CALENDAR_ID,
+  start_ms: APP_GUESTS_START, end_ms: APP_GUESTS_START + 30 * 60_000,
+  attendees: [
+    attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+    attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
+  ],
+});
+
 POPOVER_DETAILS[APP_GUEST_OF_ID] = detail({
   id: APP_GUEST_OF_ID, title: 'Vendor review', can_edit: true,
   calendar_id: APP_PRIMARY_CALENDAR_ID,
@@ -2009,6 +2025,16 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     'rsvp-needsAction-15': block('Investors', 15, 'needsAction', null),
     'rsvp-tentative-15': block('Legal review', 15, 'tentative', null),
     'rsvp-declined-15': block('All hands', 15, 'declined', null),
+    // The two states that both mean "not happening" and must not be
+    // confusable: *you* declined it, and everyone else did (2026-09-04).
+    'nobody-coming-15': {
+      ...block('Plamen - Teodor 1:1', 15, 'accepted', null),
+      event: ev({
+        title: 'Plamen - Teodor 1:1', location: null, response: 'accepted',
+        attendees: 2, all_guests_declined: true,
+        start_ms: MON + 9 * H, end_ms: MON + 9 * H + 15 * 60_000,
+      }),
+    },
   },
   AllDayBand: {
     // None of these specs click a chip — opening a popover needs a real
@@ -2415,6 +2441,34 @@ export const FIXTURES: Record<string, Record<string, any>> = {
           attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
           attendee({ email: 'me@x.com', is_self: true, response_status: 'needsAction' }),
           attendee({ email: 'petya@x.com', response_status: 'declined' }),
+        ],
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // The tally above the guest list (2026-09-04): one guest, and they said
+    // no, which is the case that prompted it. `everyone-declined` and
+    // `some-declined` differ only in how many said yes, so the two wordings
+    // are pinned against the same shape.
+    'everyone-declined': {
+      detail: detail({
+        id: 3,
+        attendees: [
+          attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+          attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
+        ],
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    'some-declined': {
+      detail: detail({
+        id: 4,
+        attendees: [
+          attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
+          attendee({ email: 'ivan@x.com', display_name: 'Ivan', response_status: 'needsAction' }),
+          attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
         ],
       }),
       anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,

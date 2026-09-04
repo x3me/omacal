@@ -16,6 +16,11 @@ export type UiEvent = {
    *  and a recognised meeting URL in `location` as one fact, the same pair
    *  of places the popover reads. */
   conference: string | null;
+  /** Every invitee other than you has declined, and there was at least one.
+   *  The block and the list row mark it; the popover counts it. Your own
+   *  "no" is not this — that is `response`, and it already strikes the
+   *  block through. */
+  all_guests_declined: boolean;
 };
 
 /** Opens an event's meeting link in the system browser, backend-side. The
