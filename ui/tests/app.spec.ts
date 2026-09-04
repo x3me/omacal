@@ -4669,3 +4669,36 @@ test.describe('App: a click that cannot be answered says so', () => {
     await expect(page.getByRole('dialog', { name: 'Diwali' })).toBeVisible();
   });
 });
+
+test.describe("App: the tray's face", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+  });
+
+  test("today's date can be asked for in the tray, and is remembered", async ({ page }) => {
+    // Asked for 2026-09-04: a tray host draws icons and nothing else, so the
+    // date has to *be* the icon, the way a calendar's icon has always shown
+    // one. Off by default — the mark is what says which app it is.
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const box = modal.getByLabel("Show today's date in the tray");
+    await expect(box).not.toBeChecked();
+
+    await box.check();
+    const calls = await page.evaluate(
+      () => window.__harness.calls.filter((c) => c.cmd === 'set_tray_date').map((c) => c.args),
+    );
+    expect(calls).toEqual([{ on: true }]);
+
+    // Reopened, the box shows what was stored rather than its own default.
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await expect(modal.getByLabel("Show today's date in the tray")).toBeChecked();
+  });
+});

@@ -15,7 +15,7 @@
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setTrayIcon, setWeatherEnabled, setWeekStart,
+    setTrayDate, setTrayIcon, setWeatherEnabled, setWeekStart,
     setWeekStartsToday, setWeekViewDays,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
@@ -470,6 +470,17 @@
       note = { text: String(e), kind: 'error' };
     } finally {
       caldavBusy = false;
+    }
+  }
+
+  async function toggleTrayDate(on: boolean) {
+    note = null;
+    try {
+      settings = await setTrayDate(on);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      // Same checkbox repair as `toggleTrayIcon`.
+      settings = settings ? { ...settings } : null;
     }
   }
 
@@ -992,6 +1003,28 @@
           Week, Month, Year and Big Year all start their rows on this day.
         </p>
       {/if}
+
+      <!-- The tray's *face*, here rather than beside "Show the tray icon" in
+           General: that switch is about whether the app has a tray at all,
+           which is where Quit lives and therefore behaviour; this is about
+           what it looks like once it does. Asked for in Appearance
+           (2026-09-04) and it belongs here on its own merits. -->
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={settings?.trayDate ?? false}
+          disabled={!settings || settings.trayIcon === false}
+          onchange={(e) => toggleTrayDate(e.currentTarget.checked)}
+        />
+        Show today's date in the tray
+      </label>
+      <p class="hint">
+        The icon becomes the date, the way a calendar's icon does. A tray
+        draws icons and nothing else, so this replaces the mark rather than
+        sitting beside it; the number wears the mark's own colour, and it
+        follows the clock without a restart. Needs the tray icon itself,
+        which General turns on and off.
+      </p>
     {:else if tab === 'Calendars'}
       <!-- **The same rows the header's popover shows, from the same
            component.** Extracted rather than reimplemented, which is what

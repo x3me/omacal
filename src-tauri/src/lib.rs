@@ -36,6 +36,7 @@ mod tasks;
 mod theme;
 mod theme_watch;
 mod tray;
+mod tray_date;
 mod tz_watch;
 #[cfg(target_os = "linux")]
 mod omarchy_plugin;
@@ -1581,6 +1582,7 @@ pub fn run() {
             tasks::task_lists,
             settings::set_list_mode,
             settings::set_hour_height,
+            settings::set_tray_date,
             settings::set_fallback_reminders,
             settings::set_default_calendar,
             settings::set_default_event_duration,
