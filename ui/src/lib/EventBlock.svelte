@@ -162,13 +162,7 @@
   <!-- `?` means MAYBE — the answer niki gave, in the letter Google and
        Outlook both use for it (2026-08-10, by request). An unanswered invite
        carries no letter: its dashed ring is the whole of "nothing yet". -->
-  <!-- The corner carries one letter, and "nobody is coming" outranks "you
-       said maybe": it is rarer, it is about the meeting rather than about
-       you, and it is the one that wants acting on. `✕` is the popover's own
-       glyph for a declined guest, so the mark on the block and the marks in
-       the guest list behind it are the same character. -->
-  {#if event.all_guests_declined}<i class="rs" title="Everyone declined">✕</i>
-  {:else if event.response === 'tentative'}<i class="rs">?</i>{/if}
+  {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
   {#if showMeta && meta}<em>{meta}</em>{/if}
@@ -291,8 +285,14 @@
      the page and means *you* are not going, while this is still your event,
      in its own colour, with nobody coming to it. The strike is dotted for
      the same reason: near enough to read at a glance, different enough to
-     tell apart when the two sit in one column. */
-  .ev.nobodycoming b { text-decoration: line-through; text-decoration-style: dotted; }
+     tell apart when the two sit in one column.
+
+     The title also drops to the muted voice, and there is no corner glyph.
+     A `✕` floating at the top right read as a speck of debris on the block
+     (2026-09-04, first cut: "this is a bit ugly"), and the strike plus the
+     quieter title already say it. The popover's tally says it in words. */
+  .ev.nobodycoming b { text-decoration: line-through; text-decoration-style: dotted;
+                       color: var(--muted); }
 
   /* Deepens the fill on hover so an expanded block reads as lifted above the
      ones it covers. Every state is already opaque at rest, so this is emphasis

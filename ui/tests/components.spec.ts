@@ -5307,3 +5307,39 @@ test.describe('WeekGrid: the day header on one line', () => {
     expect(await page.locator('.head .wx').count()).toBeLessThan(centres.length);
   });
 });
+
+test.describe('EventBlock: nobody is coming', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=EventBlock&f=${f}`;
+
+  test('an event whose every guest declined is struck, marked, and not confused with your own no', async ({ page }) => {
+    // Reported 2026-09-04: a 1:1 the user organised, declined by its only
+    // guest, looked exactly like one that was going ahead. The popover knew;
+    // the grid did not.
+    await page.goto(show('nobody-coming-15'));
+    const ev = page.locator('.ev');
+    await expect(ev).toHaveClass(/nobodycoming/);
+    await expect(ev).toHaveAttribute('aria-label', /everyone declined/);
+    // No corner glyph: a `✕` floating at the top right read as debris on the
+    // block. The strike and the muted title carry it, and the popover's
+    // tally says it in words.
+    await expect(ev.locator('.rs')).toHaveCount(0);
+    const struck = await ev.locator('b').evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { line: s.textDecorationLine, style: s.textDecorationStyle };
+    });
+    expect(struck.line).toContain('line-through');
+    // Dotted, so the two "not happening" states are told apart at a glance.
+    expect(struck.style).toBe('dotted');
+    // And the block keeps its own fill: `.declined` hollows to the page,
+    // which is what says *you* are not going.
+    const fill = await ev.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+    await page.goto(show('rsvp-declined-15'));
+    const declined = page.locator('.ev');
+    await expect(declined).not.toHaveClass(/nobodycoming/);
+    await expect(declined.locator('.rs')).toHaveCount(0);
+    expect(await declined.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe(fill);
+    expect(await declined.locator('b').evaluate((el) => getComputedStyle(el).textDecorationStyle))
+      .toBe('solid');
+  });
+});
