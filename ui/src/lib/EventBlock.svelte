@@ -165,6 +165,12 @@
   {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
+  <!-- Words, not a mark. A strike through the title and a ✕ in the corner
+       were both tried and both looked like damage to the block rather than
+       news about the meeting (2026-09-04). This line says it where the
+       location says its own thing, in the same muted voice, and the fill
+       below carries the rest at heights too short for any line at all. -->
+  {#if showMeta && event.all_guests_declined}<em class="none">Everyone declined</em>{/if}
   {#if showMeta && meta}<em>{meta}</em>{/if}
   <!-- aria-hidden: the button's own label already says all of this, so the
        tooltip is presentation for the pointer, not a second announcement. -->
@@ -254,6 +260,21 @@
   .rs { position: absolute; top: 1px; right: 4px; font-size: 9px;
         font-style: normal; font-weight: 700; opacity: .8; }
 
+  /* Everyone else said no (2026-09-04). Half the usual fill, and nothing
+     else: the block recedes a step without changing shape, which is as much
+     as a state deserves that is still your event at its own time in its own
+     colour. Two louder cuts were tried first and both were rejected on
+     sight — a ✕ in the corner ("a bit ugly") and a strike through the title
+     ("still not very good looking") — and both had the same fault: they
+     drew damage on the block instead of telling the user something. The
+     `.none` line above does the telling wherever there is room for a line,
+     and the popover's tally does it in full.
+
+     Ordered before `.declined` so that one still wins when both apply: a
+     meeting you declined *and* nobody else came to is, to you, declined. */
+  .ev.nobodycoming { background-color: color-mix(in srgb, var(--cal) 8%, var(--bg)); }
+  .ev em.none { opacity: .75; }
+
   /* State is carried by the fill, so it survives at 15 minutes tall. Every
      state stays opaque: "unfilled" means the colour of the grid, not a hole
      through to whatever block is underneath. */
@@ -279,20 +300,6 @@
                  --spine: color-mix(in srgb, var(--cal) 45%, var(--bg)); }
   .ev.declined b { text-decoration: line-through; }
 
-  /* Everyone else said no (2026-09-04). Struck like a declined event,
-     because that is what "not happening" already looks like here — but the
-     fill stays, which is what keeps the two apart: `.declined` hollows to
-     the page and means *you* are not going, while this is still your event,
-     in its own colour, with nobody coming to it. The strike is dotted for
-     the same reason: near enough to read at a glance, different enough to
-     tell apart when the two sit in one column.
-
-     The title also drops to the muted voice, and there is no corner glyph.
-     A `✕` floating at the top right read as a speck of debris on the block
-     (2026-09-04, first cut: "this is a bit ugly"), and the strike plus the
-     quieter title already say it. The popover's tally says it in words. */
-  .ev.nobodycoming b { text-decoration: line-through; text-decoration-style: dotted;
-                       color: var(--muted); }
 
   /* Deepens the fill on hover so an expanded block reads as lifted above the
      ones it covers. Every state is already opaque at rest, so this is emphasis

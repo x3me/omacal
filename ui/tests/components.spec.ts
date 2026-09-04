@@ -5311,35 +5311,38 @@ test.describe('WeekGrid: the day header on one line', () => {
 test.describe('EventBlock: nobody is coming', () => {
   const show = (f: string) => `/tests/harness/index.html?c=EventBlock&f=${f}`;
 
-  test('an event whose every guest declined is struck, marked, and not confused with your own no', async ({ page }) => {
+  test('it is said in words, and drawn as damage to the block in none of them', async ({ page }) => {
     // Reported 2026-09-04: a 1:1 the user organised, declined by its only
-    // guest, looked exactly like one that was going ahead. The popover knew;
-    // the grid did not.
-    await page.goto(show('nobody-coming-15'));
+    // guest, looked exactly like one that was going ahead. Two louder cuts
+    // were rejected on sight before this one — a ✕ in the corner, then a
+    // strike through the title — so the marks they used are asserted absent,
+    // not merely different.
+    await page.goto(show('nobody-coming-60'));
     const ev = page.locator('.ev');
     await expect(ev).toHaveClass(/nobodycoming/);
     await expect(ev).toHaveAttribute('aria-label', /everyone declined/);
-    // No corner glyph: a `✕` floating at the top right read as debris on the
-    // block. The strike and the muted title carry it, and the popover's
-    // tally says it in words.
     await expect(ev.locator('.rs')).toHaveCount(0);
-    const struck = await ev.locator('b').evaluate((el) => {
-      const s = getComputedStyle(el);
-      return { line: s.textDecorationLine, style: s.textDecorationStyle };
-    });
-    expect(struck.line).toContain('line-through');
-    // Dotted, so the two "not happening" states are told apart at a glance.
-    expect(struck.style).toBe('dotted');
-    // And the block keeps its own fill: `.declined` hollows to the page,
-    // which is what says *you* are not going.
-    const fill = await ev.evaluate((el) => getComputedStyle(el).backgroundColor);
+    await expect(ev.locator('em.none')).toHaveText('Everyone declined');
+    // The location still gets its line: the news is added, not substituted.
+    await expect(ev.locator('em').last()).toHaveText('Office');
+    expect(await ev.locator('b').evaluate((el) => getComputedStyle(el).textDecorationLine))
+      .toBe('none');
 
+    // Under the ladder's meta threshold there is no room for a line, and the
+    // fill carries it alone: quieter than an ordinary block, but not the
+    // hollow of one you declined yourself.
+    await page.goto(show('nobody-coming-15'));
+    await expect(page.locator('.ev em.none')).toHaveCount(0);
+    const quiet = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.goto(show('ladder-15'));
+    const ordinary = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
     await page.goto(show('rsvp-declined-15'));
-    const declined = page.locator('.ev');
-    await expect(declined).not.toHaveClass(/nobodycoming/);
-    await expect(declined.locator('.rs')).toHaveCount(0);
-    expect(await declined.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe(fill);
-    expect(await declined.locator('b').evaluate((el) => getComputedStyle(el).textDecorationStyle))
-      .toBe('solid');
+    const declined = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(quiet).not.toBe(ordinary);
+    expect(quiet).not.toBe(declined);
+    // And a block you declined yourself still wears its own strike, which
+    // is the idiom this state deliberately stopped borrowing.
+    expect(await page.locator('.ev b').evaluate((el) => getComputedStyle(el).textDecorationLine))
+      .toContain('line-through');
   });
 });

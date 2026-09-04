@@ -2044,6 +2044,16 @@ export const FIXTURES: Record<string, Record<string, any>> = {
         start_ms: MON + 9 * H, end_ms: MON + 9 * H + 15 * 60_000,
       }),
     },
+    // The same event at a height that has room for a line, which is where
+    // the state is said in words rather than carried by the fill alone.
+    'nobody-coming-60': {
+      ...block('Plamen - Teodor 1:1', 60, 'accepted', 'Office'),
+      event: ev({
+        title: 'Plamen - Teodor 1:1', location: 'Office', response: 'accepted',
+        attendees: 2, all_guests_declined: true,
+        start_ms: MON + 9 * H, end_ms: MON + 10 * H,
+      }),
+    },
   },
   AllDayBand: {
     // None of these specs click a chip — opening a popover needs a real
