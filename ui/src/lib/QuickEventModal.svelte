@@ -6,6 +6,7 @@
   import {
     parseQuickEvent, quickPreviewRows, QUICK_EVENT_EXAMPLES,
   } from './quickevent';
+  import { getZoomStatus } from './zoomaccount';
 
   let {
     nowMs,
@@ -30,13 +31,19 @@
   let line = $state('');
   let fieldEl: HTMLTextAreaElement | undefined = $state();
   let editEl: HTMLButtonElement | undefined = $state();
+  let zoomCanCreate = $state(false);
   const parsed = $derived(parseQuickEvent(line, {
-    nowMs, anchorDayMs, calendarId, defaultDurationMinutes, calendars,
+    nowMs, anchorDayMs, calendarId, defaultDurationMinutes, calendars, zoomCanCreate,
   }));
   const rows = $derived(quickPreviewRows(parsed, calendars));
   const guests = $derived(parsed.value.guests.length);
 
-  onMount(() => fieldEl?.focus());
+  onMount(() => {
+    fieldEl?.focus();
+    getZoomStatus()
+      .then((status) => (zoomCanCreate = status.configured && status.connected))
+      .catch(() => (zoomCanCreate = false));
+  });
   escapeCloses(() => true, () => onclose());
 
   function create() {
@@ -112,7 +119,7 @@
           Time: <code>2p</code>, <code>14:00</code>, <code>2–3:30pm</code> ·
           Repeat: <code>MWF</code>, <code>TTh</code>, <code>every Tue</code> ·
           End: <code>until Sep 30</code>, <code>for 10 occurrences</code> ·
-          Extras: <code>+meet</code>, <code>cal:Work</code>, <code>loc:"Room 4"</code>
+          Extras: <code>+meet</code>, <code>+zoom</code>, <code>cal:Work</code>, <code>loc:"Room 4"</code>
         </p>
       </div>
     {:else}

@@ -1594,6 +1594,24 @@ test.describe('Header', () => {
     await expect(modal.getByRole('button', { name: 'Add account' })).toBeVisible();
   });
 
+  test('Zoom connects independently and can be disconnected without changing calendar accounts', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'Accounts');
+    await modal.getByRole('button', { name: 'Connect Zoom' }).click();
+    await expect(modal.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+    await expect(modal).toContainText('Zoom connected');
+
+    await modal.getByRole('button', { name: 'Disconnect' }).click();
+    await expect(modal.getByRole('button', { name: 'Connect Zoom' })).toBeVisible();
+    await expect(modal).toContainText('Existing meeting links are unchanged');
+    await expect(modal.getByRole('listitem')).toContainText(['me@x.com']);
+
+    const commands = await page.evaluate(() =>
+      (window as any).__harness.calls.map((call: any) => call.cmd));
+    expect(commands).toContain('connect_zoom');
+    expect(commands).toContain('disconnect_zoom');
+  });
+
   test('signing an account out asks first, then empties the list', async ({ page }) => {
     // Two clicks by design: the first arms, the second is worded as the
     // destructive thing it is. The harness's sign_out answers with no
@@ -3952,6 +3970,20 @@ test.describe('EventForm', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByRole('listbox', { name: 'Calendar' })).toHaveCount(0);
     await expect(page.getByRole('dialog', { name: 'New event' })).toBeVisible();
+  });
+
+  test('a connected Zoom account creates a meeting instead of requiring a pasted link', async ({ page }) => {
+    await open(page, 'create-zoom');
+    await page.getByLabel('Add video call').selectOption('zoom');
+    await expect(page.getByText('A unique Zoom meeting will be created when you save.'))
+      .toBeVisible();
+    await expect(page.getByLabel('Zoom meeting link'))
+      .toHaveAttribute('placeholder', 'Existing Zoom link (optional)');
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields.conference).toBe('zoom');
+    expect(saved.fields.location).toBeNull();
   });
 
   test('a create seeded with a calendar it cannot write to falls back to one it can', async ({ page }) => {

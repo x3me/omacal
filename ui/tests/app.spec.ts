@@ -1779,34 +1779,20 @@ test.describe('App', () => {
     expect(args.fields.weeklyDays).toEqual(['MO', 'WE', 'FR']);
   });
 
-  test('Make it a zoom continues into the Zoom hook and saves a pasted link', async ({ page }) => {
+  test('Make it a zoom creates through the connected Zoom account', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('q');
     const quick = page.getByRole('dialog', { name: 'Quick add event' });
     await quick.getByLabel('Describe the event').fill('tomorrow 3p 45m Design review make it a zoom');
 
-    // Calendar credentials cannot mint a Zoom meeting, so direct creation is
-    // blocked until the real link exists; the requested provider still rides
-    // into the ordinary editor rather than being discarded.
-    await expect(quick.getByRole('button', { name: 'Create event' })).toBeDisabled();
-    await expect(quick.getByText('Paste the Zoom meeting link before creating the event.'))
-      .toBeVisible();
-    await quick.getByRole('button', { name: 'Continue editing' }).click();
-
-    const form = newForm(page);
-    const video = form.getByLabel('Add video call');
-    await expect(video).toHaveValue('zoom');
-    await expect(video.locator('option')).toHaveText([
-      'Add Video Call', 'Google Meet', 'Zoom',
-    ]);
-    const zoom = form.getByLabel('Zoom meeting link');
-    await zoom.fill('https://us02web.zoom.us/j/987654321');
-    await form.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(quick.getByText('Zoom · Create new meeting', { exact: true })).toBeVisible();
+    await expect(quick.getByRole('button', { name: 'Create event' })).toBeEnabled();
+    await quick.getByRole('button', { name: 'Create event' }).click();
 
     const [args] = await callsTo(page, 'create_event');
     expect(args.fields.summary).toBe('Design review');
-    expect(args.fields.location).toBe('Zoom: https://us02web.zoom.us/j/987654321');
-    expect(args.fields.conference).toBeUndefined();
+    expect(args.fields.location).toBeNull();
+    expect(args.fields.conference).toBe('zoom');
   });
 
   test('Add Video Call generates Meet from an ordinary new event', async ({ page }) => {
@@ -1904,6 +1890,19 @@ test.describe('App', () => {
     const synced = await page.evaluate(() =>
       window.__harness.calls.filter((c) => c.cmd === 'sync_now').length);
     expect(synced, 'nothing was created, so nothing may sync as if it was').toBe(0);
+  });
+
+  test('saving the Zoom choice carries its API-create instruction to the event command', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('n');
+    await newForm(page).getByLabel('Title', { exact: true }).fill('Zoom planning');
+    await newForm(page).getByLabel('Add video call').selectOption('zoom');
+    await newForm(page).getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(newForm(page)).toHaveCount(0);
+
+    const [args] = await callsTo(page, 'create_event');
+    expect(args.fields.conference).toBe('zoom');
+    expect(args.fields.location).toBeNull();
   });
 
   /**
@@ -2241,7 +2240,9 @@ test.describe('App', () => {
     await expect(modal.getByText(/Plain http is accepted only/)).toBeVisible();
     await modal.getByLabel('Email or account name').fill('plamen');
     await modal.getByLabel('Password').fill('hunter2');
-    await modal.getByRole('button', { name: 'Connect' }).click();
+    // Exact: the Zoom section in this same dialog offers a Disconnect, and an
+    // accessible-name substring match would resolve to both.
+    await modal.getByRole('button', { name: 'Connect', exact: true }).click();
 
     await expect(modal.getByText(/plamen connected/)).toBeVisible();
     const [args] = await callsTo(page, 'connect_caldav');

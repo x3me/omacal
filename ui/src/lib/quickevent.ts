@@ -14,6 +14,9 @@ export type QuickEventContext = {
   calendarId: number | null;
   defaultDurationMinutes: number;
   calendars: Calendar[];
+  /** Whether a bare Zoom command can create a scheduled meeting through the
+   * user's independent Zoom connection. A pasted link never needs this. */
+  zoomCanCreate?: boolean;
   /** Used only for ambiguous numeric dates such as 4/5. */
   dateOrder?: 'mdy' | 'dmy';
 };
@@ -811,7 +814,11 @@ export function parseQuickEvent(source: string, context: QuickEventContext): Qui
   if (guests.length > 0 && selectedCalendar && selectedCalendar.provider !== 'google') {
     errors.push('Email invitations require a Google calendar.');
   }
-  const videoError = videoCallProblem(value, selectedCalendar?.provider ?? '');
+  const videoError = videoCallProblem(
+    value,
+    selectedCalendar?.provider ?? '',
+    context.zoomCanCreate === true,
+  );
   if (videoError) errors.push(videoError);
 
   return {
@@ -871,7 +878,10 @@ export function quickPreviewRows(
   if (v.videoCall) {
     const provider = v.videoCall.provider === 'googleMeet' ? 'Google Meet'
       : v.videoCall.provider === 'zoom' ? 'Zoom' : (meetingProvider(v.videoCall.uri) ?? 'Video call');
-    rows.push({ label: 'Video', value: v.videoCall.uri ? `${provider} · ${v.videoCall.uri}` : provider });
+    const action = v.videoCall.provider === 'zoom' && v.videoCall.uri === null
+      ? `${provider} · Create new meeting`
+      : provider;
+    rows.push({ label: 'Video', value: v.videoCall.uri ? `${provider} · ${v.videoCall.uri}` : action });
   }
   if (v.guests.length > 0) rows.push({
     label: 'Guests',

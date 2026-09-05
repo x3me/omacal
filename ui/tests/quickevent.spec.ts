@@ -31,6 +31,7 @@ const context = (overrides: Partial<QuickEventContext> = {}): QuickEventContext 
   calendarId: 1,
   defaultDurationMinutes: 60,
   calendars,
+  zoomCanCreate: true,
   dateOrder: 'mdy',
   ...overrides,
 });
@@ -291,9 +292,25 @@ test.describe('quick event natural language', () => {
     expect(toEventInput(zoom.value, zoom.baseline).location)
       .toBe('Zoom: https://us02web.zoom.us/j/123456?pwd=x');
 
-    const needsLink = parseQuickEvent('30m 2p Meet Tim +zoom', context());
-    expect(needsLink.ready).toBe(false);
-    expect(needsLink.errors.join(' ')).toContain('Paste the Zoom meeting link');
+    const createsZoom = parseQuickEvent('30m 2p Meet Tim +zoom', context());
+    expect(createsZoom.errors).toEqual([]);
+    expect(createsZoom.ready).toBe(true);
+    expect(createsZoom.value.videoCall).toEqual({ provider: 'zoom', uri: null, source: 'new' });
+    expect(toEventInput(createsZoom.value, createsZoom.baseline)).toMatchObject({
+      conference: 'zoom', location: null,
+    });
+
+    const disconnected = parseQuickEvent(
+      '30m 2p Meet Tim +zoom', context({ zoomCanCreate: false }),
+    );
+    expect(disconnected.ready).toBe(false);
+    expect(disconnected.errors.join(' ')).toContain('Connect Zoom');
+
+    const pastedWhileDisconnected = parseQuickEvent(
+      '30m 2p Meet Tim https://zoom.us/j/42', context({ zoomCanCreate: false }),
+    );
+    expect(pastedWhileDisconnected.errors).toEqual([]);
+    expect(pastedWhileDisconnected.ready).toBe(true);
   });
 
   test('supports quoted location and notes plus a named calendar', () => {
@@ -342,6 +359,12 @@ test.describe('quick event natural language', () => {
     expect(rows.find((r) => r.label === 'Title')?.value).toBe('Review');
     expect(rows.find((r) => r.label === 'Video')?.value).toBe('Google Meet');
     expect(rows.find((r) => r.label === 'Guests')?.value).toContain('invitations will be emailed');
+  });
+
+  test('preview says a bare Zoom command will create a new meeting', () => {
+    const parsed = parseQuickEvent('30m 2p Review +zoom', context());
+    expect(quickPreviewRows(parsed, calendars).find((row) => row.label === 'Video')?.value)
+      .toBe('Zoom · Create new meeting');
   });
 
   test('preview names the weekly days instead of only saying Weekly', () => {

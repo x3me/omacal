@@ -11,6 +11,11 @@ pub enum ApiError {
     Http(String),
     #[error("transport error: {0}")]
     Transport(String),
+    /// The provider accepted a write, but its success response could not be
+    /// decoded. Callers must not retry blindly or compensate by deleting a
+    /// related resource: the calendar mutation may already be durable.
+    #[error("write committed but its response could not be read: {0}")]
+    WriteCommitted(String),
     /// HTTP 412 — the caller's `If-Match` etag no longer matches; the event
     /// changed server-side since it was fetched.
     #[error("the event changed while you were editing it")]
@@ -236,7 +241,7 @@ impl CalendarClient {
 
         resp.json::<model::Event>()
             .await
-            .map_err(|e| ApiError::Transport(e.to_string()))
+            .map_err(|e| ApiError::WriteCommitted(e.to_string()))
     }
 
     /// Expand a recurring event's instances within `[time_min, time_max)`.
@@ -314,7 +319,7 @@ impl CalendarClient {
 
         resp.json::<model::Event>()
             .await
-            .map_err(|e| ApiError::Transport(e.to_string()))
+            .map_err(|e| ApiError::WriteCommitted(e.to_string()))
     }
 
     /// Moves an event to another calendar **on the same account**, and returns
@@ -611,6 +616,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_successful_patch_with_an_unreadable_response_is_marked_committed() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let c = CalendarClient::new(server.uri(), "at");
+        let error = c
+            .patch_event("cal", "ev1", &serde_json::json!({"summary": "New"}), "none", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApiError::WriteCommitted(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
     async fn a_stale_etag_surfaces_as_precondition_failed() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("PATCH"))
@@ -721,6 +742,22 @@ mod tests {
                 .unwrap();
             assert_eq!(ev.id, "new1");
         }
+    }
+
+    #[tokio::test]
+    async fn a_successful_insert_with_an_unreadable_response_is_marked_committed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let c = CalendarClient::new(server.uri(), "tok");
+        let error = c
+            .insert_event("cal", &serde_json::json!({"summary": "Lunch"}), "none")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApiError::WriteCommitted(_)), "got {error:?}");
     }
 
     #[tokio::test]

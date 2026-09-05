@@ -38,6 +38,7 @@ omacal-store = { version = "0.1.0", path = "../crates/omacal-store" }
 omacal-caldav = { version = "0.1.0", path = "../crates/omacal-caldav" }
 omacal-google = { version = "0.1.0", path = "../crates/omacal-google" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls-webpki-roots", "rustls-tls-native-roots"], default-features = false }
+url = "2"
 omacal-sync = { version = "0.1.0", path = "../crates/omacal-sync" }
 jiff = "0.2.35"
 uuid = { version = "1", features = ["v4"] }
@@ -101,4 +102,3 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 wiremock = "0.6.5"
 # The skill installer's tests own a throwaway $HOME each (cli_skill.rs).
 tempfile = "3"
-
