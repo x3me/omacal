@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager};
 /// [`hide_instead_of_closing`]), so if this entry ever goes the app cannot be
 /// quit from the UI at all — the tray is the only way out.
 pub(crate) const MENU: [(&str, &str); 3] =
-    [("open", "Open omacal"), ("sync", "Sync now"), ("quit", "Quit")];
+    [("open", "Open OmaCal"), ("sync", "Sync now"), ("quit", "Quit")];
 
 /// What a tray menu id means.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -990,7 +990,7 @@ mod tests {
             ["open", "sync", "quit"],
             "the tray menu's contents and their order"
         );
-        assert_eq!(MENU.map(|(_, label)| label), ["Open omacal", "Sync now", "Quit"]);
+        assert_eq!(MENU.map(|(_, label)| label), ["Open OmaCal", "Sync now", "Quit"]);
     }
 
     /// Stated on its own because losing it is not a cosmetic regression: with

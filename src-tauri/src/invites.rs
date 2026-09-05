@@ -515,7 +515,7 @@ pub(crate) async fn accept_from_notification(app: tauri::AppHandle, event_id: i6
             let _ = notifier.0.post(&Notification {
                 title: "Could not accept the invitation".into(),
                 // `respond_to_event_impl` errors are already user-facing text.
-                body: format!("{e} Open omacal to answer."),
+                body: format!("{e} Open OmaCal to answer."),
                 actions: Vec::new(),
                 // A failure asks the user to do something; it must not
                 // evaporate before it is read.

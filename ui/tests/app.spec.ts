@@ -1894,7 +1894,7 @@ test.describe('App', () => {
    *  syncing would imply something was written. */
   test('a create Google refused stops without the heal', async ({ page }) => {
     await writable(page);
-    await page.evaluate(() => window.__harness.failNextCreate('this calendar is not writable from omacal'));
+    await page.evaluate(() => window.__harness.failNextCreate('this calendar is not writable from OmaCal'));
 
     await page.keyboard.press('n');
     await newForm(page).getByLabel('Title', { exact: true }).fill('Lunch');

@@ -87,7 +87,7 @@ const SAFE_EXACT: &[&str] = &[
     // added anywhere on the way, so `err.to_string()` is byte-identical to
     // each literal below.
     "that event is no longer here",
-    "this calendar cannot be answered from omacal",
+    "this calendar cannot be answered from OmaCal",
     "you are not a guest on this event",
     // src-tauri/src/events.rs — `create_impl`'s three guards: the missing-
     // calendar branch (a calendar removed between the picker and the save),
@@ -96,7 +96,7 @@ const SAFE_EXACT: &[&str] = &[
     // `.context(..)` added on the way, so each is byte-identical here too.
     "that calendar is no longer here",
     "demo mode — there is nothing to create",
-    "this calendar is not writable from omacal",
+    "this calendar is not writable from OmaCal",
     // src-tauri/src/events.rs — `update_impl`'s demo gate. A third fixed
     // literal for a third verb rather than one shared string: see
     // `DEMO_SYNC_MESSAGE`'s own doc comment in `lib.rs` for why each write
@@ -358,12 +358,12 @@ mod tests {
             "account has no primary calendar",
             "Google returned no refresh token — revoke the app's access and retry",
             "that event is no longer here",
-            "this calendar cannot be answered from omacal",
+            "this calendar cannot be answered from OmaCal",
             "you are not a guest on this event",
             "could not find that occurrence on the calendar",
             "that calendar is no longer here",
             "demo mode — there is nothing to create",
-            "this calendar is not writable from omacal",
+            "this calendar is not writable from OmaCal",
             "demo mode — there is nothing to save",
             "demo mode — there is nothing to delete",
             "that occurrence is no longer on the calendar",

@@ -82,7 +82,7 @@ pub(crate) fn parse_request(line: &str) -> Result<Request, String> {
         Some(PROTOCOL_VERSION) => {}
         Some(other) => {
             return Err(format!(
-                "protocol v{other} is not spoken here — this omacal answers v{PROTOCOL_VERSION}"
+                "protocol v{other} is not spoken here — this OmaCal answers v{PROTOCOL_VERSION}"
             ));
         }
         None => return Err("the request names no protocol version".to_string()),
@@ -132,7 +132,7 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                     None => {
                         return fail_env(
                             "refused",
-                            "no writable calendar — connect an account in omacal first",
+                            "no writable calendar — connect an account in OmaCal first",
                         );
                     }
                 },
