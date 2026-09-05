@@ -44,6 +44,7 @@ mod upcoming;
 mod update;
 mod weather;
 mod write;
+mod zoom;
 
 use sqlx::SqlitePool;
 use tauri::Manager;
@@ -413,6 +414,10 @@ struct Config {
 /// meaningful.
 const EMBEDDED_CLIENT_ID: Option<&str> = option_env!("OMACAL_CLIENT_ID");
 const EMBEDDED_CLIENT_SECRET: Option<&str> = option_env!("OMACAL_CLIENT_SECRET");
+/// Zoom's native/public OAuth client id. Unlike Google's installed-app client,
+/// a Zoom PKCE client has no secret; official builds may therefore carry this
+/// one non-secret value independently of the Google pair above.
+const EMBEDDED_ZOOM_PUBLIC_CLIENT_ID: Option<&str> = option_env!("OMACAL_ZOOM_PUBLIC_CLIENT_ID");
 
 /// Reads `~/.config/omacal/config.toml`, which holds the Google Cloud client
 /// credentials (spec §9), falling back to the embedded pair when the file is
@@ -457,6 +462,38 @@ fn load_config_from(
                     path.display()
                 )),
             }
+        }
+        Err(e) => Err(anyhow::anyhow!("config at {} is unreadable: {e}", path.display())),
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ZoomConfig {
+    zoom_public_client_id: Option<String>,
+}
+
+/// Reads the optional Zoom native-app client id without requiring Google to be
+/// configured. This matters for a CalDAV-only user: Zoom conferencing is an
+/// independent connection and must not fail merely because `client_id` and
+/// `client_secret` are absent from the same file.
+pub(crate) fn load_zoom_public_client_id() -> anyhow::Result<Option<String>> {
+    let home = std::env::var("HOME")?;
+    let path = std::path::Path::new(&home).join(".config/omacal/config.toml");
+    load_zoom_public_client_id_from(&path, EMBEDDED_ZOOM_PUBLIC_CLIENT_ID)
+}
+
+fn load_zoom_public_client_id_from(
+    path: &std::path::Path,
+    embedded_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let clean = |value: Option<String>| value.filter(|s| !s.trim().is_empty());
+    match std::fs::read_to_string(path) {
+        Ok(src) => {
+            let cfg: ZoomConfig = toml::from_str(&src)?;
+            Ok(clean(cfg.zoom_public_client_id))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(clean(embedded_id.map(str::to_string)))
         }
         Err(e) => Err(anyhow::anyhow!("config at {} is unreadable: {e}", path.display())),
     }
@@ -1614,6 +1651,9 @@ pub fn run() {
             caldav_account::connect_caldav,
             accounts::list_accounts,
             accounts::sign_out,
+            zoom::zoom_status,
+            zoom::connect_zoom,
+            zoom::disconnect_zoom,
             tasks::list_tasks,
             tasks::set_task_completed,
             tasks::create_task,
@@ -1758,6 +1798,30 @@ mod tests {
             assert!(err.contains(path.to_str().unwrap()));
             assert!(err.contains("Create it with client_id and client_secret."));
         }
+    }
+
+    #[test]
+    fn zoom_can_be_configured_without_google_credentials() {
+        let path = scratch_config("zoom-only");
+        std::fs::write(&path, "zoom_public_client_id = \"zoom-public-id\"\n").unwrap();
+        let id = load_zoom_public_client_id_from(&path, Some("embedded-zoom")).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(id.as_deref(), Some("zoom-public-id"));
+    }
+
+    #[test]
+    fn an_embedded_zoom_id_is_only_the_missing_file_fallback() {
+        let absent = scratch_config("zoom-embedded");
+        assert_eq!(
+            load_zoom_public_client_id_from(&absent, Some("embedded-zoom")).unwrap().as_deref(),
+            Some("embedded-zoom")
+        );
+
+        let present = scratch_config("zoom-present-without-key");
+        std::fs::write(&present, "client_id = \"google\"\nclient_secret = \"secret\"\n").unwrap();
+        let id = load_zoom_public_client_id_from(&present, Some("embedded-zoom")).unwrap();
+        std::fs::remove_file(&present).unwrap();
+        assert_eq!(id, None, "a present config file must win, including an omitted Zoom key");
     }
 
     fn cached(expires_at_ms: i64) -> CachedTokens {

@@ -115,6 +115,12 @@ recurring event to one result. Multiple accounts; per-calendar colours
 that stay local and never touch Google. Reminders that mirror what your
 phone fires, with editable fallbacks for shared calendars that have none.
 
+**Video calls:** Add Video Call creates Google Meet through the target
+calendar or a unique scheduled Zoom meeting after a one-time Zoom
+connection in Settings → Accounts. The attendee link is attached before
+invitations go out; pasting an existing Zoom link remains a no-login
+fallback.
+
 Building from source and using your own Google credentials:
 [`docs/running-on-omarchy.md`](docs/running-on-omarchy.md) ·
 [`docs/running-on-macos.md`](docs/running-on-macos.md). The design record

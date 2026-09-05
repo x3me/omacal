@@ -2453,10 +2453,34 @@ test.describe('video calls in the value and on the wire', () => {
     expect(toEventInput(value, value).location).toBe('Zoom: https://zoom.us/j/987654321');
   });
 
+  test('a connected Zoom account becomes a create request, without a placeholder URL', () => {
+    const value = blankValueAt(Date.UTC(2026, 7, 25, 14), 1);
+    value.videoCall = { provider: 'zoom', uri: null, source: 'new' };
+    expect(videoCallProblem(value, 'google', true)).toBeNull();
+    expect(toEventInput(value, value).conference).toBe('zoom');
+    expect(toEventInput(value, value).location).toBeNull();
+  });
+
+  test('automatic Zoom replaces structured conference data on an edit', () => {
+    const initial = opened({
+      ...timedDetail(0, 30 * 60_000),
+      conference_uri: 'https://meet.google.com/abc-defg-hij',
+    });
+    const value: EventFormValue = {
+      ...initial,
+      videoCall: { provider: 'zoom', uri: null, source: 'new' },
+    };
+    expect(toEventInput(value, initial).conference).toBe('zoom');
+  });
+
   test('validates Zoom links and compares conferencing by meaning, not source', () => {
     const value = blankValueAt(Date.UTC(2026, 7, 25, 14), 1);
     value.videoCall = { provider: 'zoom', uri: null, source: 'new' };
-    expect(videoCallProblem(value, 'google')).toContain('Paste the Zoom');
+    expect(videoCallProblem(value, 'google')).toContain('Connect Zoom');
+    expect(videoCallProblem(value, 'google', true)).toBeNull();
+    value.isAllDay = true;
+    expect(videoCallProblem(value, 'google', true)).toContain('need a start time');
+    value.isAllDay = false;
     value.videoCall = { provider: 'zoom', uri: 'https://example.com/room', source: 'new' };
     expect(videoCallProblem(value, 'google')).toContain('not a zoom.us');
     expect(sameVideoCall(

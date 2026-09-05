@@ -693,6 +693,13 @@ export function installTauriStub(scenario: string): Harness {
   // must reflect it too, not just `get_calendars`.
   let status = statusFor(scenario);
   let signedIn = false;
+  /** Zoom is a separate OAuth connection. The writable app scenario and the
+   * dedicated form fixture model it connected; every other fixture can drive
+   * the Settings connect button from a configured-but-disconnected state. */
+  let zoom = {
+    configured: true,
+    connected: scenario === 'writable' || scenario === 'create-zoom',
+  };
   /** Whether `take_open_date` has answered — the real command clears on
    *  read, and a stub that kept answering would hide a remount replaying
    *  the date, which is exactly the defect `take` semantics exist to stop. */
@@ -736,6 +743,14 @@ export function installTauriStub(scenario: string): Harness {
         return null;
       case 'get_status':
         return status;
+      case 'zoom_status':
+        return { ...zoom };
+      case 'connect_zoom':
+        zoom = { configured: true, connected: true };
+        return { ...zoom };
+      case 'disconnect_zoom':
+        zoom = { ...zoom, connected: false };
+        return { ...zoom };
       // The date a dated fresh launch parked on the backend. One scenario
       // carries one; everything else launched bare.
       case 'take_open_date': {

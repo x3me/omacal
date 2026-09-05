@@ -155,10 +155,10 @@ export type EventFormValue = {
   description: string;
   /** The video call described by the form, kept separate from the place.
    *
-   * Google Meet can be requested without a URI (`source: 'new'`); Google fills
-   * that URI after the write. Zoom requires a real link. Existing third-party
-   * conference data is carried as `other` so an unrelated edit preserves it,
-   * even though this editor cannot manufacture another one. */
+   * Google Meet and a connected Zoom account can both be requested without a
+   * URI (`source: 'new'`); their providers fill it after the write. A pasted
+   * Zoom link still has a URI. Existing third-party conference data is carried
+   * as `other` so an unrelated edit preserves it. */
   videoCall: VideoCall | null;
   /** The calendar to write to. `null` when there is not a writable one. */
   calendarId: number | null;
@@ -1390,10 +1390,13 @@ function conferenceChange(
   const current = value.videoCall;
 
   if (!value.isEdit) {
-    return current?.provider === 'googleMeet' && current.uri === null ? 'googleMeet' : undefined;
+    if (current?.provider === 'googleMeet' && current.uri === null) return 'googleMeet';
+    if (current?.provider === 'zoom' && current.uri === null) return 'zoom';
+    return undefined;
   }
   if (sameVideoCall(current, initial.videoCall)) return undefined;
   if (current?.provider === 'googleMeet' && current.uri === null) return 'googleMeet';
+  if (current?.provider === 'zoom' && current.uri === null) return 'zoom';
   if (initial.videoCall?.source === 'conference') return 'none';
   return undefined;
 }
@@ -1432,15 +1435,26 @@ export function locationForVideoCall(
 
 /** A form-level validation message for conferencing, kept pure so quick-add
  * and the full editor enforce the same rule. */
-export function videoCallProblem(value: EventFormValue, calendarProvider: string): string | null {
+export function videoCallProblem(
+  value: EventFormValue,
+  calendarProvider: string,
+  zoomCanCreate = false,
+): string | null {
   const call = value.videoCall;
   if (!call) return null;
   if (call.provider === 'googleMeet' && call.uri === null && calendarProvider !== 'google') {
     return 'Google Meet can only be added to a Google calendar.';
   }
   if (call.provider === 'zoom') {
-    if (!call.uri) return 'Paste the Zoom meeting link before creating the event.';
-    if (meetingProvider(call.uri) !== 'Zoom') return 'That is not a zoom.us meeting link.';
+    if (!call.uri && value.isAllDay) {
+      return 'Automatic Zoom meetings need a start time. Paste an existing Zoom link for an all-day event.';
+    }
+    if (!call.uri && !zoomCanCreate) {
+      return 'Connect Zoom in Settings → Accounts, or paste an existing Zoom meeting link.';
+    }
+    if (call.uri && meetingProvider(call.uri) !== 'Zoom') {
+      return 'That is not a zoom.us meeting link.';
+    }
   }
   return null;
 }

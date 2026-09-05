@@ -272,9 +272,13 @@ pub(crate) async fn create(
     let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
     client.put(&href, &ics, None).await.map_err(friendly)?;
 
-    resync(state, calendar_id).await?;
-    let id = row_id_by_uid(state, calendar_id, &uid).await?;
-    crate::events::event_detail_impl(state, id).await
+    async {
+        resync(state, calendar_id).await?;
+        let id = row_id_by_uid(state, calendar_id, &uid).await?;
+        crate::events::event_detail_impl(state, id).await
+    }
+    .await
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// Edits an event (or one occurrence, or the rest of a series).
@@ -372,15 +376,19 @@ pub(crate) async fn update(
         client.put(&new_href, &ics, None).await.map_err(friendly)?;
     }
 
-    resync(state, master.calendar_id).await?;
-    let row = row_id_by_uid(state, master.calendar_id, &detail_uid).await;
-    // An exception the resync collapsed away (or a row the server renamed)
-    // falls back to the master — the popover shows *something* true.
-    let row = match row {
-        Ok(r) => r,
-        Err(_) => row_id_by_uid(state, master.calendar_id, &uid).await?,
-    };
-    crate::events::event_detail_impl(state, row).await
+    async {
+        resync(state, master.calendar_id).await?;
+        let row = row_id_by_uid(state, master.calendar_id, &detail_uid).await;
+        // An exception the resync collapsed away (or a row the server renamed)
+        // falls back to the master — the popover shows *something* true.
+        let row = match row {
+            Ok(r) => r,
+            Err(_) => row_id_by_uid(state, master.calendar_id, &uid).await?,
+        };
+        crate::events::event_detail_impl(state, row).await
+    }
+    .await
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// Google's response vocabulary rendered as `PARTSTAT` — two spellings of

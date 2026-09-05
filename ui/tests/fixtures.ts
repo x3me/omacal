@@ -2819,6 +2819,10 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // Every spec freezes the clock to `FORM_NOW` before navigating; without
     // that this fixture is the dated time bomb the task brief warns about.
     create: { anchor: ANCHOR, initial: blankValue(Date.now(), null), calendars: FORM_CALENDARS },
+    /** Same create with the harness's independent Zoom connection enabled. */
+    'create-zoom': {
+      anchor: ANCHOR, initial: blankValue(Date.now(), null), calendars: FORM_CALENDARS,
+    },
     // Seeded with the `reader`'s id — the shape Task 10 can produce, since it
     // picks that second argument. Filtering the option list alone left the
     // select blank and saved calendar 3 anyway, with no error: a Save the

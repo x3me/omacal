@@ -190,10 +190,9 @@ export type EventInput = {
   reminders?: { useDefault: boolean; overrides: { method: string; minutes: number }[] };
   /** A conference change, or absent when the event's conference is untouched.
    * `googleMeet` asks Google to mint a fresh, unique Meet conference;
-   * `none` removes structured conference data. Zoom links travel in `location`
-   * because creating a Zoom meeting requires a separately-authorized Zoom
-   * account, which omacal does not currently hold. */
-  conference?: 'googleMeet' | 'none';
+   * `zoom` asks the separately-authorized Zoom connection to create a meeting
+   * and attach its join URL; `none` removes structured conference data. */
+  conference?: 'googleMeet' | 'zoom' | 'none';
 };
 
 /**
