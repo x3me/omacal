@@ -15,7 +15,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     busy, error, calendars, view, onpick,
-    onsettingschange,
+    onsettingschange, onappearancechange,
     listMode, onToggleList,
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange,
     onWhatsNew, onRestart, onUpdate,
@@ -64,6 +64,9 @@
     onQuickAdd: () => void;
     /** Passed straight through to `SettingsModal` — see its own comment. */
     onsettingschange?: (s: import('./settings').AppSettings) => void;
+    /** The modal's range-input preview, kept separate from stored settings
+     *  reactions so a drag only repaints appearance. */
+    onappearancechange?: (s: import('./appearance').AppearancePreferences) => void;
     onSignIn: () => void; onSync: () => void; oncalendarchange: () => void;
     /** Unanswered invitations, for the tray beside the sync light — `App`'s
      *  own list, refetched on every sync. Empty renders nothing at all. */
@@ -422,6 +425,7 @@
     onclose={() => (settingsOpen = false)}
     {calendars}
     {oncalendarchange}
+    {onappearancechange}
     {onsettingschange}
     onSignIn={() => {
       settingsOpen = false;

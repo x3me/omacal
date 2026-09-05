@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { tick, untrack } from 'svelte';
   import { applyPalette, setPalette, type Palette } from './lib/theme';
+  import { applyAppearance } from './lib/appearance';
   import {
     getWeek, getDay, getRange, getMonth, getYear, getBigYear, weekStart,
     type WeekPayload, type MonthPayload, type YearPayload, type BigYearPayload, type UiEvent,
@@ -575,6 +576,9 @@
   /** Settings-modal writes supersede the startup read for the rolling Week
    *  controls, just as `listModeChoices` does for the filmstrip toggle. */
   let weekViewChoices = 0;
+  /** Live range previews supersede the asynchronous startup settings read in
+   *  the same way the filmstrip and rolling-week controls do. */
+  let appearanceChoices = 0;
 
   /** The stored default for new events, or `null` for the old rule. Seeded
    *  below and kept fresh by `SettingsModal`'s `onsettingschange` — without
@@ -605,6 +609,7 @@
   $effect(() => {
     const before = listModeChoices;
     const weekBefore = weekViewChoices;
+    const appearanceBefore = appearanceChoices;
     getSettings()
       .then((s) => {
         defaultCalendarId = s.defaultCalendarId;
@@ -612,6 +617,7 @@
         setClockFormat(s.timeFormat);
         setSecondZone(s.secondTimezone);
         setTemperatureUnit(s.temperatureUnit);
+        if (appearanceChoices === appearanceBefore) applyAppearance(s);
         if (weekViewChoices === weekBefore) applyWeekSettings(s, false);
         // Only if nobody has zoomed in the meantime: a pinch made while the
         // read was in flight is the newer fact, and it is about to be stored.
@@ -1778,6 +1784,10 @@
     onToday={goToday}
     onQuickAdd={openQuickAdd}
     onSearch={() => (searchOpen = true)}
+    onappearancechange={(s) => {
+      appearanceChoices += 1;
+      applyAppearance(s);
+    }}
     onsettingschange={(s) => {
       defaultCalendarId = s.defaultCalendarId;
       defaultEventDurationMinutes = s.defaultEventDurationMinutes;
@@ -1974,7 +1984,7 @@
      takes what it needs, and the view takes the rest — see each view's own
      `flex: 1` for the other half of it. */
   :global(html), :global(body), :global(#app) { height: 100%; }
-  :global(body) { background: var(--bg); color: var(--text); margin: 0;
+  :global(body) { background: var(--calendar-canvas, var(--bg)); color: var(--text); margin: 0;
                   font-family: -apple-system, 'SF Pro Text', Inter, system-ui, sans-serif; }
 
   /* `border-box` is load-bearing: without it the 28px of vertical padding

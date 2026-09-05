@@ -10,6 +10,17 @@ import { CALENDAR_SYNC_REMOVED } from './harness/tauri';
 
 const show = (c: string, f: string) => `/tests/harness/index.html?c=${c}&f=${f}`;
 
+const colourAlpha = (css: string): number => {
+  const fn = css.match(/^color\([^/)]*(?:\/\s*([0-9.]+))?\)$/);
+  if (fn) return fn[1] === undefined ? 1 : parseFloat(fn[1]);
+  const rgb = css.match(/^rgba?\(([^)]+)\)$/);
+  if (rgb) {
+    const parts = rgb[1].split(/[,\s/]+/).filter(Boolean).map(parseFloat);
+    return parts.length < 4 ? 1 : parts[3];
+  }
+  throw new Error(`unrecognised colour format, cannot assess opacity: ${css}`);
+};
+
 test.describe('WeekGrid', () => {
   test('midnight and a wake move today off yesterday', async ({ page }) => {
     // `todayStart` was a const computed at mount, so an app left running
@@ -818,6 +829,59 @@ test.describe('EventBlock hover occludes what it covers', () => {
   });
 });
 
+test.describe('event appearance reaches every calendar representation', () => {
+  const cases = [
+    ['timed block', show('EventBlock', 'rsvp-accepted-15'), '.ev', true],
+    ['all-day chip', show('AllDayBand', 'populated'), '.chip', true],
+    ['month bar', show('MonthGrid', 'two-bars'), '.bar', true],
+    ['Big Year pill', show('BigYearRibbon', 'two-pills'), '.pill', true],
+    // List rows intentionally have no resting fill; the event shape still
+    // applies to their hover surface and colour spine.
+    ['list row', show('Filmstrip', 'week'), '.srow', false],
+  ] as const;
+
+  for (const [name, route, selector, hasFill] of cases) {
+    test(`${name} becomes square without fading its contents`, async ({ page }) => {
+      await page.goto(route);
+      const event = page.locator(selector).first();
+      await expect(event).toBeVisible();
+
+      if (hasFill) {
+        await page.evaluate(() => {
+          const root = document.documentElement;
+          root.dataset.eventTransparency = '0';
+          root.style.setProperty('--event-fill-opacity', '100%');
+        });
+        expect(colourAlpha(
+          await event.evaluate((el) => getComputedStyle(el).backgroundColor),
+        ), `${name} must be genuinely opaque at 0%`).toBe(1);
+      }
+
+      await page.evaluate(() => {
+        const root = document.documentElement;
+        root.dataset.eventTransparency = '70';
+        root.dataset.eventCorners = 'square';
+        root.style.setProperty('--event-fill-opacity', '30%');
+        root.style.setProperty('--event-card-radius', '0px');
+        root.style.setProperty('--event-chip-radius', '0px');
+        root.style.setProperty('--event-pill-radius', '0px');
+      });
+
+      await expect.poll(() => event.evaluate((el) => getComputedStyle(el).borderRadius))
+        .toBe('0px');
+      await expect.poll(() => event.evaluate((el) => getComputedStyle(el).opacity))
+        .toBe('1');
+      if (hasFill) {
+        const after = colourAlpha(
+          await event.evaluate((el) => getComputedStyle(el).backgroundColor),
+        );
+        expect(after, `${name} fill should follow the absolute 70% setting`)
+          .toBeCloseTo(0.3, 2);
+      }
+    });
+  }
+});
+
 test.describe('AllDayBand', () => {
   test('spans the right columns and flags a continuation', async ({ page }) => {
     await page.goto(show('AllDayBand', 'populated'));
@@ -1190,6 +1254,77 @@ test.describe('Header', () => {
     if (tab) await modal.getByRole('tab', { name: tab }).click();
     return modal;
   };
+
+  test('Appearance starts at the former baseline and persists absolute values', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    let modal = await openSettings(page, 'Appearance');
+    const background = modal.getByRole('slider', { name: 'Background transparency' });
+    const events = modal.getByRole('slider', { name: 'Event transparency' });
+
+    await expect(background).toHaveValue('4');
+    await expect(events).toHaveValue('4');
+    await expect(modal.getByRole('radio', { name: 'Rounded' })).toBeChecked();
+    await expect(modal).toContainText('4% matches the previous Omarchy window baseline');
+    expect(await page.evaluate(() => ({
+      data: document.documentElement.dataset.backgroundTransparency,
+      fill: document.documentElement.style.getPropertyValue('--background-fill-opacity'),
+      eventData: document.documentElement.dataset.eventTransparency,
+      eventFill: document.documentElement.style.getPropertyValue('--event-fill-opacity'),
+    }))).toEqual({ data: '4', fill: '96%', eventData: '4', eventFill: '96%' });
+
+    // `input` is the live preview and deliberately makes no database call.
+    await background.evaluate((el) => {
+      (el as HTMLInputElement).value = '40';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await expect(background).toHaveValue('40');
+    expect(await page.evaluate(() => ({
+      data: document.documentElement.dataset.backgroundTransparency,
+      fill: document.documentElement.style.getPropertyValue('--background-fill-opacity'),
+      calls: (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    }))).toEqual({ data: '40', fill: '60%', calls: 0 });
+
+    // Releasing/committing stores the whole appearance tuple once.
+    await background.evaluate((el) => el.dispatchEvent(new Event('change', { bubbles: true })));
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(1);
+
+    await events.evaluate((el) => {
+      (el as HTMLInputElement).value = '65';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(2);
+    await modal.getByRole('radio', { name: 'Square' }).check();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(3);
+
+    const last = await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').pop()?.args);
+    expect(last).toEqual({
+      backgroundTransparency: 40,
+      eventTransparency: 65,
+      eventCornerStyle: 'square',
+    });
+    expect(await page.evaluate(() => ({
+      data: document.documentElement.dataset.eventTransparency,
+      fill: document.documentElement.style.getPropertyValue('--event-fill-opacity'),
+      corners: document.documentElement.dataset.eventCorners,
+      radius: document.documentElement.style.getPropertyValue('--event-card-radius'),
+    }))).toEqual({ data: '65', fill: '35%', corners: 'square', radius: '0px' });
+
+    // A reopen fetches the stub's stored object; it cannot pass merely because
+    // the range element kept the value typed into it.
+    await page.keyboard.press('Escape');
+    modal = await openSettings(page, 'Appearance');
+    await expect(modal.getByRole('slider', { name: 'Background transparency' })).toHaveValue('40');
+    await expect(modal.getByRole('slider', { name: 'Event transparency' })).toHaveValue('65');
+    await expect(modal.getByRole('radio', { name: 'Square' })).toBeChecked();
+  });
 
   /**
    * The fallback rows (fallback spec §3): shown in the units a person would

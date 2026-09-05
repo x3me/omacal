@@ -27,6 +27,17 @@ const W2 = APP_MON + WEEK;
 
 const app = (fixture = 'default') => `/tests/harness/index.html?c=App&f=${fixture}`;
 
+const colourAlpha = (css: string): number => {
+  const fn = css.match(/^color\([^/)]*(?:\/\s*([0-9.]+))?\)$/);
+  if (fn) return fn[1] === undefined ? 1 : parseFloat(fn[1]);
+  const rgb = css.match(/^rgba?\(([^)]+)\)$/);
+  if (rgb) {
+    const parts = rgb[1].split(/[,\s/]+/).filter(Boolean).map(parseFloat);
+    return parts.length < 4 ? 1 : parts[3];
+  }
+  throw new Error(`unrecognised colour format, cannot assess opacity: ${css}`);
+};
+
 test.describe('App', () => {
   test.beforeEach(async ({ page }) => {
     // `weekStart(new Date())` decides which week the app opens on, so the
@@ -43,6 +54,95 @@ test.describe('App', () => {
     // and a hover gets the minutes.
     await expect(page.locator('.light')).toHaveAttribute('aria-label', 'Synced 5 min ago');
     await expect(page.locator('.err')).toHaveCount(0);
+  });
+
+  test('stored appearance separately fades the canvas and event fill after reload', async ({ page }) => {
+    await page.goto(app());
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+
+    const commit = (name: string, value: string) =>
+      modal.getByRole('slider', { name }).evaluate((el, next) => {
+        (el as HTMLInputElement).value = next;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, value);
+    await commit('Background transparency', '50');
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(1);
+    await commit('Event transparency', '70');
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(2);
+    await modal.getByRole('radio', { name: 'Square' }).check();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+    )).toBe(3);
+
+    // A fresh document has no preview state to inherit. Only get_settings and
+    // App's startup application can reproduce the look after this reload.
+    await page.reload();
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await expect.poll(() => page.evaluate(() => ({
+      background: document.documentElement.dataset.backgroundTransparency,
+      events: document.documentElement.dataset.eventTransparency,
+      corners: document.documentElement.dataset.eventCorners,
+    }))).toEqual({ background: '50', events: '70', corners: 'square' });
+
+    const bodyColour = await page.locator('body').evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    );
+    const appearanceCss = await page.evaluate(() => ({
+      canvas: getComputedStyle(document.documentElement)
+        .getPropertyValue('--calendar-canvas').trim(),
+      backgroundFill: document.documentElement.style
+        .getPropertyValue('--background-fill-opacity'),
+      eventFill: document.documentElement.style.getPropertyValue('--event-fill-opacity'),
+    }));
+    const event = page.locator('.ev').first();
+    const eventColour = await event.evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(colourAlpha(bodyColour), JSON.stringify({ bodyColour, appearanceCss }))
+      .toBeCloseTo(0.5, 2);
+    expect(colourAlpha(eventColour)).toBeCloseTo(0.3, 2);
+    await expect(event).toHaveCSS('border-radius', '0px');
+    await expect(event).toHaveCSS('opacity', '1');
+    await expect(event.locator('b')).toHaveCSS('opacity', '1');
+  });
+
+  test('the former 4% baseline can be previewed all the way down to opaque', async ({ page }) => {
+    await page.goto(app());
+    await expect.poll(() => page.evaluate(() => ({
+      background: document.documentElement.dataset.backgroundTransparency,
+      events: document.documentElement.dataset.eventTransparency,
+    }))).toEqual({ background: '4', events: '4' });
+    expect(colourAlpha(await page.locator('body').evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    ))).toBeCloseTo(0.96, 2);
+
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    for (const name of ['Background transparency', 'Event transparency']) {
+      await modal.getByRole('slider', { name }).evaluate((el) => {
+        (el as HTMLInputElement).value = '0';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+
+    expect(await page.evaluate(() => ({
+      background: document.documentElement.style.getPropertyValue('--background-fill-opacity'),
+      events: document.documentElement.style.getPropertyValue('--event-fill-opacity'),
+    }))).toEqual({ background: '100%', events: '100%' });
+    expect(colourAlpha(await page.locator('body').evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    ))).toBe(1);
+    expect(colourAlpha(await page.locator('.ev').first().evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    ))).toBe(1);
   });
 
   test('navigating forward loads the next week', async ({ page }) => {

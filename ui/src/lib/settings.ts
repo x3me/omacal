@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { TemperatureUnit } from './temperature';
 import type { TimeFormat } from './timefmt';
 import type { WeekStartDay } from './weekstart';
+import type { EventCornerStyle } from './appearance';
 
 /** Total columns in the rolling Week view, including today. */
 export type WeekViewDays = 3 | 5 | 7;
@@ -91,6 +92,12 @@ export type AppSettings = {
   defaultCalendarId: number | null;
   /** Minutes used when a new timed event has a start but no explicit end. */
   defaultEventDurationMinutes: number;
+  /** Absolute calendar-canvas transparency, 0 (opaque) through 100 (clear). */
+  backgroundTransparency: number;
+  /** Absolute event-fill transparency, without fading event text or outlines. */
+  eventTransparency: number;
+  /** The shared corner treatment for every event representation. */
+  eventCornerStyle: EventCornerStyle;
   /** Whether the app draws `13:30` or `1:30 PM`. Read by `timefmt.ts` through
    *  the `clock.svelte.ts` rune rather than as a prop — six components print a
    *  time and none of them owns the preference. */
@@ -281,6 +288,19 @@ export const setDefaultCalendar = (id: number | null) =>
 /** Stores the free-form default length for new timed events, in minutes. */
 export const setDefaultEventDuration = (minutes: number) =>
   invoke<AppSettings>('set_default_event_duration', { minutes });
+
+/** Stores the canvas opacity, event-fill opacity, and event corner shape in a
+ *  single transaction. Settings previews locally while a slider moves and
+ *  invokes this once when that interaction commits. */
+export const setAppearancePreferences = (
+  backgroundTransparency: number,
+  eventTransparency: number,
+  eventCornerStyle: EventCornerStyle,
+) => invoke<AppSettings>('set_appearance_preferences', {
+  backgroundTransparency,
+  eventTransparency,
+  eventCornerStyle,
+});
 
 /** Minutes, as the General tab shows them. Stored in milliseconds because
  *  that is what `sync_loop` compares against a clock. */

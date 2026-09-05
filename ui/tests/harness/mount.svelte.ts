@@ -70,6 +70,16 @@ const params = new URLSearchParams(location.search);
 const name = params.get('c') ?? 'WeekGrid';
 const fixture = params.get('f') ?? 'default';
 
+// Standalone components have no App stylesheet to paint the page, which is
+// why the deterministic fallback above is inline. App does have that rule;
+// leaving the harness inline colour there would outrank its real background
+// transparency and make an app-level test prove the harness instead of the
+// product.
+if (name === 'App') {
+  document.body.style.removeProperty('background');
+  document.body.style.removeProperty('color');
+}
+
 const COMPONENTS: Record<string, any> = {
   WeekGrid, MonthGrid, YearGrid, BigYearRibbon, Filmstrip, EventBlock, AllDayBand, Header,
   CalendarPopover, EventPopover, EventForm, DeleteConfirm,

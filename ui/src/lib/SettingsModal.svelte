@@ -4,13 +4,17 @@
   import { invoke } from '@tauri-apps/api/core';
 
   import { escapeCloses } from './dismiss.svelte';
+  import {
+    applyAppearance, type AppearancePreferences, type EventCornerStyle,
+  } from './appearance';
   import { REMINDER_UNITS, reminderAmountOf, reminderMax, reminderUnitOf } from './reminders';
   import CalendarList from './CalendarList.svelte';
   import { calendarColor, offerableCalendarId, writableCalendars, type Calendar } from './calendars';
   import { connectCaldav } from './tasks';
   import { listAccounts, signOut, type Account } from './accounts';
   import {
-    getSettings, listTimezones, minutesOf, msOfMinutes, setDefaultCalendar,
+    getSettings, listTimezones, minutesOf, msOfMinutes, setAppearancePreferences,
+    setDefaultCalendar,
     setDefaultEventDuration, setStartOnLogin, START_ON_LOGIN_OPTIONS,
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
@@ -32,6 +36,7 @@
     onclose,
     onSignIn,
     oncalendarchange,
+    onappearancechange,
     onsettingschange,
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
@@ -50,6 +55,10 @@
      *  backend now holds them. `App` derives the create-default from these,
      *  and without this call its copy is stale until a restart. */
     onsettingschange?: (s: AppSettings) => void;
+    /** Live appearance preview. Separate from `onsettingschange`: dragging a
+     *  range should repaint the calendar behind this modal without causing
+     *  every unrelated settings reaction (including a weather cache read). */
+    onappearancechange?: (s: AppearancePreferences) => void;
     onclose: () => void;
     onSignIn: () => void;
     /** A calendar was shown, hidden, added or removed: reload. Passed through
@@ -78,6 +87,8 @@
         settings = s;
         intervalText = String(minutesOf(s.syncIntervalMs));
         durationText = String(s.defaultEventDurationMinutes);
+        applyAppearance(s);
+        onappearancechange?.(s);
       })
       .catch((e) => (note = { text: String(e), kind: 'error' }));
   });
@@ -263,6 +274,64 @@
     } catch (e) {
       note = { text: String(e), kind: 'error' };
     }
+  }
+
+  /** Range movement previews without an IPC round trip. Its `change` event
+   *  persists once the pointer/key interaction commits; shape choices persist
+   *  immediately because each click is already one complete choice. */
+  function previewAppearance(next: Partial<AppearancePreferences>) {
+    if (!settings) return;
+    settings = { ...settings, ...next };
+    applyAppearance(settings);
+    onappearancechange?.(settings);
+  }
+
+  let appearanceWrite = 0;
+  /** IPC commands are async and two fast slider/shape commits can overlap.
+   *  Queue them so an older tuple can never finish after a newer one and
+   *  become the database's final value. `appearanceWrite` separately keeps an
+   *  older response from repainting while its newer request waits in line. */
+  let appearanceQueue: Promise<void> = Promise.resolve();
+  function saveAppearancePreferences() {
+    if (!settings) return;
+    const requested = {
+      backgroundTransparency: settings.backgroundTransparency,
+      eventTransparency: settings.eventTransparency,
+      eventCornerStyle: settings.eventCornerStyle,
+    };
+    const write = ++appearanceWrite;
+    note = null;
+    appearanceQueue = appearanceQueue.then(async () => {
+      try {
+        const stored = await setAppearancePreferences(
+          requested.backgroundTransparency,
+          requested.eventTransparency,
+          requested.eventCornerStyle,
+        );
+        if (write !== appearanceWrite) return;
+        settings = stored;
+        applyAppearance(stored);
+        onappearancechange?.(stored);
+        onsettingschange?.(stored);
+      } catch (e) {
+        if (write !== appearanceWrite) return;
+        note = { text: String(e), kind: 'error' };
+        // The preview has already painted. Read the authoritative values back
+        // so a refused/failed write does not leave an unsaved look on screen.
+        try {
+          const stored = await getSettings();
+          if (write !== appearanceWrite) return;
+          settings = stored;
+          applyAppearance(stored);
+          onappearancechange?.(stored);
+        } catch { /* keep the useful error from the write itself */ }
+      }
+    });
+  }
+
+  function chooseEventCorners(style: EventCornerStyle) {
+    previewAppearance({ eventCornerStyle: style });
+    void saveAppearancePreferences();
   }
 
   /**
@@ -550,6 +619,10 @@
    * it does — and a reader hunting for "light theme" was reading past sync
    * intervals to find it. General keeps the behaviour: syncing, defaults,
    * clocks, the tray, login. Appearance keeps the look.
+   *
+   * The transparency sliders and the corner shape sit there for the same
+   * reason, and beside each other on purpose: both sliders are live previews
+   * and belong next to the event shape they change.
    *
    * The shell predates its contents; a tab that is present and blank says
    * "not yet" more honestly than a tab that is missing, which says "never".
@@ -1004,6 +1077,88 @@
         </p>
       {/if}
 
+      <section class="appearance-section" aria-labelledby="background-style-heading">
+        <h2 id="background-style-heading">Calendar background</h2>
+        <div class="range-row">
+          <label for="background-transparency">Transparency</label>
+          <input
+            id="background-transparency"
+            aria-label="Background transparency"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={settings?.backgroundTransparency ?? 0}
+            disabled={!settings}
+            oninput={(e) => previewAppearance({
+              backgroundTransparency: e.currentTarget.valueAsNumber,
+            })}
+            onchange={() => { void saveAppearancePreferences(); }}
+          />
+          <output for="background-transparency">
+            {settings?.backgroundTransparency ?? 0}%
+          </output>
+        </div>
+        <p class="hint">
+          4% matches the previous Omarchy window baseline. 0% is fully opaque;
+          100% makes the calendar canvas clear.
+        </p>
+      </section>
+
+      <section class="appearance-section" aria-labelledby="event-style-heading">
+        <h2 id="event-style-heading">Event styling</h2>
+        <div class="range-row">
+          <label for="event-transparency">Transparency</label>
+          <input
+            id="event-transparency"
+            aria-label="Event transparency"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={settings?.eventTransparency ?? 0}
+            disabled={!settings}
+            oninput={(e) => previewAppearance({
+              eventTransparency: e.currentTarget.valueAsNumber,
+            })}
+            onchange={() => { void saveAppearancePreferences(); }}
+          />
+          <output for="event-transparency">
+            {settings?.eventTransparency ?? 0}%
+          </output>
+        </div>
+        <p class="hint">
+          4% matches the previous Omarchy window baseline. Only event fills
+          fade; titles, colour spines, outlines and controls remain visible.
+        </p>
+
+        <fieldset class="shape" disabled={!settings}>
+          <legend>Corner shape</legend>
+          <label class:chosen={settings?.eventCornerStyle === 'rounded'}>
+            <input
+              type="radio"
+              name="event-corner-style"
+              value="rounded"
+              checked={(settings?.eventCornerStyle ?? 'rounded') === 'rounded'}
+              onchange={() => chooseEventCorners('rounded')}
+            />
+            <span class="event-sample rounded" aria-hidden="true"></span>
+            Rounded
+          </label>
+          <label class:chosen={settings?.eventCornerStyle === 'square'}>
+            <input
+              type="radio"
+              name="event-corner-style"
+              value="square"
+              checked={settings?.eventCornerStyle === 'square'}
+              onchange={() => chooseEventCorners('square')}
+            />
+            <span class="event-sample square" aria-hidden="true"></span>
+            Square
+          </label>
+        </fieldset>
+      </section>
+
       <!-- What the app's face says, here rather than beside "Show the tray
            icon" in General: that switch is about whether the app has a tray
            at all, which is where Quit lives and therefore behaviour; this is
@@ -1253,6 +1408,40 @@
 </div>
 
 <style>
+  .appearance-section { align-self: stretch; display: flex; flex-direction: column;
+                        gap: 10px; padding: 2px 0 10px; }
+  .appearance-section + .appearance-section {
+    border-top: 1px solid var(--hairline); padding-top: 14px;
+  }
+  .appearance-section h2 { margin: 0; font-size: 13px; font-weight: 600;
+                           color: var(--text); }
+  .range-row { align-self: stretch; display: grid;
+               grid-template-columns: 82px minmax(120px, 1fr) 42px;
+               align-items: center; gap: 10px; }
+  .range-row label { font-size: 12.5px; color: var(--text); }
+  .range-row input[type='range'] { width: 100%; margin: 0; accent-color: var(--accent);
+                                   cursor: pointer; }
+  .range-row input[type='range']:disabled { cursor: default; opacity: .5; }
+  .range-row output { color: var(--muted); font-size: 12px; text-align: right;
+                      font-variant-numeric: tabular-nums; }
+
+  .shape { align-self: stretch; border: 0; padding: 0; margin: 2px 0 0;
+           display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .shape legend { grid-column: 1 / -1; padding: 0; margin: 0 0 6px;
+                  font-size: 10.5px; color: var(--muted); letter-spacing: .05em; }
+  .shape label { display: flex; align-items: center; gap: 8px; cursor: pointer;
+                 border: 1px solid var(--hairline); border-radius: 7px;
+                 padding: 8px 10px; color: var(--muted); }
+  .shape label.chosen { border-color: color-mix(in srgb, var(--accent) 60%, var(--hairline));
+                        color: var(--text);
+                        background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .shape:disabled label { cursor: default; opacity: .5; }
+  .event-sample { width: 34px; height: 16px; flex: none;
+                  background: color-mix(in srgb, var(--accent) var(--event-fill-opacity, 100%), transparent);
+                  box-shadow: inset 2px 0 0 var(--accent); }
+  .event-sample.rounded { border-radius: 6px; }
+  .event-sample.square { border-radius: 0; }
+
   /* A colophon, not a control: the quietest text in the modal, at the very
      bottom, on every tab — where "what version am I on?" goes looking. */
   .version { margin: 14px 0 0; font-size: 11.5px; color: var(--muted);

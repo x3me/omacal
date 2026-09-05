@@ -206,7 +206,7 @@
        did not fix that — but correct regardless for a fully custom control. */
     appearance: none; -webkit-appearance: none;
     position: absolute; text-align: left; cursor: pointer;
-    border-radius: 6px; padding: 2px 8px; overflow: hidden;
+    border-radius: var(--event-card-radius, 6px); padding: 2px 8px; overflow: hidden;
     /* NO border. The colour spine is an inset shadow instead.
        A border on one side only makes WebKit derive each corner's curve from
        the two border widths meeting there, and in macOS WKWebView the corners
@@ -228,6 +228,7 @@
        rounded corners poking past this one's. Against the column background the
        result is indistinguishable from a 7% wash, because the column background
        IS --bg. */
+    --event-fill: color-mix(in srgb, var(--cal) 7%, var(--bg));
     background: color-mix(in srgb, var(--cal) 7%, var(--bg));
     color: color-mix(in srgb, var(--cal) 65%, var(--text));
     font: inherit;
@@ -284,6 +285,7 @@
      than the event it belongs to. Uniform on all four sides so corner curves
      stay symmetric. */
   .ev.needsAction {
+    --event-fill: var(--bg);
     background-color: var(--bg);
     border: 1px dashed color-mix(in srgb, var(--cal) 55%, var(--bg));
     /* The dashed ring already carries the state; a full-strength spine beside
@@ -295,7 +297,7 @@
                   rgba(128,128,128,.16) 0 3px, transparent 3px 7px); }
   /* Faded via its own colours rather than element opacity: `opacity` would make
      the block see-through no matter what its background is. */
-  .ev.declined { background-color: var(--bg);
+  .ev.declined { --event-fill: var(--bg); background-color: var(--bg);
                  color: color-mix(in srgb, var(--cal) 22%, var(--muted));
                  --spine: color-mix(in srgb, var(--cal) 45%, var(--bg)); }
   .ev.declined b { text-decoration: line-through; }
@@ -305,7 +307,19 @@
      ones it covers. Every state is already opaque at rest, so this is emphasis
      rather than the occlusion fix itself. Last among the state rules so it
      wins over the per-state backgrounds above at equal specificity. */
-  .ev:hover { background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
+  .ev:hover { --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
+              background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
+
+  /* The preference fades the fill colour, never the element: opacity here
+     would also fade the title, RSVP mark, outline and colour spine. Hover
+     still deepens the same fill before this final alpha is applied. */
+  :global(:root[data-event-transparency]) .ev {
+    background-color: color-mix(
+      in srgb,
+      var(--event-fill) var(--event-fill-opacity),
+      transparent
+    );
+  }
 
   /* The tooltip. Fixed, so the block's own overflow:hidden cannot clip it;
      pointer-events none, so it can never steal the hover that shows it. The

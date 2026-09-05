@@ -1672,7 +1672,8 @@
      gesture promises and what appears afterwards read as the same object.
      `--ghost` is the calendar the create would land on, declared inline by
      `sweepStyle`; `--accent` stands in when there is no such calendar. */
-  .sweep { position: absolute; left: 3px; right: 3px; border-radius: 6px;
+  .sweep { position: absolute; left: 3px; right: 3px;
+           border-radius: var(--event-card-radius, 6px);
            background: color-mix(in srgb, var(--ghost, var(--accent)) 14%, var(--bg));
            box-shadow: inset 2px 0 0 0 var(--ghost, var(--accent));
            pointer-events: none; z-index: 4; }
@@ -1706,7 +1707,8 @@
      times is the form's own fields, which are two tabs away and can say
      "09:30" exactly. */
   .formghost { appearance: none; -webkit-appearance: none; padding: 0;
-               position: absolute; left: 3px; right: 3px; border-radius: 6px;
+               position: absolute; left: 3px; right: 3px;
+               border-radius: var(--event-card-radius, 6px);
                background: color-mix(in srgb, var(--ghost, var(--accent)) 18%, transparent);
                border: 1.5px dashed var(--ghost, var(--accent));
                pointer-events: none; z-index: 6; }

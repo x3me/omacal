@@ -20,6 +20,18 @@ select {
   background-repeat: no-repeat;
 }
 
+/* The webview backing store is transparent on Linux; this is the calendar
+   canvas painted over it. At 0% the mix is exactly `var(--bg)` and therefore
+   opaque. Dialogs and popovers deliberately keep their own opaque `--surface`
+   backgrounds while the calendar canvas follows the absolute range. */
+:root[data-background-transparency] {
+  --calendar-canvas: color-mix(
+    in srgb,
+    var(--bg) var(--background-fill-opacity),
+    transparent
+  );
+}
+
 input[type='number'] {
   appearance: textfield;
   -webkit-appearance: textfield;

@@ -301,4 +301,27 @@ mod tests {
         assert_eq!(w["width"], 1280, "the default window is back to a size no calendar fits");
         assert_eq!(w["height"], 800, "the default window is back to a size no calendar fits");
     }
+
+    /// Platform config uses JSON Merge Patch, so the Linux `windows` array
+    /// replaces the base array rather than extending its one object. Pin the
+    /// duplication: Linux may add transparent backing, but it must not quietly
+    /// lose a base-window choice when that object changes later.
+    #[test]
+    fn linux_adds_transparent_backing_without_changing_the_window() {
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let linux: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
+        let mut linux_window = linux["app"]["windows"][0].clone();
+
+        assert_eq!(
+            linux_window["transparent"], true,
+            "CSS transparency would stop at an opaque webview backing store",
+        );
+        linux_window.as_object_mut().unwrap().remove("transparent");
+        assert_eq!(
+            linux_window, base["app"]["windows"][0],
+            "the platform window drifted from the base config",
+        );
+    }
 }

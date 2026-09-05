@@ -29,6 +29,15 @@ pub const HOUR_HEIGHT_MAX: i64 = 160;
 const FALLBACK_KEY: &str = "fallback_reminder_minutes";
 const DEFAULT_CALENDAR_KEY: &str = "default_calendar_id";
 const DEFAULT_EVENT_DURATION_KEY: &str = "default_event_duration_minutes";
+const BACKGROUND_TRANSPARENCY_KEY: &str = "background_transparency";
+const EVENT_TRANSPARENCY_KEY: &str = "event_transparency";
+const EVENT_CORNER_STYLE_KEY: &str = "event_corner_style";
+const APPEARANCE_TRANSPARENCY_SEMANTICS_KEY: &str = "appearance_transparency_semantics";
+const ABSOLUTE_TRANSPARENCY_SEMANTICS: &str = "absolute-v1";
+/// Omarchy previously multiplied the whole inactive window by 0.96. The app
+/// now opts out of that compositor rule and owns the alpha itself, so the
+/// ranges start at the same visible baseline while 0 can finally mean opaque.
+pub const DEFAULT_APPEARANCE_TRANSPARENCY: u8 = 4;
 const TIME_FORMAT_KEY: &str = "time_format";
 const WEEK_START_KEY: &str = "week_start";
 const WEEK_STARTS_TODAY_KEY: &str = "week_starts_today";
@@ -114,6 +123,29 @@ impl TemperatureUnit {
         match self {
             TemperatureUnit::Celsius => "celsius",
             TemperatureUnit::Fahrenheit => "fahrenheit",
+        }
+    }
+}
+
+/// The corner treatment shared by every event shape in the calendar.
+///
+/// The UI presents exactly these two values. Keeping the choice typed here
+/// also makes a hand-written invoke unable to store a spelling no renderer
+/// understands; an unrecognised database row still falls back to `Rounded`
+/// in [`read_settings`] for forwards compatibility and safe hand-editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventCornerStyle {
+    #[serde(rename = "rounded")]
+    Rounded,
+    #[serde(rename = "square")]
+    Square,
+}
+
+impl EventCornerStyle {
+    fn as_str(self) -> &'static str {
+        match self {
+            EventCornerStyle::Rounded => "rounded",
+            EventCornerStyle::Square => "square",
         }
     }
 }
@@ -353,6 +385,15 @@ pub struct AppSettings {
     /// Minutes a new timed event lasts when the user names only its start.
     /// Sixty preserves the existing behavior for installs without this row.
     pub default_event_duration_minutes: u32,
+    /// Absolute transparency of the calendar canvas. Zero is fully opaque;
+    /// the default reproduces Omarchy's former whole-window baseline.
+    pub background_transparency: u8,
+    /// Absolute transparency of event fills only. Zero is fully opaque; text,
+    /// colour spines, outlines and controls stay fully painted throughout.
+    pub event_transparency: u8,
+    /// Rounded preserves the shapes omacal shipped with; square removes the
+    /// corner radius from every event representation, not from other UI.
+    pub event_corner_style: EventCornerStyle,
     /// Whether the system tray icon is shown. **On by default** — the tray is
     /// where Quit lives, and an app that hides its only quit affordance on a
     /// fresh install has made a decision nobody asked it to. Turning it off
@@ -478,11 +519,36 @@ pub(crate) async fn write(pool: &SqlitePool, key: &str, value: &str) -> anyhow::
     Ok(())
 }
 
+/// Reads one percentage under either side of the one-time semantics change.
+///
+/// Legacy values were extra transparency multiplied after the compositor's
+/// 4% baseline. Preserve their effective alpha with
+/// `4 + round(legacy * 96 / 100)`. New rows are already absolute. Garbage on
+/// either side lands on the old visible baseline, never on an extreme.
+fn appearance_transparency(stored: Option<String>, absolute: bool) -> u8 {
+    let fallback = if absolute { DEFAULT_APPEARANCE_TRANSPARENCY } else { 0 };
+    let value = stored
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&percent| percent <= 100)
+        .unwrap_or(fallback);
+    if absolute {
+        value
+    } else {
+        let remaining = 100_u16 - u16::from(DEFAULT_APPEARANCE_TRANSPARENCY);
+        DEFAULT_APPEARANCE_TRANSPARENCY
+            + ((u16::from(value) * remaining + 50) / 100) as u8
+    }
+}
+
 /// The settings as stored, with defaults for anything absent.
 ///
 /// Absent is the ordinary case on a fresh install and is not an error:
 /// nothing writes these until the user opens the modal.
 pub async fn read_settings(pool: &SqlitePool) -> AppSettings {
+    let absolute_transparency = read(pool, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY)
+        .await
+        .as_deref()
+        == Some(ABSOLUTE_TRANSPARENCY_SEMANTICS);
     AppSettings {
         sync_interval_ms: read(pool, SYNC_INTERVAL_KEY)
             .await
@@ -544,6 +610,22 @@ pub async fn read_settings(pool: &SqlitePool) -> AppSettings {
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&minutes| minutes > 0)
             .unwrap_or(60),
+        // These are absolute percentages now. Before `absolute-v1`, stored
+        // values meant "extra alpha after Omarchy's 4% baseline"; lazily
+        // translate those rows so an old 0 opens at 4 instead of changing the
+        // user's appearance. The next write stores the marker atomically.
+        background_transparency: appearance_transparency(
+            read(pool, BACKGROUND_TRANSPARENCY_KEY).await,
+            absolute_transparency,
+        ),
+        event_transparency: appearance_transparency(
+            read(pool, EVENT_TRANSPARENCY_KEY).await,
+            absolute_transparency,
+        ),
+        event_corner_style: match read(pool, EVENT_CORNER_STYLE_KEY).await.as_deref() {
+            Some("square") => EventCornerStyle::Square,
+            _ => EventCornerStyle::Rounded,
+        },
         // `== "12h"` rather than `!= "24h"`, the same polarity `list_mode`
         // takes and for the same reason: absent, garbage, and a value written
         // by some future version all land on the format the app has always
@@ -620,6 +702,9 @@ pub const INTERVAL_TOO_SHORT: &str =
 
 pub const EVENT_DURATION_TOO_SHORT: &str =
     "the default meeting duration must be at least one minute";
+
+pub const TRANSPARENCY_OUT_OF_RANGE: &str =
+    "transparency must be between 0 and 100 percent";
 
 #[tauri::command]
 pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
@@ -1048,6 +1133,60 @@ async fn set_default_event_duration_impl(
     Ok(read_settings(pool).await)
 }
 
+/// Stores the three appearance choices as one decision. The two sliders and
+/// the corner picker share one preview, so a crash or database failure must
+/// not leave half of that preview persisted for the next launch.
+#[tauri::command]
+pub async fn set_appearance_preferences(
+    state: tauri::State<'_, AppState>,
+    background_transparency: u8,
+    event_transparency: u8,
+    event_corner_style: EventCornerStyle,
+) -> Result<AppSettings, String> {
+    set_appearance_preferences_impl(
+        &state.pool,
+        background_transparency,
+        event_transparency,
+        event_corner_style,
+    )
+    .await
+    .map_err(|e| crate::errors::user_facing(&e))
+}
+
+async fn set_appearance_preferences_impl(
+    pool: &SqlitePool,
+    background_transparency: u8,
+    event_transparency: u8,
+    event_corner_style: EventCornerStyle,
+) -> anyhow::Result<AppSettings> {
+    if background_transparency > 100 || event_transparency > 100 {
+        anyhow::bail!(TRANSPARENCY_OUT_OF_RANGE);
+    }
+
+    let values = [
+        (BACKGROUND_TRANSPARENCY_KEY, background_transparency.to_string()),
+        (EVENT_TRANSPARENCY_KEY, event_transparency.to_string()),
+        (EVENT_CORNER_STYLE_KEY, event_corner_style.as_str().to_string()),
+        (
+            APPEARANCE_TRANSPARENCY_SEMANTICS_KEY,
+            ABSOLUTE_TRANSPARENCY_SEMANTICS.to_string(),
+        ),
+    ];
+    let mut tx = pool.begin().await?;
+    for (key, value) in values {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(read_settings(pool).await)
+}
+
 /// Stores the filmstrip toggle. Nothing is refused and nothing is clamped —
 /// unlike the sync interval, there is no value of a boolean the app has to
 /// protect Google's quota from.
@@ -1219,6 +1358,21 @@ mod tests {
             "new events remain one hour long until somebody chooses otherwise",
         );
         assert_eq!(
+            s.background_transparency,
+            DEFAULT_APPEARANCE_TRANSPARENCY,
+            "the slider names the former Omarchy baseline instead of calling it zero",
+        );
+        assert_eq!(
+            s.event_transparency,
+            DEFAULT_APPEARANCE_TRANSPARENCY,
+            "event alpha starts at the same former whole-window baseline",
+        );
+        assert_eq!(
+            s.event_corner_style,
+            EventCornerStyle::Rounded,
+            "existing event shapes stay rounded",
+        );
+        assert_eq!(
             s.time_format,
             TimeFormat::H24,
             "the clock the app has always drawn, so no installed copy changes under its user"
@@ -1357,6 +1511,96 @@ mod tests {
                 read_settings(&p).await.default_event_duration_minutes,
                 60,
                 "{stored:?} is not a usable duration and must fall back",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn appearance_round_trips_as_one_choice_and_rejects_bad_percentages() {
+        let p = pool().await;
+
+        let s = set_appearance_preferences_impl(&p, 35, 70, EventCornerStyle::Square)
+            .await
+            .unwrap();
+        assert_eq!(s.background_transparency, 35);
+        assert_eq!(s.event_transparency, 70);
+        assert_eq!(s.event_corner_style, EventCornerStyle::Square);
+
+        for (background, events) in [(101, 70), (35, 101)] {
+            let err = set_appearance_preferences_impl(&p, background, events, EventCornerStyle::Rounded)
+                .await
+                .unwrap_err();
+            assert_eq!(err.to_string(), TRANSPARENCY_OUT_OF_RANGE);
+            assert_eq!(crate::errors::user_facing(&err), TRANSPARENCY_OUT_OF_RANGE);
+            let unchanged = read_settings(&p).await;
+            assert_eq!(unchanged.background_transparency, 35);
+            assert_eq!(unchanged.event_transparency, 70);
+            assert_eq!(unchanged.event_corner_style, EventCornerStyle::Square);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_extra_transparency_is_migrated_to_the_same_absolute_alpha() {
+        let p = pool().await;
+
+        // No semantics row is the additive version. Its 0 was really the
+        // compositor's 4%; 50 was 50% alpha multiplied by 96%, or 52% total.
+        write(&p, BACKGROUND_TRANSPARENCY_KEY, "0").await.unwrap();
+        write(&p, EVENT_TRANSPARENCY_KEY, "50").await.unwrap();
+        let legacy = read_settings(&p).await;
+        assert_eq!(legacy.background_transparency, 4);
+        assert_eq!(legacy.event_transparency, 52);
+
+        // Any new write marks the whole tuple absolute, including a real 0.
+        let absolute = set_appearance_preferences_impl(&p, 0, 50, EventCornerStyle::Rounded)
+            .await
+            .unwrap();
+        assert_eq!(absolute.background_transparency, 0);
+        assert_eq!(absolute.event_transparency, 50);
+        assert_eq!(
+            read(&p, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY).await.as_deref(),
+            Some(ABSOLUTE_TRANSPARENCY_SEMANTICS),
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_appearance_rows_fall_back_to_the_existing_look() {
+        let p = pool().await;
+
+        for stored in ["", "101", "-1", "half", "255"] {
+            write(&p, BACKGROUND_TRANSPARENCY_KEY, stored).await.unwrap();
+            write(&p, EVENT_TRANSPARENCY_KEY, stored).await.unwrap();
+            let s = read_settings(&p).await;
+            assert_eq!(
+                s.background_transparency,
+                DEFAULT_APPEARANCE_TRANSPARENCY,
+                "{stored:?} changed the canvas",
+            );
+            assert_eq!(
+                s.event_transparency,
+                DEFAULT_APPEARANCE_TRANSPARENCY,
+                "{stored:?} changed event fills",
+            );
+        }
+
+        write(&p, EVENT_CORNER_STYLE_KEY, "square").await.unwrap();
+        assert_eq!(read_settings(&p).await.event_corner_style, EventCornerStyle::Square);
+        for stored in ["", "Square", "round", "future-style"] {
+            write(&p, EVENT_CORNER_STYLE_KEY, stored).await.unwrap();
+            assert_eq!(
+                read_settings(&p).await.event_corner_style,
+                EventCornerStyle::Rounded,
+                "{stored:?} is not a style this version writes",
+            );
+        }
+    }
+
+    #[test]
+    fn the_corner_styles_stored_spelling_is_its_wire_spelling() {
+        for style in [EventCornerStyle::Rounded, EventCornerStyle::Square] {
+            assert_eq!(
+                serde_json::to_string(&style).unwrap(),
+                format!("\"{}\"", style.as_str()),
             );
         }
     }

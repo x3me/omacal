@@ -190,10 +190,20 @@
 
   .bar { appearance: none; -webkit-appearance: none; font: inherit;
          text-align: left; cursor: pointer; border: 0; border-left: 2px solid var(--cal);
-         font-size: 10.5px; border-radius: 4px; padding: 1px 6px; white-space: nowrap;
+         font-size: 10.5px; border-radius: var(--event-chip-radius, 4px); padding: 1px 6px; white-space: nowrap;
          overflow: hidden; text-overflow: ellipsis; margin: 0 2px;
+         /* Keep the former 16% visual tint in an opaque base. The shared
+            preference supplies all actual alpha once startup applies it. */
+         --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
          background: color-mix(in srgb, var(--cal) 16%, transparent);
          color: color-mix(in srgb, var(--cal) 60%, var(--text)); }
+  :global(:root[data-event-transparency]) .bar {
+    background: color-mix(
+      in srgb,
+      var(--event-fill) var(--event-fill-opacity),
+      transparent
+    );
+  }
   .bar.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
   .bar.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .bar.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }

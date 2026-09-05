@@ -16,6 +16,7 @@ import type { EventDetail } from '../../src/lib/eventdetail';
 import type { TimeFormat } from '../../src/lib/timefmt';
 import type { WeekStartDay } from '../../src/lib/weekstart';
 import type { Appearance, StartOnLogin, WeekViewDays, WindowFrame } from '../../src/lib/settings';
+import type { EventCornerStyle } from '../../src/lib/appearance';
 import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
@@ -568,6 +569,9 @@ type StubSettings = {
   fallbackReminderMinutes: number[];
   defaultCalendarId: number | null;
   defaultEventDurationMinutes: number;
+  backgroundTransparency: number;
+  eventTransparency: number;
+  eventCornerStyle: EventCornerStyle;
   timeFormat: TimeFormat;
   weekStart: WeekStartDay;
   weekStartsToday: boolean;
@@ -598,6 +602,11 @@ const DEFAULT_SETTINGS: StubSettings = {
   fallbackReminderMinutes: [60, 10],
   defaultCalendarId: null,
   defaultEventDurationMinutes: 60,
+  // The app now owns the old 4% Omarchy baseline so the ranges are absolute:
+  // 0 is genuinely opaque and the shipped appearance is honestly labelled 4.
+  backgroundTransparency: 4,
+  eventTransparency: 4,
+  eventCornerStyle: 'rounded',
   listMode: false,
   // The mark, which is what the tray has always worn.
   showDate: false,
@@ -928,6 +937,21 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_default_event_duration':
         settings = saveSettings({ ...settings, defaultEventDurationMinutes: args.minutes as number });
         return { ...settings };
+      case 'set_appearance_preferences': {
+        const backgroundTransparency = args.backgroundTransparency as number;
+        const eventTransparency = args.eventTransparency as number;
+        if (backgroundTransparency < 0 || backgroundTransparency > 100
+            || eventTransparency < 0 || eventTransparency > 100) {
+          throw new Error('transparency must be between 0 and 100 percent');
+        }
+        settings = saveSettings({
+          ...settings,
+          backgroundTransparency,
+          eventTransparency,
+          eventCornerStyle: args.eventCornerStyle as EventCornerStyle,
+        });
+        return { ...settings };
+      }
       case 'set_fallback_reminders': {
         const minutes = args.minutes as number[];
         // The backend's own refusals, mirrored so a spec can watch the form

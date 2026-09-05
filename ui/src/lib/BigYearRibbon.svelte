@@ -412,9 +412,24 @@
   .pill { appearance: none; -webkit-appearance: none; font: inherit;
           text-align: left; cursor: pointer; border: 0;
           font-size: 10.5px; line-height: var(--lane-h);
-          border-radius: 999px; padding: 0 5px; white-space: nowrap;
+          border-radius: var(--event-pill-radius, 999px); padding: 0 5px; white-space: nowrap;
           overflow: hidden; text-overflow: ellipsis; margin: 0 1px;
-          background: var(--cal); color: var(--ink); }
+          --event-fill: var(--cal); background: var(--cal); color: var(--ink); }
+  :global(:root[data-event-transparency]) .pill {
+    background: color-mix(
+      in srgb,
+      var(--event-fill) var(--event-fill-opacity),
+      transparent
+    );
+    /* `--ink` is chosen for a solid calendar-colour fill. Once that fill is
+       translucent, theme text mixed toward the calendar colour is the stable
+       contrast target instead. */
+    color: color-mix(in srgb, var(--cal) 60%, var(--text));
+  }
+  :global(:root[data-event-transparency]) .pill.cl { border-left-color: currentColor; }
+  :global(:root[data-event-transparency]) .pill.lit {
+    box-shadow: inset 0 0 0 1px currentColor;
+  }
   /* The continuation edge, in `--ink` rather than `--cal` for the reason the
      plain accent above was dropped: `border-left-style: dashed` in the fill's
      own colour is invisible on a solid fill — the dashes and the gaps are the

@@ -155,6 +155,10 @@ const SAFE_EXACT: &[&str] = &[
     // src-tauri/src/settings.rs — the default event duration cannot describe
     // a zero-length event. Fixed literal, raised before the settings write.
     crate::settings::EVENT_DURATION_TOO_SHORT,
+    // src-tauri/src/settings.rs — both appearance percentages are bounded to
+    // the range the sliders name. Fixed literal, raised before the transaction
+    // begins and propagated through `set_appearance` without added context.
+    crate::settings::TRANSPARENCY_OUT_OF_RANGE,
     // src-tauri/src/events.rs — `split_series`' refusal to split a series that
     // ends after a fixed number of occurrences. Fixed literal, no
     // interpolation, raised with `bail!` before either write and propagated by
@@ -376,6 +380,9 @@ mod tests {
             // Fixed literal raised before the settings write, with no
             // interpolation or context added on the command path.
             crate::settings::EVENT_DURATION_TOO_SHORT,
+            // Fixed literal raised before the appearance transaction begins,
+            // with no interpolation or context added on the command path.
+            crate::settings::TRANSPARENCY_OUT_OF_RANGE,
             // Checked against the doc-comment rule: a fixed literal raised
             // only after Google's insert succeeded, no interpolation, and
             // `create_event`'s `.map_err(user_facing)` adds no context.

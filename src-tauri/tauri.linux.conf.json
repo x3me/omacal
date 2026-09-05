@@ -1,0 +1,16 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "OmaCal",
+        "visible": false,
+        "width": 1280,
+        "height": 800,
+        "titleBarStyle": "Overlay",
+        "zoomHotkeysEnabled": false,
+        "hiddenTitle": true,
+        "transparent": true
+      }
+    ]
+  }
+}
