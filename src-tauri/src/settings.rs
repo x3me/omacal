@@ -14,6 +14,7 @@ use crate::AppState;
 const SYNC_INTERVAL_KEY: &str = "sync_interval_ms";
 const NOTIFICATIONS_KEY: &str = "notifications_enabled";
 const LIST_MODE_KEY: &str = "list_mode";
+const SHOW_DATE_KEY: &str = "show_date";
 const HOUR_HEIGHT_KEY: &str = "hour_height";
 /// Pixels per hour in Day and Week when nobody has zoomed: the grid's own
 /// 70 (see `WeekGrid.svelte`'s `.col`), and what an unusable stored value
@@ -352,6 +353,13 @@ pub struct AppSettings {
     /// `▦`/`☰` beside the view switcher, and a second control for the same
     /// value in a modal would be a second place for it to disagree.
     pub list_mode: bool,
+    /// Whether the surfaces that can show today's date do (2026-09-04):
+    /// the tray icon, which *becomes* the date because a tray host draws
+    /// icons and nothing else, and the Omarchy bar widget, which reads it
+    /// from the feed. One switch for both, because they are one idea; the
+    /// widget can still opt out on its own side. Off by default: the mark
+    /// is what says which app it is at a glance.
+    pub show_date: bool,
     /// Pixels per hour in Day and Week (2026-09-03): what a pinch,
     /// Ctrl+scroll or Ctrl+=/- left the grid at. Here for `list_mode`'s
     /// reason — a zoom that lasted one session would be redone every
@@ -565,6 +573,9 @@ pub async fn read_settings(pool: &SqlitePool) -> AppSettings {
         // hand-edited row lands on that same default rather than silently
         // turning the calendar into a list.
         list_mode: read(pool, LIST_MODE_KEY).await.map(|v| v == "1").unwrap_or(false),
+        // The mark unless the row says otherwise, for `list_mode`'s reason:
+        // a hand-edited value must land on what the app has always drawn.
+        show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
         hour_height: read(pool, HOUR_HEIGHT_KEY)
             .await
             .and_then(|v| v.parse::<i64>().ok())
@@ -1190,6 +1201,23 @@ pub async fn set_list_mode(
     Ok(read_settings(&state.pool).await)
 }
 
+/// Stores whether today's date is shown. Nothing to refuse, as with the
+/// other booleans; the tray is redressed on the spot and the widget's feed
+/// rewritten, so the choice shows on both surfaces without waiting for
+/// either one's tick.
+#[tauri::command]
+pub async fn set_show_date(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    on: bool,
+) -> Result<AppSettings, String> {
+    write(&state.pool, SHOW_DATE_KEY, if on { "1" } else { "0" })
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    crate::tray::refresh(&app);
+    Ok(read_settings(&state.pool).await)
+}
+
 /// Stores the hour height, clamped rather than refused: the value comes off
 /// a gesture, and the honest answer to "a little past the end" is the end,
 /// not an error surfacing under somebody's fingers mid-pinch.
@@ -1316,6 +1344,7 @@ mod tests {
         assert!(s.notifications_enabled, "reminders must be on until turned off");
         assert_eq!(s.min_sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
         assert!(!s.list_mode, "a fresh install draws the grid, not a list");
+        assert!(!s.show_date, "a fresh install wears the mark, not the date");
         assert_eq!(s.hour_height, HOUR_HEIGHT_DEFAULT, "a fresh install draws 70px hours");
         assert_eq!(
             s.fallback_reminder_minutes,
@@ -1931,6 +1960,20 @@ mod tests {
         let p = pool().await;
         write(&p, LIST_MODE_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.list_mode);
+    }
+
+    /// The show-date switch round-trips, and an unrecognised value leaves
+    /// the mark — the same polarity as `list_mode`, and for the same
+    /// reason: a hand-edited row must not change the app's face.
+    #[tokio::test]
+    async fn the_show_date_switch_is_stored_and_read_back() {
+        let p = pool().await;
+        write(&p, SHOW_DATE_KEY, "1").await.unwrap();
+        assert!(read_settings(&p).await.show_date);
+        write(&p, SHOW_DATE_KEY, "0").await.unwrap();
+        assert!(!read_settings(&p).await.show_date);
+        write(&p, SHOW_DATE_KEY, "yes").await.unwrap();
+        assert!(!read_settings(&p).await.show_date);
     }
 
     /// The hour height round-trips, and a stored value the gesture could

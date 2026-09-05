@@ -415,7 +415,7 @@ pub(crate) async fn respond(
     self_email: &str,
 ) -> anyhow::Result<crate::events::EventDetail> {
     let partstat = partstat_of(response)
-        .ok_or_else(|| anyhow::anyhow!("\"{response}\" is not an answer omacal knows"))?;
+        .ok_or_else(|| anyhow::anyhow!("\"{response}\" is not an answer OmaCal knows"))?;
     let (viewed, _, _) = omacal_store::event_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;

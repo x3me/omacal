@@ -481,11 +481,17 @@ test.describe('WeekGrid popover flow', () => {
     await expect(page.locator('.loc')).toHaveText('Room B');
   });
 
-  test('a failed load never shows an empty popover', async ({ page }) => {
+  test('a failed load never shows an empty popover, and never shows nothing either', async ({ page }) => {
     await page.goto(show('popover'));
     await page.evaluate(() => window.__harness.failNextEventCall('event_detail', 60, 'offline'));
     await page.getByRole('button', { name: 'Event A' }).click();
     await expect(page.locator('.pop')).toHaveCount(0);
+    // Closing in silence made a failed fetch look exactly like a dead
+    // control — reported 2026-09-04 as "I press an all-day event and
+    // nothing happens". The grid has no error line of its own, so it hands
+    // the failure to App, which has one.
+    await expect.poll(() => page.evaluate(() => (window as any).__lastGridError))
+      .toContain('offline');
   });
 
   test('a late failure for a superseded click does not close a popover that opened after it', async ({ page }) => {
@@ -5230,6 +5236,7 @@ test.describe('WeekGrid: the padded payload', () => {
     // fixed-position tooltip.
     const cols = page.locator('.body .cols');
     expect(await cols.evaluate((el) => getComputedStyle(el).transform)).toBe('none');
+
   });
 
   test('a swipe puts the whole payload on the track, and the day under the finger stays put', async ({ page }) => {
@@ -5318,5 +5325,159 @@ test.describe('WeekGrid: the all-day band while sliding', () => {
 
     await expect(chips).toHaveCount(2);
     expect((await rowsOf(page)).height).toBe(rest.height);
+  });
+
+  test('a chip out of a padded payload still opens its own event', async ({ page }) => {
+    // The lanes are repacked here, and their `idx` has to go on pointing into
+    // the payload's own event list, or a click asks for the wrong event —
+    // or, when the id resolves to nothing, for none at all (2026-09-04, the
+    // shape of "I press an all-day event and nothing happens").
+    await page.goto(show('padded-allday'));
+    await page.locator('.chip').filter({ hasText: 'From the padding' }).click();
+    await expect(page.getByRole('dialog', { name: 'From the padding' })).toBeVisible();
+  });
+});
+
+test.describe('WeekGrid: more all-day events than the band draws', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=WeekGrid&f=${f}`;
+  const more = (page: Page) => page.locator('.band .more');
+
+  test('"+N more" expands the band and folds it back', async ({ page }) => {
+    // Reported by email 2026-09-04 (Michael Brennan, on 1.2.0): a week with
+    // many all-day events showed "+70 more" and clicking it did nothing.
+    // Six spans cross this window and four rows are drawn.
+    await page.goto(show('allday-overflow'));
+    const chips = page.locator('.band .chip');
+    await expect(chips).toHaveCount(4);
+    await expect(more(page)).toHaveText('+2 more');
+    // The count is the window's: the three spans in the padding are not
+    // hidden events of the week on screen, and never were.
+    await expect(more(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(chips.filter({ hasText: 'Padding span' })).toHaveCount(0);
+
+    await more(page).click();
+    await expect(chips).toHaveCount(6);
+    await expect(more(page)).toHaveText('Show fewer');
+    await expect(more(page)).toHaveAttribute('aria-expanded', 'true');
+    // Six rows, so every hidden span is now on one of its own.
+    const rows = await page.locator('.band .rows').evaluate(
+      (el) => new Set([...el.querySelectorAll('.chip')].map((c) => (c as HTMLElement).style.gridRow)).size,
+    );
+    expect(rows).toBe(6);
+    // And it scrolls rather than pushing the hour grid off the window.
+    expect(await page.locator('.band .track').evaluate((el) => getComputedStyle(el).overflowY))
+      .toBe('auto');
+
+    await more(page).click();
+    await expect(chips).toHaveCount(4);
+    await expect(more(page)).toHaveText('+2 more');
+  });
+
+  test('the fold is a control, not a label, and only where it can answer', async ({ page }) => {
+    // `AllDayBand` mounted without `onexpand` keeps the inert label it had —
+    // the rule `MonthGrid`'s row-level "+N more" is written under: a label
+    // that cannot answer a click must not invite one.
+    await page.goto(show('allday-overflow'));
+    expect(await more(page).evaluate((el) => el.tagName)).toBe('BUTTON');
+    await page.goto('/tests/harness/index.html?c=AllDayBand&f=overflow');
+    const bare = page.locator('.band .more');
+    if (await bare.count()) expect(await bare.evaluate((el) => el.tagName)).toBe('DIV');
+  });
+});
+
+test.describe('EventPopover: who said no', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
+
+  test('the guest list is summed above itself, and only when somebody declined', async ({ page }) => {
+    // On a long guest list "how many are out" was a counting exercise.
+    await page.goto(show('everyone-declined'));
+    await expect(page.locator('.tally')).toHaveText('The other guest declined');
+    // Emphasised, because every guest being out is the state worth a look.
+    await expect(page.locator('.tally')).toHaveClass(/none/);
+
+    await page.goto(show('some-declined'));
+    await expect(page.locator('.tally')).toHaveText('1 of 3 guests declined');
+    await expect(page.locator('.tally')).not.toHaveClass(/none/);
+
+    // Nobody out, no row: "0 declined" on every event in the app is furniture.
+    await page.goto(show('standup'));
+    await expect(page.locator('.guest')).toHaveCount(3);
+    await expect(page.locator('.tally')).toHaveCount(1); // petya declined
+    await expect(page.locator('.tally')).toHaveText('1 of 2 guests declined');
+  });
+});
+
+test.describe('WeekGrid: the day header on one line', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=WeekGrid&f=${f}`;
+
+  test('name, number and sky share a row, and the number never moves for the sky', async ({ page }) => {
+    // Asked for 2026-09-04: two rows at the top of every week, one of which
+    // held only "FRI". The number stays centred whether or not the day has a
+    // forecast, which is what the old absolutely-positioned `.wx` bought and
+    // the three grid tracks buy now.
+    await page.goto(show('weather'));
+    const head = page.locator('.head:not(.gutter)').first();
+    const rows = await head.evaluate((el) => {
+      const box = (s: string) => {
+        const n = el.querySelector(s);
+        return n ? n.getBoundingClientRect() : null;
+      };
+      const dow = box('.dow')!, num = box('b')!, wx = box('.wx');
+      return {
+        oneLine: Math.abs(dow.top - num.top) < num.height && !!wx && Math.abs(wx!.top - num.top) < num.height,
+        headHeight: el.getBoundingClientRect().height,
+      };
+    });
+    expect(rows.oneLine).toBe(true);
+
+    // Mon/Tue/Wed carry a forecast in this fixture and the rest do not
+    // (`WEEK_WEATHER`), so the centres must still agree across the week.
+    const centres = await page.locator('.head:not(.gutter)').evaluateAll((els) => els.map((el) => {
+      const head = el.getBoundingClientRect();
+      const num = el.querySelector('b')!.getBoundingClientRect();
+      return Math.round((num.left + num.right) / 2 - (head.left + head.right) / 2);
+    }));
+    expect(new Set(centres).size, `number centres differ across the week: ${centres}`).toBe(1);
+    expect(await page.locator('.head .wx').count()).toBeGreaterThan(0);
+    expect(await page.locator('.head .wx').count()).toBeLessThan(centres.length);
+  });
+});
+
+test.describe('EventBlock: nobody is coming', () => {
+  const show = (f: string) => `/tests/harness/index.html?c=EventBlock&f=${f}`;
+
+  test('it is said in words, and drawn as damage to the block in none of them', async ({ page }) => {
+    // Reported 2026-09-04: a 1:1 the user organised, declined by its only
+    // guest, looked exactly like one that was going ahead. Two louder cuts
+    // were rejected on sight before this one — a ✕ in the corner, then a
+    // strike through the title — so the marks they used are asserted absent,
+    // not merely different.
+    await page.goto(show('nobody-coming-60'));
+    const ev = page.locator('.ev');
+    await expect(ev).toHaveClass(/nobodycoming/);
+    await expect(ev).toHaveAttribute('aria-label', /everyone declined/);
+    await expect(ev.locator('.rs')).toHaveCount(0);
+    await expect(ev.locator('em.none')).toHaveText('Everyone declined');
+    // The location still gets its line: the news is added, not substituted.
+    await expect(ev.locator('em').last()).toHaveText('Office');
+    expect(await ev.locator('b').evaluate((el) => getComputedStyle(el).textDecorationLine))
+      .toBe('none');
+
+    // Under the ladder's meta threshold there is no room for a line, and the
+    // fill carries it alone: quieter than an ordinary block, but not the
+    // hollow of one you declined yourself.
+    await page.goto(show('nobody-coming-15'));
+    await expect(page.locator('.ev em.none')).toHaveCount(0);
+    const quiet = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.goto(show('ladder-15'));
+    const ordinary = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.goto(show('rsvp-declined-15'));
+    const declined = await page.locator('.ev').evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(quiet).not.toBe(ordinary);
+    expect(quiet).not.toBe(declined);
+    // And a block you declined yourself still wears its own strike, which
+    // is the idiom this state deliberately stopped borrowing.
+    expect(await page.locator('.ev b').evaluate((el) => getComputedStyle(el).textDecorationLine))
+      .toContain('line-through');
   });
 });

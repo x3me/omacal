@@ -381,10 +381,9 @@ test.describe('the hand-written week fixtures describe payloads assemble_days co
       // Week at `n = 7`, and rolling Week ranges at `n = 3`, `5`, or `7`.
       // No other column count is reachable, so a fixture with two days — or
       // none — is one nothing can serve.
-      // The `padded*` fixtures are the exception: a week's padding either side
-      // of a fixed week, 21 columns, which `get_week(…, pad: 7)` serves since
-      // 2026-09-03.
-      expect(name.startsWith('padded') ? [21] : [1, 3, 5, 7], `${name} has ${w.days.length} day columns`)
+      // 21 is the padded fetch: a week's padding either side of a fixed
+      // week, which `get_week(…, pad: 7)` has served since 2026-09-03.
+      expect([1, 3, 5, 7, 21], `${name} has ${w.days.length} day columns`)
         .toContain(w.days.length);
 
       for (const [d, col] of w.days.entries()) {
@@ -653,11 +652,12 @@ test.describe('the hand-written week fixtures describe payloads assemble_days co
         expect(l.start_col, `${where} starts left of the week`).toBeGreaterThanOrEqual(0);
         expect(l.end_col, `${where} ends right of the week`).toBeLessThanOrEqual(n - 1);
         expect(l.end_col, `${where} ends before it starts`).toBeGreaterThanOrEqual(l.start_col);
-        // **Two lanes, not three.** The month grid packs at three
-        // (commands.rs:423); the week band packs at two, and `AllDayBand`
-        // renders exactly what it is given, so a third lane in a `WeekPayload`
-        // is a row the backend cannot fill.
-        expect(l.lane, `${where} is in a lane the band does not draw`).toBeLessThan(2);
+        // `pack_lanes(&segments, n, ALL_DAY_LANES_MAX)` (commands.rs) — the
+        // payload positions up to 64 rows since 2026-09-04, and the *band*
+        // draws four of them with the rest behind an expandable "+N more".
+        // So a fifth lane here is no longer a row nothing can fill; a
+        // sixty-fifth still is.
+        expect(l.lane, `${where} is in a lane the packer cannot produce`).toBeLessThan(64);
         expect(l.lane, `${where} is in lane ${l.lane}`).toBeGreaterThanOrEqual(0);
 
         // A continuation flag is set by the clip and *only* by the clip:

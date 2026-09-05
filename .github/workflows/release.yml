@@ -130,6 +130,21 @@ jobs:
           # `browser::open_external` also filters the child's PATH, for every
           # image shipped before this line existed.
           rm -v squashfs-root/usr/bin/xdg-open
+          # The image's own icon — what `.DirIcon` resolves to, and what any
+          # tool extracting one gets — was the **32px** file: the bundler
+          # links the root `omacal.png` at `hicolor/32x32`, even though the
+          # image also carries a 512 and the scalable SVG. AppManager showed
+          # a 32×32 icon for the app and @xmha97 reported it on issue #39.
+          # Replace the link with the real 512, keeping `.DirIcon` pointed at
+          # the same name.
+          rm -f squashfs-root/omacal.png
+          cp squashfs-root/usr/share/icons/hicolor/512x512/apps/omacal.png \
+             squashfs-root/omacal.png
+          file -L squashfs-root/.DirIcon | grep -q '512 x 512' || {
+            echo "the AppImage's own icon is not the 512" >&2
+            file -L squashfs-root/.DirIcon >&2
+            exit 1
+          }
           # The GTK hook forces GDK_BACKEND=x11, guarding a WebKit-on-Wayland
           # crash (tauri#8541) that in this AppImage was the bundled libwayland
           # removed one line up. XWayland is not free either: under Hyprland's
@@ -253,7 +268,26 @@ jobs:
             # The stable name beside the versioned one, so
             # releases/latest/download/omacal.dmg is a link that never rots —
             # the site's Download button points at it.
-            cp target/release/bundle/dmg/*.dmg target/release/bundle/dmg/omacal.dmg
+            # Lowercase what the Mac bundler named after the product. Since
+            # the app's displayed name became OmaCal (#40), the bundler has
+            # been writing `OmaCal.app.tar.gz`, its signature and
+            # `OmaCal_<version>_aarch64.dmg`, while every Linux artifact
+            # stays lowercase — @xmha97 listed the mismatch on that issue.
+            # Renamed here rather than by changing the product name back:
+            # the bundle inside the dmg must stay `OmaCal.app`, which is
+            # what the Dock and Finder show. The updater manifest is built
+            # from these files in the join job below, after this, so it
+            # names whatever is uploaded.
+            for f in target/release/bundle/macos/OmaCal.app.tar.gz \
+                     target/release/bundle/macos/OmaCal.app.tar.gz.sig \
+                     target/release/bundle/dmg/OmaCal_*_aarch64.dmg; do
+              [ -e "$f" ] || continue
+              mv -v "$f" "$(dirname "$f")/$(basename "$f" | tr 'A-Z' 'a-z')"
+            done
+            # The stable name beside the versioned one, so
+            # releases/latest/download/omacal.dmg is a link that never rots.
+            cp target/release/bundle/dmg/omacal_*_aarch64.dmg \
+               target/release/bundle/dmg/omacal.dmg
             files=$(ls target/release/bundle/dmg/*.dmg \
                        target/release/bundle/macos/*.app.tar.gz \
                        target/release/bundle/macos/*.app.tar.gz.sig)

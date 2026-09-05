@@ -40,14 +40,29 @@ export function visibleIndex(days: { start_ms: number }[], visibleStartMs: numbe
  * judgement about the wider range, and re-packing here would be a second
  * lane packer to disagree with the first.
  */
-export function sliceWeek(week: WeekPayload, from: number, count: number): WeekPayload {
-  if (from === 0 && count >= week.days.length) return week;
+export function sliceWeek(
+  week: WeekPayload, from: number, count: number, maxRows = Infinity,
+): WeekPayload {
+  if (from === 0 && count >= week.days.length && maxRows === Infinity) return week;
+  const { lanes, hidden } = packBandLanes(week.all_day, from, count, false, maxRows);
   return {
     ...week,
     days: week.days.slice(from, from + count),
-    all_day: packBandLanes(week.all_day, from, count, false),
+    all_day: lanes,
+    // **The window's own hidden events, not the payload's.** `overflow`
+    // arrives counted over everything fetched, which since the padded
+    // window (v1.1.0) is three weeks — so the band's "+N more" counted
+    // events from the weeks either side of the one on screen. Whatever the
+    // backend could not position is added, so a count is never short.
+    overflow: [...hidden, ...week.overflow],
   };
 }
+
+/** How many rows of chips the band shows before folding the rest behind
+ *  "+N more". Four, which is what the backend used to pack (2026-08-31:
+ *  "four is where a glance stops being a glance"); the difference is that
+ *  the rest can now be expanded into rather than dropped. */
+export const BAND_ROWS = 4;
 
 /**
  * The all-day band's rows for a window, packed here rather than taken from
@@ -71,8 +86,14 @@ export function sliceWeek(week: WeekPayload, from: number, count: number): WeekP
  * identical rows in both modes: two contiguous spans that both touch the
  * window overlap in full if and only if they overlap inside it, and the
  * order is the same, so first-fit agrees.
+ *
+ * `maxRows` caps the rows drawn. A window chip that finds no room in them is
+ * returned in `hidden` instead — the band's "+N more", which expands by
+ * packing again with no cap (2026-09-04).
  */
-export function packBandLanes(lanes: Lane[], from: number, count: number, extend: boolean): Lane[] {
+export function packBandLanes(
+  lanes: Lane[], from: number, count: number, extend: boolean, maxRows = Infinity,
+): { lanes: Lane[]; hidden: number[] } {
   const last = from + count - 1;
   const inWindow = (l: Lane) => l.end_col >= from && l.start_col <= last;
   const byStart = (a: Lane, b: Lane) =>
@@ -85,17 +106,22 @@ export function packBandLanes(lanes: Lane[], from: number, count: number, extend
     for (let r = 0; r < rows.length; r++) {
       if (free(rows[r], s, e)) { rows[r].push({ start: s, end: e }); return r; }
     }
-    if (!grow) return -1;
+    if (!grow || rows.length >= maxRows) return -1;
     rows.push([{ start: s, end: e }]);
     return rows.length - 1;
   };
   const out: Lane[] = [];
+  const hidden: number[] = [];
   for (const lane of lanes.filter(inWindow).sort(byStart)) {
     const start_col = extend ? lane.start_col : Math.max(lane.start_col, from) - from;
     const end_col = extend ? lane.end_col : Math.min(lane.end_col, last) - from;
+    const row = place(start_col, end_col, true);
+    // No room in the rows the band is drawing: it becomes part of "+N more"
+    // rather than being drawn on a row that is not there.
+    if (row < 0) { hidden.push(lane.idx); continue; }
     out.push({
       ...lane,
-      lane: place(start_col, end_col, true),
+      lane: row,
       start_col,
       end_col,
       cont_left: lane.cont_left || (!extend && lane.start_col < from),
@@ -108,7 +134,7 @@ export function packBandLanes(lanes: Lane[], from: number, count: number, extend
       if (row >= 0) out.push({ ...lane, lane: row });
     }
   }
-  return out;
+  return { lanes: out, hidden };
 }
 
 /**

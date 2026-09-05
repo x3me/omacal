@@ -87,6 +87,9 @@ const ev = (o: Partial<UiEvent> & { title: string; start_ms: number; end_ms: num
   attendees: 0,
   recurring: false,
   conference: null,
+  // Nobody has declined: the quiet default again, and the one every fixture
+  // that predates the mark describes.
+  all_guests_declined: false,
   ...o,
 });
 
@@ -1061,6 +1064,38 @@ function emptyBigYear(
  *  payload: every syncing calendar, dimmed when hidden. Four calendars so a
  *  spec can tell the three states apart — shown, hidden (listed, dimmed) and
  *  not syncing at all (not listed: there is nothing to show). */
+/** A week with more all-day events than the band draws: six across the
+ *  window (columns 7..13 of the padded payload, so each needs its own row)
+ *  and three lying in the left padding. Four rows are drawn, so "+2 more"
+ *  counts the two hidden window spans and none of the padding — the count
+ *  the band used to take from the payload, three weeks wide (2026-09-04,
+ *  Michael Brennan's "+70 more" that did nothing). */
+export const allDayOverflowWeek = (): WeekPayload => {
+  const w = labelledWeek(MON - 7 * 24 * H, 21);
+  const span = (id: number, title: string, from: number, to: number) => ev({
+    id, title, start_ms: MON + (from - 7) * 24 * H, end_ms: MON + (to - 6) * 24 * H,
+    is_all_day: true,
+  });
+  w.all_day_events = [
+    ...[0, 1, 2, 3, 4, 5].map((i) => span(800 + i, `Window span ${i + 1}`, 7, 13)),
+    ...[0, 1, 2].map((i) => span(810 + i, `Padding span ${i + 1}`, 0, 6)),
+  ];
+  // As `pack_lanes` would leave them: first-fit by start column, then
+  // sorted by (lane, start_col). The padding spans share rows 0-2 with the
+  // window spans because their columns do not overlap.
+  const at = (idx: number, lane: number, start_col: number, end_col: number) =>
+    ({ idx, lane, start_col, end_col, cont_left: false, cont_right: false });
+  w.all_day = [
+    at(6, 0, 0, 6), at(0, 0, 7, 13),
+    at(7, 1, 0, 6), at(1, 1, 7, 13),
+    at(8, 2, 0, 6), at(2, 2, 7, 13),
+    at(3, 3, 7, 13),
+    at(4, 4, 7, 13),
+    at(5, 5, 7, 13),
+  ];
+  return w;
+};
+
 /** See the `padded-allday` fixture. Columns are over the 21-day payload:
  *  the window is columns 7..13. */
 export const paddedAllDayWeek = (): WeekPayload => {
@@ -1636,6 +1671,28 @@ POPOVER_DETAILS[APP_GUESTS_ID] = detail({
 /** One guest, not two: the person doing the moving is never counted. */
 export const APP_GUESTS_COUNT = 1;
 
+/** The all-day chips of the `padded-allday` WeekGrid fixture, so a spec can
+ *  click one and get a popover rather than the silent nothing a missing
+ *  detail produces (2026-09-04: that silence was the bug report). */
+POPOVER_DETAILS[701] = detail({
+  id: 701, title: 'From the padding', can_edit: true, is_all_day: true,
+  start_ms: MON - 4 * 24 * H, end_ms: MON + 3 * 24 * H,
+  start_date: '2024-01-25', end_date: '2024-01-31',
+});
+
+/** The reported case (2026-09-04): a meeting the user organised and accepted,
+ *  whose only guest declined. The popover names it above the guest list. */
+export const APP_ALL_DECLINED_ID = 9241;
+POPOVER_DETAILS[APP_ALL_DECLINED_ID] = detail({
+  id: APP_ALL_DECLINED_ID, title: 'Plamen - Teodor 1:1', can_edit: true,
+  calendar_id: APP_PRIMARY_CALENDAR_ID,
+  start_ms: APP_GUESTS_START, end_ms: APP_GUESTS_START + 30 * 60_000,
+  attendees: [
+    attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+    attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
+  ],
+});
+
 POPOVER_DETAILS[APP_GUEST_OF_ID] = detail({
   id: APP_GUEST_OF_ID, title: 'Vendor review', can_edit: true,
   calendar_id: APP_PRIMARY_CALENDAR_ID,
@@ -1892,6 +1949,9 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     'padded-allday': {
       week: paddedAllDayWeek(), visibleStartMs: MON, visibleDays: 7,
     },
+    'allday-overflow': {
+      week: allDayOverflowWeek(), visibleStartMs: MON, visibleDays: 7,
+    },
     // The empty week under a three-day forecast: Mon/Tue/Wed carry distinct
     // skies, Thu onward is past the horizon and must carry nothing.
     weather: { week: emptyWeek(), weather: WEEK_WEATHER },
@@ -1974,6 +2034,26 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     'rsvp-needsAction-15': block('Investors', 15, 'needsAction', null),
     'rsvp-tentative-15': block('Legal review', 15, 'tentative', null),
     'rsvp-declined-15': block('All hands', 15, 'declined', null),
+    // The two states that both mean "not happening" and must not be
+    // confusable: *you* declined it, and everyone else did (2026-09-04).
+    'nobody-coming-15': {
+      ...block('Plamen - Teodor 1:1', 15, 'accepted', null),
+      event: ev({
+        title: 'Plamen - Teodor 1:1', location: null, response: 'accepted',
+        attendees: 2, all_guests_declined: true,
+        start_ms: MON + 9 * H, end_ms: MON + 9 * H + 15 * 60_000,
+      }),
+    },
+    // The same event at a height that has room for a line, which is where
+    // the state is said in words rather than carried by the fill alone.
+    'nobody-coming-60': {
+      ...block('Plamen - Teodor 1:1', 60, 'accepted', 'Office'),
+      event: ev({
+        title: 'Plamen - Teodor 1:1', location: 'Office', response: 'accepted',
+        attendees: 2, all_guests_declined: true,
+        start_ms: MON + 9 * H, end_ms: MON + 10 * H,
+      }),
+    },
   },
   AllDayBand: {
     // None of these specs click a chip — opening a popover needs a real
@@ -2380,6 +2460,34 @@ export const FIXTURES: Record<string, Record<string, any>> = {
           attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
           attendee({ email: 'me@x.com', is_self: true, response_status: 'needsAction' }),
           attendee({ email: 'petya@x.com', response_status: 'declined' }),
+        ],
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // The tally above the guest list (2026-09-04): one guest, and they said
+    // no, which is the case that prompted it. `everyone-declined` and
+    // `some-declined` differ only in how many said yes, so the two wordings
+    // are pinned against the same shape.
+    'everyone-declined': {
+      detail: detail({
+        id: 3,
+        attendees: [
+          attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+          attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
+        ],
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    'some-declined': {
+      detail: detail({
+        id: 4,
+        attendees: [
+          attendee({ email: 'teodor@x.com', display_name: 'Teodor', response_status: 'declined' }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
+          attendee({ email: 'ivan@x.com', display_name: 'Ivan', response_status: 'needsAction' }),
+          attendee({ email: 'me@x.com', is_self: true, response_status: 'accepted' }),
         ],
       }),
       anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,

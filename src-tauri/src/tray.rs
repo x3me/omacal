@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager};
 /// [`hide_instead_of_closing`]), so if this entry ever goes the app cannot be
 /// quit from the UI at all — the tray is the only way out.
 pub(crate) const MENU: [(&str, &str); 3] =
-    [("open", "Open omacal"), ("sync", "Sync now"), ("quit", "Quit")];
+    [("open", "Open OmaCal"), ("sync", "Sync now"), ("quit", "Quit")];
 
 /// What a tray menu id means.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,7 +576,7 @@ pub(crate) fn build(app: &AppHandle) -> tauri::Result<()> {
 /// **Untested, like [`build`]** — every decision it carries was made by
 /// [`rows`] and [`menu_title`], which are; what is left is Tauri and AppKit.
 fn apply(app: &AppHandle, feed: &crate::upcoming::Feed, now_ms: i64,
-         fmt: crate::settings::TimeFormat) -> tauri::Result<()> {
+         fmt: crate::settings::TimeFormat, date_icon: bool) -> tauri::Result<()> {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(()); // Tray turned off, or never built. Nothing to dress.
     };
@@ -649,6 +649,18 @@ fn apply(app: &AppHandle, feed: &crate::upcoming::Feed, now_ms: i64,
         if cfg!(target_os = "macos") { menu_title(feed, now_ms, &tz, fmt) } else { None };
     tray.set_title(title)?;
 
+    // The date *is* the icon where it is wanted (2026-09-04): a tray host
+    // draws icons and nothing else, which is the same fact the title branch
+    // above is about. Set on every refresh rather than only when the day
+    // turns, because the minute tick is already here and a comparison
+    // against the icon currently shown is not something the tray can be
+    // asked for.
+    tray.set_icon(Some(if date_icon {
+        crate::tray_date::icon_for(crate::today_of_month(now_ms, &tz))
+    } else {
+        crate::tray_date::mark()
+    }))?;
+
     Ok(())
 }
 
@@ -677,8 +689,8 @@ pub(crate) fn refresh(app: &AppHandle) {
                 return;
             }
         };
-        let fmt = crate::settings::read_settings(&pool).await.time_format;
-        if let Err(e) = apply(&app, &feed, now, fmt) {
+        let settings = crate::settings::read_settings(&pool).await;
+        if let Err(e) = apply(&app, &feed, now, settings.time_format, settings.show_date) {
             tracing::warn!(%e, "could not update the tray menu");
         }
     });
@@ -753,7 +765,7 @@ mod tests {
     }
 
     fn feed(events: Vec<FeedEvent>) -> Feed {
-        Feed { version: 1, generated_ms: T0, events, tasks: Vec::new() }
+        Feed { version: 1, generated_ms: T0, events, tasks: Vec::new(), today: None }
     }
 
     /// The wearer's zone. Fixed rather than `TimeZone::system()` so these
@@ -978,7 +990,7 @@ mod tests {
             ["open", "sync", "quit"],
             "the tray menu's contents and their order"
         );
-        assert_eq!(MENU.map(|(_, label)| label), ["Open omacal", "Sync now", "Quit"]);
+        assert_eq!(MENU.map(|(_, label)| label), ["Open OmaCal", "Sync now", "Quit"]);
     }
 
     /// Stated on its own because losing it is not a cosmetic regression: with
@@ -1135,3 +1147,4 @@ mod tests {
         assert!(opens_window(&argv(&["omacal", "2026-09-01"]), Background));
     }
 }
+

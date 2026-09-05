@@ -5,7 +5,7 @@
   import { gutterWidth } from './secondzone.svelte';
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
 
-  let { lanes, events, overflow, columns = 7, visible = columns, vis = 0, pan = 0, sliding = false, dayStarts = [], keyboardCursor = null, onopen }:
+  let { lanes, events, overflow, columns = 7, visible = columns, vis = 0, pan = 0, sliding = false, expanded = false, onexpand = null, dayStarts = [], keyboardCursor = null, onopen }:
     { lanes: Lane[]; events: UiEvent[]; overflow: number[]; columns?: number;
       /** The chips ride `WeekGrid`'s track (2026-09-03): `columns` drawn,
        *  `visible` of them on screen, `vis` columns of padding before the
@@ -17,6 +17,14 @@
       /** While the grid's track is sliding — the only time the offset is
        *  applied, and by transform; see `WeekGrid`'s `.cols.sliding`. */
       sliding?: boolean;
+      /** Whether every row is drawn, or four with the rest behind "+N more".
+       *  The band does not decide it: the rows it is handed are packed to
+       *  the same answer, so the two cannot disagree. */
+      expanded?: boolean;
+      /** "+N more" was clicked. Optional: a mount that passes nothing gets
+       *  the label it always had, which is a label and not a control —
+       *  nothing here should invite a click it cannot answer. */
+      onexpand?: (() => void) | null;
       dayStarts?: number[];
       keyboardCursor?: KeyboardCursor | null;
       /** Same contract as `EventBlock`'s, and wired to the same
@@ -51,7 +59,7 @@
 </script>
 
 {#if lanes.length || overflow.length}
-  <div class="band" style="--gutter:{gutterWidth()}">
+  <div class="band" class:expanded style="--gutter:{gutterWidth()}">
     <div class="label">ALL-DAY</div>
     <div class="track">
     <div class="rows" class:sliding style="--cols:{columns}; --visible:{visible}; --vis:{vis}; --pan:{pan}">
@@ -79,10 +87,24 @@
           {lane.cont_left ? '‹ ' : ''}{ev.title}
         </button>
       {/each}
-      {#if overflow.length}
-        <div class="more" style="grid-row:{laneCount + 1}; grid-column:1 / -1">
-          +{overflow.length} more
-        </div>
+      <!-- The fold, and since 2026-09-04 a real control: a week with more
+           all-day events than the band draws used to say "+70 more" and do
+           nothing when clicked (Michael Brennan, by email, on 1.2.0). Still
+           a plain label without `onexpand`, for the reason `MonthGrid`'s
+           row-level one is one: a label that cannot answer a click must not
+           invite it. -->
+      {#if overflow.length || expanded}
+        {#if onexpand}
+          <button class="more" type="button" aria-expanded={expanded}
+                  style="grid-row:{laneCount + 1}; grid-column:1 / -1"
+                  onclick={onexpand}>
+            {overflow.length ? `+${overflow.length} more` : 'Show fewer'}
+          </button>
+        {:else if overflow.length}
+          <div class="more" style="grid-row:{laneCount + 1}; grid-column:1 / -1">
+            +{overflow.length} more
+          </div>
+        {/if}
       {/if}
     </div>
     </div>
@@ -168,5 +190,13 @@
   .chip.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .chip.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-  .more { font-size: 10px; color: var(--muted); opacity: .7; padding: 2px 4px; }
+  .more { font: inherit; font-size: 10px; color: var(--muted); opacity: .7; padding: 2px 4px;
+          background: none; border: 0; text-align: left; }
+  button.more { cursor: pointer; }
+  button.more:hover { color: var(--text); opacity: 1; }
+  /* Expanded, the band takes what it needs and scrolls rather than pushing
+     the hours off the screen: seventy all-day events is eighteen rows, and
+     a calendar whose grid has been shouldered out of the window has traded
+     one problem for a worse one. The label stays put beside it. */
+  .band.expanded .track { max-height: 38vh; overflow-y: auto; }
 </style>

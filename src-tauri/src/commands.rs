@@ -1,8 +1,20 @@
 use omacal_core::{expand, lay_out_day, pack_lanes, Interval, Lane, Placed, Segment, Series};
 
-/// How many rows of all-day spans the week's band draws before the rest
-/// become "+N more".
-const ALL_DAY_LANES: u8 = 4;
+/// How many rows of all-day spans the week's payload *positions*.
+///
+/// **Not the band's height.** The band draws four rows and folds the rest
+/// behind "+N more", which expands — and that is a UI decision, made in
+/// `weekwindow.ts` against the days actually on screen. Reported
+/// 2026-09-04 (Michael Brennan, by email, on 1.2.0): a week with many
+/// all-day events showed "+70 more" and clicking it did nothing. It could
+/// not do anything: the events were in the payload, but everything past the
+/// fourth row had been dropped by the packer here, so they had no columns
+/// to be drawn at.
+///
+/// Generous rather than unbounded, because the packer is O(rows) per
+/// segment and the input is somebody else's calendar; anything past this is
+/// still reported in `overflow`, which the UI adds to its own count.
+const ALL_DAY_LANES_MAX: u8 = 64;
 use omacal_store::StoredEvent;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -39,6 +51,19 @@ pub struct UiEvent {
     /// list row's Join reads this first and falls back to a recognised
     /// meeting URL in `location` — the popover's exact derivation.
     pub conference: Option<String>,
+    /// **Every invitee other than you has said no**, and there was at least
+    /// one to say it. A meeting nobody is coming to, which until now was
+    /// visible only by opening the event and reading the guest list
+    /// (2026-09-04, Plamen: a 1:1 he organised, declined, looked exactly
+    /// like one that was going ahead).
+    ///
+    /// Deliberately not "the organizer's guests declined": whether you own
+    /// the event or were invited to it, an event whose every other invitee
+    /// has declined is not happening, and `to_ui` has no account email to
+    /// decide ownership with anyway (`events::is_organizer` needs one). The
+    /// signed-in user's own row is excluded through `is_self`, so your own
+    /// "no" — which already strikes the block through — never sets this.
+    pub all_guests_declined: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +131,10 @@ fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
         attendees: src.attendees.len() as u32,
         recurring: src.recurrence.is_some() || src.recurring_event_id.is_some(),
         conference: src.conference_uri.clone(),
+        all_guests_declined: {
+            let mut others = src.attendees.iter().filter(|a| !a.is_self).peekable();
+            others.peek().is_some() && others.all(|a| a.response_status == "declined")
+        },
     }
 }
 
@@ -279,17 +308,46 @@ fn column_for(bounds: &[i64], ms: i64) -> Option<usize> {
     Some(bounds.partition_point(|&b| b <= ms) - 1)
 }
 
-/// The column a timed occurrence should be drawn in, or `None` if it does not
-/// touch the week at all.
+/// **Every** column a timed occurrence touches, as an inclusive range.
 ///
-/// Normally that is the column containing its start. An event that began before
-/// the week and runs into it — Sunday 23:00 to Monday 01:00, on the Monday the
-/// week begins — has no such column, and dropping it made the event vanish
-/// entirely. It is clamped into column 0 instead, where `lay_out_day` clips the
-/// geometry to the column's own bounds.
+/// It used to be one column, the one holding the start, and the rest of the
+/// event was simply not drawn: 23:00 to 02:00 appeared on its first day and
+/// the next day showed nothing (issue #42, @xmha97, confirmed here). The
+/// geometry was never the problem — `lay_out_day` clamps a span to the
+/// column's own bounds, and has a test saying so — so an occurrence now goes
+/// into each column it overlaps and each one clips its own piece.
+///
+/// Both edges of the window are clamped rather than dropped. An event that
+/// began before it and runs in — Sunday 23:00 to Monday 01:00, on the Monday
+/// a week begins — belongs to column 0, and one running out the far end
+/// belongs to the last; dropping either made the event vanish entirely.
+///
+/// The end is exclusive, so a meeting ending at midnight stops on its own
+/// day, and a zero-length event still occupies the instant it names.
+/// The single column a timed occurrence *starts* in, for Month.
+///
+/// Month deliberately keeps the old rule that Week outgrew (see
+/// [`timed_columns`]). A month cell has no geometry, only a list of lines
+/// reading "23:00 Title": drawn under Tuesday, that line says the event
+/// starts at 23:00 on Tuesday, which it does not. In the day grid the
+/// block's *position* carries the truth — a piece at the top of Tuesday is
+/// visibly the tail of something — and in a cell there is no position to
+/// carry it. So the crossing shows where it begins, and the grid is where
+/// you see the rest.
 fn timed_column(bounds: &[i64], iv: &Interval) -> Option<usize> {
     column_for(bounds, iv.start_ms)
         .or_else(|| (iv.start_ms < bounds[0] && iv.end_ms > bounds[0]).then_some(0))
+}
+
+fn timed_columns(bounds: &[i64], iv: &Interval) -> std::ops::Range<usize> {
+    let n = bounds.len().saturating_sub(1);
+    let end = iv.end_ms.max(iv.start_ms + 1);
+    if n == 0 || end <= bounds[0] || iv.start_ms >= bounds[n] {
+        return 0..0;
+    }
+    let first = column_for(bounds, iv.start_ms).unwrap_or(0);
+    let last = column_for(bounds, end - 1).unwrap_or(n - 1);
+    first..last + 1
 }
 
 /// Each column's own civil date in the **display** zone, `yyyy-mm-dd` — the
@@ -389,17 +447,26 @@ pub fn assemble_days(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str) 
                 let (start_col, end_col) = all_day_columns(src, &iv, &col_dates);
                 segments.push(Segment { idx: all_day_events.len(), start_col, end_col });
                 all_day_events.push(to_ui(src, iv.start_ms, iv.end_ms));
-            } else if let Some(col) = timed_column(&bounds, &iv) {
-                day_events[col].push(to_ui(src, iv.start_ms, iv.end_ms));
+            } else {
+                // The same occurrence in each column it touches, carrying its
+                // **true** span every time rather than the piece's: the two
+                // halves of a midnight crossing are one event, and `id` plus
+                // `start_ms` is what says so everywhere else in the app — the
+                // popover it opens, the RSVP override it wears, the drag it
+                // answers. `lay_out_day` clamps each copy to its own column.
+                for col in timed_columns(&bounds, &iv) {
+                    day_events[col].push(to_ui(src, iv.start_ms, iv.end_ms));
+                }
             }
         }
     }
 
-    // Four lanes, not two. Two meant a week with three leave markers on it
-    // spent its whole band saying "+1 more" — the band is content-sized, so
-    // the rows it does not draw are not buying the grid any space worth
-    // having. Four is where a glance stops being a glance (2026-08-31).
-    let (all_day, overflow) = pack_lanes(&segments, n as u16, ALL_DAY_LANES);
+    // Every span that can be positioned is positioned; how many rows to
+    // *show* is the band's own decision (see `ALL_DAY_LANES_MAX`). It was
+    // four here until 2026-09-04, and four is still what the band draws
+    // unexpanded — the difference is that the fifth row now exists to be
+    // expanded into, rather than being discarded before the UI sees it.
+    let (all_day, overflow) = pack_lanes(&segments, n as u16, ALL_DAY_LANES_MAX);
 
     let days = (0..n)
         .map(|d| {
@@ -1046,6 +1113,80 @@ mod tests {
         assert_eq!(w.days[6].events.len(), 1);
         let p = w.days[6].placed[0];
         assert!(p.top + p.height <= 1.0001, "block overflows the column");
+    }
+
+    /// **Issue #42.** A meeting from 23:00 to 02:00 is drawn on both days:
+    /// the hour before midnight on the first, the two hours after it on the
+    /// second. It used to appear on the first day only, and the rest of the
+    /// meeting was simply not drawn.
+    #[test]
+    fn a_timed_event_crossing_midnight_is_drawn_on_both_days() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("night", MON + 23 * H, MON + DAY + 2 * H, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1, "the evening piece");
+        assert_eq!(w.days[1].events.len(), 1, "the morning piece");
+        assert!(w.days[2].events.is_empty(), "and no further");
+
+        // Both pieces are the same occurrence — same row, same start — which
+        // is what the popover, the RSVP override and the drag all key on.
+        assert_eq!(w.days[0].events[0].id, w.days[1].events[0].id);
+        assert_eq!(w.days[0].events[0].start_ms, w.days[1].events[0].start_ms);
+        assert_eq!(w.days[1].events[0].start_ms, MON + 23 * H, "the true start, not the piece's");
+
+        let evening = w.days[0].placed[0];
+        assert!((evening.top - 23.0 / 24.0).abs() < 1e-4, "top {}", evening.top);
+        assert!((evening.height - 1.0 / 24.0).abs() < 1e-4, "height {}", evening.height);
+        let morning = w.days[1].placed[0];
+        assert!(morning.top.abs() < 1e-6, "top {}", morning.top);
+        assert!((morning.height - 2.0 / 24.0).abs() < 1e-4, "height {}", morning.height);
+    }
+
+    /// The boundary itself: a meeting that ends *at* midnight ends on its own
+    /// day. An inclusive end would have drawn a sliver on every following
+    /// morning, which is the bug in the other direction.
+    #[test]
+    fn a_timed_event_ending_at_midnight_stays_on_its_day() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("late", MON + 22 * H, MON + DAY, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1);
+        assert!(w.days[1].events.is_empty(), "midnight belongs to the day that ends");
+    }
+
+    /// "This should also work for events spanning multiple days" — the middle
+    /// days are full, the edges are partial.
+    #[test]
+    fn a_timed_event_spanning_days_is_drawn_on_every_one() {
+        const H: i64 = 3_600_000;
+        let evs = vec![ev("conf", MON + 9 * H, MON + 2 * DAY + 17 * H, false)];
+        let w = assemble_week(&evs, MON, "UTC");
+        assert_eq!(w.days[0].events.len(), 1);
+        assert_eq!(w.days[1].events.len(), 1);
+        assert_eq!(w.days[2].events.len(), 1);
+        assert!(w.days[3].events.is_empty());
+        let middle = w.days[1].placed[0];
+        assert!(middle.top.abs() < 1e-6 && (middle.height - 1.0).abs() < 1e-4,
+                "a whole middle day: top {} height {}", middle.top, middle.height);
+    }
+
+    /// Month keeps the old rule on purpose: a cell has no geometry, only the
+    /// line "23:00 Title", and under the next day that line would be false.
+    #[test]
+    fn month_shows_a_midnight_crossing_on_its_starting_day_only() {
+        const H: i64 = 3_600_000;
+        // 31 Aug 2026 23:00 UTC to 1 Sep 02:00 — inside the September grid,
+        // whose first row carries the leading days of the previous month.
+        let start = MON + 4 * 7 * DAY - DAY + 23 * H;
+        let evs = vec![ev("night", start, start + 3 * H, false)];
+        let m = assemble_month(&evs, 2026, 9, "UTC", crate::settings::WeekStart::Monday);
+        let with_it: Vec<_> = m
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .filter(|c| !c.timed.is_empty())
+            .collect();
+        assert_eq!(with_it.len(), 1, "one cell, the day it starts on");
     }
 
     /// An event that ends before the week begins still has no column.
@@ -2264,5 +2405,76 @@ mod shifted_day_tests {
     #[test]
     fn an_unknown_zone_still_yields_a_boundary() {
         assert_eq!(day_start_shifted(1_000 * DAY_MS, -3, "Mars/Olympus"), 997 * DAY_MS);
+    }
+}
+
+#[cfg(test)]
+mod all_guests_declined_tests {
+    use super::*;
+    use omacal_store::Attendee;
+
+    fn guest(response: &str, is_self: bool) -> Attendee {
+        Attendee {
+            email: format!("{response}-{is_self}@x.com"),
+            display_name: None,
+            response_status: response.into(),
+            optional: false,
+            is_self,
+            comment: None,
+            additional_guests: 0,
+        }
+    }
+
+    fn with(attendees: Vec<Attendee>) -> bool {
+        let mut src = omacal_store::StoredEvent {
+            id: 1, calendar_id: 1, google_id: "g".into(), summary: Some("Meeting".into()),
+            location: None, start_utc: 0, end_utc: 3_600_000,
+            start_tz: "UTC".into(), end_tz: "UTC".into(),
+            is_all_day: false, recurrence: None,
+            recurring_event_id: None, original_start_utc: None,
+            status: "confirmed".into(), self_response: Some("accepted".into()),
+            conference_uri: None, color_hex: None, calendar_timezone: "UTC".into(),
+            description: None, etag: None, sequence: 0, organizer_email: None,
+            guests_can_modify: false, attendees: Vec::new(),
+            reminders: Default::default(), calendar_default_reminders: Vec::new(),
+        };
+        src.attendees = attendees;
+        to_ui(&src, src.start_utc, src.end_utc).all_guests_declined
+    }
+
+    /// The reported case: a 1:1 the user organised and accepted, and the one
+    /// guest said no. Nothing on the block said so before this flag.
+    #[test]
+    fn one_guest_who_declined_is_everyone() {
+        assert!(with(vec![guest("accepted", true), guest("declined", false)]));
+    }
+
+    /// One "no" among several is not this. Partial declines live in the guest
+    /// list, where each is named; marking the block for them would put a
+    /// strike through half a busy week.
+    #[test]
+    fn one_no_among_others_is_not() {
+        assert!(!with(vec![
+            guest("accepted", true),
+            guest("declined", false),
+            guest("accepted", false),
+        ]));
+        assert!(!with(vec![guest("accepted", true), guest("needsAction", false)]));
+    }
+
+    /// **Your own no is not everyone's.** It already hollows the block and
+    /// strikes the title; setting this as well would mark every event you
+    /// have ever declined as abandoned by its guests.
+    #[test]
+    fn the_users_own_decline_is_excluded() {
+        assert!(!with(vec![guest("declined", true)]));
+        assert!(!with(vec![guest("declined", true), guest("accepted", false)]));
+    }
+
+    /// A solo event has nobody to decline it. `attendees` is empty for one,
+    /// and an empty list must not read as "all of them said no".
+    #[test]
+    fn a_solo_event_is_never_marked() {
+        assert!(!with(Vec::new()));
     }
 }

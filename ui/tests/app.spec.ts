@@ -15,6 +15,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
+  APP_ALLDAY_ID,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -1993,7 +1994,7 @@ test.describe('App', () => {
    *  syncing would imply something was written. */
   test('a create Google refused stops without the heal', async ({ page }) => {
     await writable(page);
-    await page.evaluate(() => window.__harness.failNextCreate('this calendar is not writable from omacal'));
+    await page.evaluate(() => window.__harness.failNextCreate('this calendar is not writable from OmaCal'));
 
     await page.keyboard.press('n');
     await newForm(page).getByLabel('Title', { exact: true }).fill('Lunch');
@@ -4739,5 +4740,66 @@ test.describe('App: zooming the hours', () => {
     await expect(page.locator('.col')).toHaveCount(7);
     expect(await colHeight(page)).toBe(1680);
     expect(await lastStored(page)).toBeNull();
+  });
+});
+
+test.describe('App: a click that cannot be answered says so', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+  });
+
+  test('an all-day chip whose detail will not load leaves an error, not silence', async ({ page }) => {
+    // The shape of the 2026-09-04 report: pressing an all-day event did
+    // nothing at all. The click was reaching the grid and the detail fetch
+    // was failing, and the app kept that to itself.
+    await page.goto(app('writable'));
+    const chip = page.getByRole('button', { name: 'Diwali' });
+    await expect(chip).toBeVisible();
+    await page.evaluate((id) => window.__harness.failNextEventCall(
+      'event_detail', id, 'that event is no longer here',
+    ), APP_ALLDAY_ID);
+
+    await chip.click();
+    await expect(page.locator('.err')).toContainText('Could not open "Diwali"');
+    await expect(page.locator('.err')).toContainText('no longer here');
+    await expect(page.locator('.pop')).toHaveCount(0);
+
+    // And the next click, with the failure spent, opens normally.
+    await chip.click();
+    await expect(page.getByRole('dialog', { name: 'Diwali' })).toBeVisible();
+  });
+});
+
+test.describe("App: showing today's date", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+  });
+
+  test("today's date can be asked for, and is remembered", async ({ page }) => {
+    // Asked for 2026-09-04. One switch dresses two surfaces: the tray icon
+    // *becomes* the date, because a tray host draws icons and nothing else,
+    // and the bar widget draws it beside its mark from the feed. Off by
+    // default — the mark is what says which app it is.
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const box = modal.getByLabel("Show today's date");
+    await expect(box).not.toBeChecked();
+
+    await box.check();
+    const calls = await page.evaluate(
+      () => window.__harness.calls.filter((c) => c.cmd === 'set_show_date').map((c) => c.args),
+    );
+    expect(calls).toEqual([{ on: true }]);
+
+    // Reopened, the box shows what was stored rather than its own default.
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await expect(modal.getByLabel("Show today's date")).toBeChecked();
   });
 });

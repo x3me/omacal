@@ -608,7 +608,7 @@ async fn respond_impl(
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
 
     if !can_respond(state.demo, &access_role, &ev.attendees) {
-        anyhow::bail!("this calendar cannot be answered from omacal");
+        anyhow::bail!("this calendar cannot be answered from OmaCal");
     }
 
     // The same answer on a CalDAV account is a PARTSTAT rewrite inside the
@@ -911,7 +911,7 @@ async fn create_impl(
     // `can_edit` was already handled above, with its own message and before
     // any database access at all.
     if !can_edit(false, &access_role) {
-        anyhow::bail!("this calendar is not writable from omacal");
+        anyhow::bail!("this calendar is not writable from OmaCal");
     }
 
     let cfg = crate::load_config()?;
@@ -1534,7 +1534,7 @@ async fn update_impl(
     // `demo: false` because that half is already handled above, with its own
     // message and before any database access.
     if !can_edit(false, &access_role) {
-        anyhow::bail!("this calendar is not writable from omacal");
+        anyhow::bail!("this calendar is not writable from OmaCal");
     }
 
     // The calendar's own zone, for the all-day half of [`edit_zone`]. Read
@@ -1666,7 +1666,7 @@ async fn move_target(
     // The destination's own writability, checked by the rule the source is
     // checked by: a calendar that cannot be written to cannot be moved onto.
     if !can_edit(false, &target_role) {
-        anyhow::bail!("this calendar is not writable from omacal");
+        anyhow::bail!("this calendar is not writable from OmaCal");
     }
     Ok(Some(target))
 }
@@ -2455,7 +2455,7 @@ async fn delete_impl(
     // `demo: false` because that half is already handled above, with its own
     // message and before any database access.
     if !can_edit(false, &access_role) {
-        anyhow::bail!("this calendar is not writable from omacal");
+        anyhow::bail!("this calendar is not writable from OmaCal");
     }
 
     // The calendar's own zone, for the all-day half of [`edit_zone`] and for
@@ -4037,7 +4037,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cannot be answered from omacal"), "{err}");
+        assert!(err.contains("cannot be answered from OmaCal"), "{err}");
     }
 
     /// An `AppState` a test can hold: demo mode's whole point is that nothing
@@ -4227,7 +4227,7 @@ mod tests {
         let err =
             create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
-        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from omacal");
+        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
     }
 
     /// **A create carrying guests invites them.**
@@ -6611,7 +6611,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
-        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from omacal");
+        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
     }
 
     // --- update_event, scope "following": the series split. The only path in
@@ -9307,7 +9307,7 @@ mod tests {
         let err = delete_impl(&state_with(pool.clone(), false), id, "all", OCCURRENCE)
             .await
             .unwrap_err();
-        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from omacal");
+        assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
         assert!(omacal_store::event_by_id(&pool, id).await.unwrap().is_some());
     }
 

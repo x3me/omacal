@@ -126,6 +126,7 @@
      `transform` is absent rather than `none` while idle. -->
 <button
   class="ev {event.response}"
+  class:nobodycoming={event.all_guests_declined}
   class:dragging={preview !== null}
   class:keyboard={keyboardSelected}
   data-kbd-selected-event={keyboardSelected ? '' : undefined}
@@ -142,7 +143,7 @@
     left:calc({left}% + 3px); width:calc({width}% - 6px);
     --cal:{event.color}; z-index:{placed.column + 1};
   "
-  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}"
+  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}"
   onclick={open}
   onmouseenter={showTip}
   onmouseleave={hideTip}
@@ -164,6 +165,12 @@
   {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
+  <!-- Words, not a mark. A strike through the title and a ✕ in the corner
+       were both tried and both looked like damage to the block rather than
+       news about the meeting (2026-09-04). This line says it where the
+       location says its own thing, in the same muted voice, and the fill
+       below carries the rest at heights too short for any line at all. -->
+  {#if showMeta && event.all_guests_declined}<em class="none">Everyone declined</em>{/if}
   {#if showMeta && meta}<em>{meta}</em>{/if}
   <!-- aria-hidden: the button's own label already says all of this, so the
        tooltip is presentation for the pointer, not a second announcement. -->
@@ -254,6 +261,21 @@
   .rs { position: absolute; top: 1px; right: 4px; font-size: 9px;
         font-style: normal; font-weight: 700; opacity: .8; }
 
+  /* Everyone else said no (2026-09-04). Half the usual fill, and nothing
+     else: the block recedes a step without changing shape, which is as much
+     as a state deserves that is still your event at its own time in its own
+     colour. Two louder cuts were tried first and both were rejected on
+     sight — a ✕ in the corner ("a bit ugly") and a strike through the title
+     ("still not very good looking") — and both had the same fault: they
+     drew damage on the block instead of telling the user something. The
+     `.none` line above does the telling wherever there is room for a line,
+     and the popover's tally does it in full.
+
+     Ordered before `.declined` so that one still wins when both apply: a
+     meeting you declined *and* nobody else came to is, to you, declined. */
+  .ev.nobodycoming { background-color: color-mix(in srgb, var(--cal) 8%, var(--bg)); }
+  .ev em.none { opacity: .75; }
+
   /* State is carried by the fill, so it survives at 15 minutes tall. Every
      state stays opaque: "unfilled" means the colour of the grid, not a hole
      through to whatever block is underneath. */
@@ -279,6 +301,7 @@
                  color: color-mix(in srgb, var(--cal) 22%, var(--muted));
                  --spine: color-mix(in srgb, var(--cal) 45%, var(--bg)); }
   .ev.declined b { text-decoration: line-through; }
+
 
   /* Deepens the fill on hover so an expanded block reads as lifted above the
      ones it covers. Every state is already opaque at rest, so this is emphasis

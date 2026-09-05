@@ -65,7 +65,8 @@
       "is_all_day": true,
       "attendees": 0,
       "recurring": false,
-      "conference": null
+      "conference": null,
+      "all_guests_declined": false
     }
   ],
   "overflow": []

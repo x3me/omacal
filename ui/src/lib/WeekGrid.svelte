@@ -11,7 +11,7 @@
   import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
   import { onPinch, type Pinch } from './pinch';
   import {
-    FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
+    BAND_ROWS, FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
     velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { Lane, WeekPayload, UiEvent } from './api';
@@ -26,7 +26,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, weather = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onmove, ondraftmove = null, onresponded }: {
+  let { week, weather = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -102,6 +102,10 @@
      *  the same split `oncreate`/`onedit`/`ondelete` already use. `WeekGrid`
      *  contains no `invoke`, and that is a property worth keeping. */
     onmove: (event: UiEvent, span: { startMs: number; endMs: number }) => void;
+    /** A click that could not be answered — the event's detail would not
+     *  load. Handed up because `App` owns the one error line the window
+     *  has; the grid has nowhere of its own to say it. */
+    onerror?: ((message: string) => void) | null;
     /** Told after a successful RSVP, so `App` reloads the payload. The
      *  `responseOverrides` restyle below is display only: the struck block
      *  still carries the master's row id, and reopening it fetched the
@@ -119,7 +123,13 @@
   // A payload without the window — see `visibleIndex` — is shown whole.
   const visible = $derived(vis < 0 ? week.days.length : (visibleDays ?? week.days.length));
   const visStart = $derived(Math.max(vis, 0));
-  const visibleWeek = $derived(sliceWeek(week, visStart, visible));
+  /** Whether the band shows every row or folds the rest behind "+N more".
+   *  Sticky across navigation on purpose: a week with nothing hidden draws
+   *  the rows it needs either way, so leaving it open costs nothing and
+   *  closing it on every step would fight the user who opened it. */
+  let bandExpanded = $state(false);
+  const bandRows = $derived(bandExpanded ? Infinity : BAND_ROWS);
+  const visibleWeek = $derived(sliceWeek(week, visStart, visible, bandRows));
 
   // Every hour, not every second one: a rule at 10:00 with nothing at 11:00
   // makes a meeting's edge unplaceable by eye.
@@ -506,13 +516,23 @@
    *  reshuffle rows under the swipe — and only re-packed when the payload
    *  itself is replaced. At rest, the window's own rows (`sliceWeek`). */
   let panLanes = $state<Lane[]>([]);
+  /** And its "+N more", frozen with the rows for the same reason: a count
+   *  that changed per day crossed would take the row it sits on with it,
+   *  which is a height change under the gesture. */
+  let panHidden = $state<number[]>([]);
   $effect.pre(() => {
     const active = panActive;
     const lanes = week.all_day;
+    const rows = bandRows;
     if (!active) return;
-    panLanes = packBandLanes(lanes, untrack(() => visStart), untrack(() => visible), true);
+    const packed = packBandLanes(
+      lanes, untrack(() => visStart), untrack(() => visible), true, rows,
+    );
+    panLanes = packed.lanes;
+    panHidden = packed.hidden;
   });
   const renderedLanes = $derived(panActive ? panLanes : visibleWeek.all_day);
+  const renderedHidden = $derived(panActive ? panHidden : visibleWeek.overflow);
 
   /**
    * An in-flight drag, or `null`.
@@ -815,11 +835,18 @@
     let d: EventDetail;
     try {
       d = await getEventDetail(event.id);
-    } catch {
+    } catch (e) {
       // Nothing to show. Close rather than leave an empty shell open, but
       // only if the user hasn't already clicked something else while this
-      // was in flight.
-      if (isSelected(event)) closePopover();
+      // was in flight — **and say so**. Closing silently made a failed
+      // fetch indistinguishable from a dead control: reported 2026-09-04
+      // as "I press an all-day event and nothing happens", which is
+      // exactly what a click looks like when the detail behind it cannot
+      // be read and the app keeps that to itself.
+      if (isSelected(event)) {
+        closePopover();
+        onerror?.(`Could not open "${event.title}" · ${String(e)}`);
+      }
       return;
     }
     if (!isSelected(event)) return; // superseded while loading
@@ -1295,23 +1322,25 @@
   {#each renderedDays as d (d.start_ms)}
     <div class="head" class:today={d.start_ms === todayStart}
          class:keyboard={keyboardCursor?.dayStartMs === d.start_ms}>
-      <span>{dayName(d.start_ms)}</span>
-      <span class="daterow">
-        <b>{new Date(d.start_ms).getDate()}</b>
-        {#if weather?.get(dateKey(d.start_ms))}
-          {@const wx = weather.get(dateKey(d.start_ms))!}
-          <!-- Beside the number, not below it: a third line taxed every
-               header for a decoration. Absolutely offset from center so the
-               number sits exactly where a weatherless day's does — a week
-               half-covered by the forecast must not have its numbers
-               zigzag. Sized to the number's own 15px, per the field note.
-               Absent for any day the forecast does not cover — the past,
-               the far future — so the header never guesses. -->
-          <span class="wx">
-            <WeatherGlyph bucket={wx.bucket} size={15} />{formatTemp(wx.tmax, temperatureUnit())}°
-          </span>
-        {/if}
-      </span>
+      <!-- One line since 2026-09-04, by request: the day name, the number and
+           the sky side by side rather than the name stacked over the other
+           two. It gives the grid back a row's worth of height at the top of
+           every week. Three grid tracks (1fr / auto / 1fr) rather than a
+           flow, because the number must sit at the column's centre whether
+           or not that day has a forecast — a week half-covered by weather
+           must not have its numbers zigzag, which is the invariant the old
+           absolutely-positioned `.wx` existed to keep. -->
+      <span class="dow">{dayName(d.start_ms)}</span>
+      <b>{new Date(d.start_ms).getDate()}</b>
+      {#if weather?.get(dateKey(d.start_ms))}
+        {@const wx = weather.get(dateKey(d.start_ms))!}
+        <!-- Absent for any day the forecast does not cover — the past, the
+             far future — so the header never guesses; the empty third track
+             holds the number in place regardless. -->
+        <span class="wx">
+          <WeatherGlyph bucket={wx.bucket} size={15} />{formatTemp(wx.tmax, temperatureUnit())}°
+        </span>
+      {/if}
     </div>
   {/each}
   </div></div>
@@ -1325,7 +1354,9 @@
 <AllDayBand
   lanes={renderedLanes}
   events={week.all_day_events}
-  overflow={week.overflow}
+  overflow={renderedHidden}
+  expanded={bandExpanded}
+  onexpand={() => (bandExpanded = !bandExpanded)}
   columns={renderedDays.length}
   {visible}
   vis={renderVis}
@@ -1539,24 +1570,28 @@
 
   .head { text-align: center; font-size: 11px; color: var(--muted);
           letter-spacing: .05em; padding-bottom: 8px; }
-  /* The sky, beside the number at the number's own size, in the day name's
-     muted voice. Offset from the column's center rather than flowed, so the
-     number never moves for it; vertically centered on the number's line
-     (the today circle included). Tabular °digits, so a week of
-     temperatures forms a row the eye can run across. */
-  .wx { position: absolute; left: 50%; top: 50%; translate: 16px -50%;
-        display: inline-flex; align-items: center; gap: 3px;
+  /* The day headers only: `.gutter.head` above the ruler carries the two
+     zone labels and wants none of this. The outer tracks are equal, so the
+     number holds the column's centre whatever sits beside it, and a
+     container query rather than a window one because what runs out of room
+     is the *column*, which the window's width alone cannot say (seven of
+     them, or three, or one). */
+  .head:not(.gutter) { display: grid; grid-template-columns: 1fr auto 1fr;
+                       align-items: center; column-gap: 6px;
+                       container-type: inline-size; }
+  .dow { justify-self: end; }
+  /* The sky, at the number's own size, in the day name's muted voice.
+     Tabular °digits, so a week of temperatures forms a row the eye can run
+     across. Dropped below a column width that cannot hold it: a clipped
+     forecast is worth less than the date it would crowd. */
+  .wx { justify-self: start; display: inline-flex; align-items: center; gap: 3px;
         font-size: 15px; font-weight: 500; letter-spacing: -.02em;
         color: var(--muted); font-variant-numeric: tabular-nums; }
-  .head b { display: block; font-size: 15px; color: var(--text);
-            font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
+  @container (max-width: 104px) { .wx { display: none; } }
+  .head b { font-size: 15px; color: var(--text);
+            font-weight: 500; letter-spacing: -.02em; }
   .head.today b { background: var(--accent); color: var(--on-accent); width: 23px; height: 23px;
-                  line-height: 23px; border-radius: 50%; margin: 2px auto 0; font-weight: 600; }
-  /* A positioning context only — block, not flex, so a weatherless header
-     renders byte-for-byte as before this row existed (the empty-week
-     golden holds it to that). The forecast hangs off the number's right
-     via the absolute `.wx` below. */
-  .daterow { display: block; position: relative; }
+                  line-height: 23px; border-radius: 50%; font-weight: 600; }
   .head.keyboard:not(.today) b { color: var(--accent); font-weight: 650; }
 
   /* No column borders: the grid reads through alignment, not rules (spec §7.1). */

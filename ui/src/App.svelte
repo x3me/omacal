@@ -1084,8 +1084,14 @@
     try {
       const d = await getEventDetail(id);
       if (mine()) gridDetail = d;
-    } catch {
-      if (mine()) closeGridEvent();
+    } catch (e) {
+      // Same rule as `WeekGrid.openPopover`: close, but never in silence.
+      // A click that opens nothing and says nothing reads as a dead
+      // control (reported 2026-09-04).
+      if (mine()) {
+        closeGridEvent();
+        error = `Could not open that event · ${String(e)}`;
+      }
     }
   }
 
@@ -1859,6 +1865,7 @@
                  onopen={openGridEvent} />
     {:else}
       <WeekGrid {week} {visibleStartMs} visibleDays={visibleCount}
+                onerror={(m) => (error = m)}
                 {weather} {formPreview} {createColor} {revealNowRequest} bind:hourPx
                 keyboardCursor={visibleKeyboardCursor}
                 onpan={panView}

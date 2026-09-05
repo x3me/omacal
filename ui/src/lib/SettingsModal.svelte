@@ -19,7 +19,7 @@
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setTrayIcon, setWeatherEnabled, setWeekStart,
+    setShowDate, setTrayIcon, setWeatherEnabled, setWeekStart,
     setWeekStartsToday, setWeekViewDays,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
@@ -539,6 +539,17 @@
       note = { text: String(e), kind: 'error' };
     } finally {
       caldavBusy = false;
+    }
+  }
+
+  async function toggleShowDate(on: boolean) {
+    note = null;
+    try {
+      settings = await setShowDate(on);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      // Same checkbox repair as `toggleTrayIcon`.
+      settings = settings ? { ...settings } : null;
     }
   }
 
@@ -1148,6 +1159,27 @@
         </fieldset>
       </section>
 
+      <!-- What the app's face says, here rather than beside "Show the tray
+           icon" in General: that switch is about whether the app has a tray
+           at all, which is where Quit lives and therefore behaviour; this is
+           about what it looks like once it does. One switch for two
+           surfaces, because they are one idea (2026-09-04). -->
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={settings?.showDate ?? false}
+          disabled={!settings}
+          onchange={(e) => toggleShowDate(e.currentTarget.checked)}
+        />
+        Show today's date
+      </label>
+      <p class="hint">
+        The tray icon becomes the date, the way a calendar's icon does — a
+        tray draws icons and nothing else, so this replaces the mark rather
+        than sitting beside it. The Omarchy bar widget shows the date too,
+        beside its own mark, where there is room for both. The number wears
+        the mark's colour and follows the clock without a restart.
+      </p>
     {:else if tab === 'Calendars'}
       <!-- **The same rows the header's popover shows, from the same
            component.** Extracted rather than reimplemented, which is what

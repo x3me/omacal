@@ -500,6 +500,20 @@
   {/if}
 
   {#if shownAttendees.length}
+    {@const declined = shownAttendees.filter((a) => a.response_status === 'declined' && !a.is_self)}
+    {@const others = shownAttendees.filter((a) => !a.is_self)}
+    <!-- The tally, above the list, and only when somebody has said no: the
+         list itself already tells you who, one line each, but on a long
+         guest list "how many are out" is a counting exercise (2026-09-04).
+         Silent when nobody has declined — a row saying "0 declined" would
+         be furniture on every event in the app. -->
+    {#if declined.length}
+      <p class="tally" class:none={declined.length === others.length}>
+        {declined.length === others.length
+          ? (others.length === 1 ? 'The other guest declined' : 'Every guest declined')
+          : `${declined.length} of ${others.length} guests declined`}
+      </p>
+    {/if}
     <div class="guests">
       {#each shownAttendees as a}
         <!-- `title` says the word on hover: a tilde in a 13px ring was read as
@@ -637,6 +651,12 @@
           text-decoration: none; margin: 0 0 8px; }
   .conf:hover { text-decoration: underline; }
 
+  /* Sits with the guest list rather than with the detail lines above it,
+     because it is a reading of that list and not another fact about the
+     event. Emphasised only when every guest is out, which is the state
+     worth a second glance. */
+  .tally { margin: 8px 0 -2px; font-size: 11px; color: var(--muted); }
+  .tally.none { color: var(--text); font-weight: 600; }
   .guests { margin: 8px 0; display: flex; flex-direction: column; gap: 3px; }
   .guest { font-size: 11px; padding: 1px 0; display: flex; align-items: center; gap: 6px; }
   .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
