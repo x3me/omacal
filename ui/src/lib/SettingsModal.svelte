@@ -2317,8 +2317,9 @@
     text-transform: uppercase; }
   .account-row .danger { color: var(--danger, #e66); border-color: var(--danger, #e66); }
 
-  .zoom-account { display: flex; flex-direction: column; gap: 4px; margin-top: 10px;
-    padding-top: 10px; border-top: 1px solid var(--hairline); }
+  .zoom-account { align-self: stretch; min-width: 0; display: flex; flex-direction: column; gap: 8px; margin-top: 16px;
+    padding-top: 16px; border-top: 1px solid var(--hairline); }
+  .zoom-account .account-row { padding: 0; }
   .zoom-account code { color: var(--text); }
 
   .caldav { align-self: stretch; min-width: 0; display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
