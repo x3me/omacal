@@ -11,7 +11,7 @@ jiff = "0.2.35"
 omacal-google = { version = "0.1.0", path = "../omacal-google" }
 omacal-caldav = { path = "../omacal-caldav" }
 omacal-store = { version = "0.1.0", path = "../omacal-store" }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 tracing.workspace = true
 
 [dev-dependencies]
