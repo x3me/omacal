@@ -64,10 +64,15 @@ pub(crate) struct EventFields {
     /// nobody and mails nobody, so there is no notify question for a create to
     /// defer.
     pub reminders: Option<RemindersInput>,
-    /// A structured conferencing change, or `None` when conferencing was not
-    /// touched. Manual Zoom URLs are represented in `location`; Google Meet is
-    /// the structured provider this Google connection can create itself.
+    /// A Google Calendar conferencing change, or `None` when its structured
+    /// conference data was not touched. Zoom is intentionally the separate
+    /// `create_zoom` operation below: its API returns a URL that is then put in
+    /// `location`, and it can be used by Google and CalDAV calendars alike.
     pub conference: Option<ConferenceAction>,
+    /// Create a fresh Zoom meeting before writing this event. Cleared as soon
+    /// as `events` materialises it into `location`, so none of the pure Google
+    /// or CalDAV body builders can accidentally treat it as conference data.
+    pub create_zoom: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -461,7 +466,7 @@ pub(crate) struct EventInput {
     #[serde(default)]
     pub reminders: Option<RemindersInput>,
     /// Absent means preserve conferencing. The enum is a JSON string —
-    /// `"googleMeet"` or `"none"` — matching the UI union exactly.
+    /// `"googleMeet"`, `"zoom"`, or `"none"` — matching the UI union exactly.
     #[serde(default)]
     pub conference: Option<ConferenceInput>,
 }
@@ -469,6 +474,7 @@ pub(crate) struct EventInput {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ConferenceInput {
     GoogleMeet,
+    Zoom,
     None,
 }
 /// A weekday as the UI names it and iCalendar writes it. The explicit serde
@@ -576,6 +582,21 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
             )
         })
         .transpose()?;
+    let (conference, create_zoom) = match input.conference {
+        Some(ConferenceInput::GoogleMeet) => (
+            Some(ConferenceAction::CreateGoogleMeet {
+                request_id: uuid::Uuid::new_v4().to_string(),
+            }),
+            false,
+        ),
+        // Zoom is materialised before a provider body is built. `None` here
+        // is therefore not "preserve"; the boolean carries the operation
+        // until `events` replaces it with the appropriate Google remove (on
+        // edit) or no-op (on create).
+        Some(ConferenceInput::Zoom) => (None, true),
+        Some(ConferenceInput::None) => (Some(ConferenceAction::Remove), false),
+        None => (None, false),
+    };
     Ok(EventFields {
         summary: input.summary,
         location: input.location,
@@ -585,12 +606,8 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
         recurrence,
         guests: input.guests,
         reminders: input.reminders,
-        conference: input.conference.map(|c| match c {
-            ConferenceInput::GoogleMeet => ConferenceAction::CreateGoogleMeet {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            },
-            ConferenceInput::None => ConferenceAction::Remove,
-        }),
+        conference,
+        create_zoom,
     })
 }
 
@@ -975,6 +992,7 @@ mod tests {
             guests: None,
             reminders: None,
             conference: None,
+            create_zoom: false,
         }
     }
 
@@ -1350,6 +1368,17 @@ mod tests {
             Some(ConferenceAction::Remove)
         ));
         assert_eq!(conference_json(&ConferenceAction::Remove), serde_json::Value::Null);
+
+        let zoom: EventInput = serde_json::from_value(serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "UTC",
+            "conference": "zoom"
+        }))
+        .unwrap();
+        let zoom = fields_from_input(zoom).unwrap();
+        assert!(zoom.create_zoom, "zoom did not become an external create operation");
+        assert!(zoom.conference.is_none(), "zoom leaked into Google conferenceData");
     }
 
     #[test]

@@ -293,7 +293,8 @@ test.describe('quick event natural language', () => {
 
     const needsLink = parseQuickEvent('30m 2p Meet Tim +zoom', context());
     expect(needsLink.ready).toBe(false);
-    expect(needsLink.errors.join(' ')).toContain('Paste the Zoom meeting link');
+    expect(needsLink.errors.join(' '))
+      .toContain('Connect Zoom in Settings → Accounts, or paste an existing Zoom meeting link.');
   });
 
   test('supports quoted location and notes plus a named calendar', () => {
