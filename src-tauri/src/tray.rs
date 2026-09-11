@@ -1027,12 +1027,13 @@ mod tests {
         assert!(crate::menubar::joinable(&f, T0 - 300_000).is_some());
         assert!(crate::menubar::joinable(&f, T0 + 3_600_000).is_none());
         f.panel = Some(crate::upcoming::FeedPanel {
+            visible_start_ms: 0, visible_end_ms: 86400000,
             agenda_days: Vec::new(),
             label_format: crate::settings::DEFAULT_MENU_LABEL.into(),
             truncated: false, day_start_ms: T0, day_end_ms: T0 + 86_400_000, date: "2026-08-29".into(),
             date_label: String::new(), utc_offset_seconds: 0, date_format: crate::settings::DateFormat::Locale,
             clocks: Default::default(), hours: Vec::new(), timezone: "UTC".into(),
-            time_format: TimeFormat::H24, label: false, join_minutes: 0, events: Vec::new(),
+            time_format: TimeFormat::H24, day_view: false, label: false, join_minutes: 0, events: Vec::new(),
         });
         assert!(crate::menubar::joinable(&f, T0 - 1).is_none());
         assert!(crate::menubar::joinable(&f, T0).is_some());

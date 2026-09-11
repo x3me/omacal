@@ -4,13 +4,13 @@ An Omarchy 4 `bar-widget` plugin. The bar shows the current or next event,
 its start time, and a countdown (`Design sync @ 13:30  39m left`). A camera
 button beside it joins the eligible call without opening the popup.
 
-The agenda keeps completed events under EARLIER TODAY, dims them, and draws
-elapsed progress beside NOW for an ongoing event. Its header and footer stay
-visible while events scroll, with the popup capped at 80% of the screen height.
-The number of agenda days follows the Week view preference.
+The popup can show an **agenda list** or a **full day view**. The agenda keeps
+completed events under EARLIER TODAY, dims them, and draws elapsed progress
+beside NOW for an ongoing event. The day view places events by time, shows overlaps
+side by side, and marks NOW with a moving line. It opens near the current time;
+scroll to inspect the rest of the day. All-day events and tasks remain available.
 
-In **OmaCal → Settings → Menu bar**, show/hide the meeting label and choose
-when Join appears.
+Choose the view in **OmaCal → Settings → Menu bar**.
 The same preferences control the macOS popup: show/hide the bar label and
 choose when Join appears (at start time, or 1–60 minutes before). The default
 is five minutes; Join remains available until the meeting ends. Calendar
@@ -75,13 +75,13 @@ controls the OmaCal widget as well as its native tray icon.
 
 The `maxEvents` setting (default 12) caps each of the agenda's past and
 remaining slices; edit it from the bar's widget settings or in `shell.json`.
-The agenda snapshot includes completed events, capped at 200 with a visible
+The day view uses a separate snapshot, capped at 200 events with a visible
 notice if there are more. Times use OmaCal's display clock. The original
 upcoming-only feed remains compatible with older readers.
 
-`Timeline.mjs` supplies the same elapsed-progress and Join-window
+`Timeline.mjs` supplies the same overlap, elapsed-progress, and Join-window
 calculations to this widget and the macOS webview. The app embeds it and
-the shared agenda helpers alongside the existing plugin files.
+`DayView.qml` alongside the existing plugin files.
 
 The shell reads snapshots through the bundled `read-feed.py`, using the
 system `/usr/bin/python3` (no Python packages or provider CLIs). It opens the
@@ -112,3 +112,5 @@ share a title, so an open-window match is deliberately not labeled “connected.
 No browser extension, browser history access, microphone access, or network
 request is involved. Observation is bounded to 256 windows/events and 1,024
 characters per input field; oversized or ambiguous input stays neutral.
+
+**Settings → Appearance → Visible hours** limits the timed grids in Day, Week, and this popup. Start and end use the display clock; the default shows the full day. Events outside the range remain in the agenda and search.

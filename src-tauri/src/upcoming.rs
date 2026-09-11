@@ -72,6 +72,8 @@ pub struct Feed {
 pub struct FeedPanel {
     pub agenda_days: Vec<FeedAgendaDay>,
     pub truncated: bool,
+    pub visible_start_ms: i64,
+    pub visible_end_ms: i64,
     pub day_start_ms: i64,
     pub day_end_ms: i64,
     pub date: String,
@@ -82,6 +84,7 @@ pub struct FeedPanel {
     pub hours: Vec<i64>,
     pub timezone: String,
     pub time_format: crate::settings::TimeFormat,
+    pub day_view: bool,
     pub label: bool,
     pub label_format: String,
     pub join_minutes: u32,
@@ -417,7 +420,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     let start = today.to_zoned(tz.clone())?.timestamp().as_millisecond();
     let end = today.tomorrow()?.to_zoned(tz.clone())?.timestamp().as_millisecond();
     let day_stored = omacal_store::events_in_window(pool, start, end).await?;
-    // The agenda needs completed events too, and a larger bound than the
+    // A day view needs completed events too, and a larger bound than the
     // glance-sized upcoming slice. Report truncation instead of hiding it.
     let mut day = assemble_window(&day_stored, &names, start, end, 201);
     let truncated = day.events.len() > 200;
@@ -438,14 +441,16 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         agenda_days.push(FeedAgendaDay { date_label: settings.date_format.display(agenda_date), events: slice.events });
         agenda_date = next;
     }
+    let (visible_start_ms, visible_end_ms) = visible_day_bounds(today, &tz, settings.visible_start_hour, settings.visible_end_hour)?;
     let hours: Vec<_> = (start..end).step_by(3_600_000).collect();
     let clocks = day.events.iter().chain(feed.events.iter()).chain(agenda_days.iter().flat_map(|d| d.events.iter()))
         .flat_map(|e| [e.start_ms, e.end_ms]).chain(hours.iter().copied())
         .map(|ms| (ms, crate::tray::clock(ms, &tz, settings.time_format))).collect();
     feed.panel = Some(FeedPanel {
+        visible_start_ms, visible_end_ms,
         agenda_days, truncated: truncated || agenda_truncated, day_start_ms: start, day_end_ms: end, date: today.to_string(), clocks, hours, timezone: tz.iana_name().unwrap_or("UTC").into(),
         date_label: settings.date_format.display(today), utc_offset_seconds: jiff::Timestamp::from_millisecond(now_ms)?.to_zoned(tz.clone()).offset().seconds(), date_format: settings.date_format,
-        time_format: settings.time_format,
+        time_format: settings.time_format, day_view: settings.menubar_day_view,
         label_format: settings.menubar_label_format.clone(),
         label: settings.menubar_label, join_minutes: settings.menubar_join_minutes,
         events: day.events,
@@ -477,6 +482,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn visible_day_bounds(today: jiff::civil::Date, tz: &jiff::tz::TimeZone, start_hour: u8, end_hour: u8) -> anyhow::Result<(i64, i64)> {
+    let start = today.at(start_hour as i8, 0, 0, 0).to_zoned(tz.clone())?.timestamp().as_millisecond();
+    let end = if end_hour == 24 { today.tomorrow()?.to_zoned(tz.clone())? } else {
+        today.at(end_hour as i8, 0, 0, 0).to_zoned(tz.clone())?
+    }.timestamp().as_millisecond();
+    // A skipped DST hour can collapse a one-hour range. Keep the day usable.
+    if end > start { Ok((start, end)) } else {
+        Ok((today.to_zoned(tz.clone())?.timestamp().as_millisecond(), today.tomorrow()?.to_zoned(tz.clone())?.timestamp().as_millisecond()))
+    }
 }
 
 #[cfg(test)]
@@ -840,6 +856,26 @@ mod today_field_tests {
     /// zone is the app's setting, and a widget reading the desktop's clock
     /// would disagree with the grid beside it for hours at a time.
     #[tokio::test]
+    async fn visible_hours_use_wall_clock_boundaries_across_dst() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        crate::settings::write(&pool, "visible_hours", "5,23").await.unwrap();
+        // Check the feed's bounds, then civil-time conversion explicitly
+        // on both New York DST dates.
+        let panel = current(&pool, 1_788_564_600_000).await.unwrap().panel.unwrap();
+        assert!(panel.day_start_ms <= panel.visible_start_ms);
+        assert!(panel.visible_start_ms < panel.visible_end_ms);
+        assert!(panel.visible_end_ms <= panel.day_end_ms);
+        for date in ["2026-03-08", "2026-11-01"] {
+            let day: jiff::civil::Date = date.parse().unwrap();
+            let tz = jiff::tz::TimeZone::get("America/New_York").unwrap();
+            let (start, end) = visible_day_bounds(day, &tz, 5, 23).unwrap();
+            assert_eq!(jiff::Timestamp::from_millisecond(start).unwrap().to_zoned(tz.clone()).hour(), 5);
+            assert_eq!(jiff::Timestamp::from_millisecond(end).unwrap().to_zoned(tz).hour(), 23);
+            assert_eq!(end - start, 18 * 3_600_000);
+        }
+    }
+
+    #[tokio::test]
     async fn agenda_horizon_follows_week_view_days() {
         let pool = omacal_store::connect_memory().await.unwrap();
         for count in [3, 5, 7] {
@@ -856,13 +892,14 @@ mod today_field_tests {
         let pool = omacal_store::connect_memory().await.unwrap();
         let now = 1_788_564_600_000;
         assert!(current(&pool, now).await.unwrap().tray_icon);
-        for (key, value) in [("tray_icon", "0"), ("show_date", "1"), ("menubar_label", "0")] {
+        for (key, value) in [("tray_icon", "0"), ("show_date", "1"), ("menubar_day_view", "1"), ("menubar_label", "0")] {
             crate::settings::write(&pool, key, value).await.unwrap();
         }
         let feed = current(&pool, now).await.unwrap();
         assert!(!feed.tray_icon);
         assert!(feed.today.unwrap().show);
         let panel = feed.panel.unwrap();
+        assert!(panel.day_view);
         assert!(!panel.label);
     }
 

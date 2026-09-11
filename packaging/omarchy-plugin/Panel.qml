@@ -61,6 +61,7 @@ Panel {
   property var feed: null
   readonly property var events: feed ? feed.events : null
   readonly property var day: feed && feed.panel ? feed.panel : null
+  readonly property bool dayView: day && day.day_view
   readonly property var callEvent: Timeline.joinable(events || [], nowMs, day ? day.join_minutes : 5)
   property var meetingWindows: []
   property var meetingPresence: []
@@ -505,17 +506,19 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(header.implicitHeight + column.implicitHeight + footer.implicitHeight + Style.space(24), panel.screenH > 0 ? panel.screenH * 0.8 : Style.space(560))
+    contentHeight: panel.fittedContentHeight(header.implicitHeight + (root.dayView ? Style.space(900) : column.implicitHeight) + footer.implicitHeight + Style.space(24), panel.screenH > 0 ? panel.screenH * 0.8 : Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
+        if (root.dayView) { dayTimeline.moveCursor(dy); return }
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dy)
       }
       onActivateRequested: {
-        if (root.cursorActive) root.activateRow(root.flatRows[root.rowCursor])
+        if (root.dayView) dayTimeline.activateSelected()
+        else if (root.cursorActive) root.activateRow(root.flatRows[root.rowCursor])
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -679,8 +682,21 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          DayView {
+            id: dayTimeline
+            visible: root.dayView
+            width: parent.width
+            height: visible ? Math.max(Style.space(200), panelFlick.height) : 0
+            day: root.day
+            nowMs: root.nowMs
+            foreground: root.foreground
+            urgent: root.urgent
+            fontFamily: root.fontFamily
+            onActivate: function(ev) { root.activateRow(ev) }
+          }
+
           Repeater {
-            model: root.panelSections
+            model: root.dayView ? [] : root.panelSections
 
             Column {
               id: sectionColumn

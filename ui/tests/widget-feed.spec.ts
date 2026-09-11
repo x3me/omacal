@@ -89,3 +89,22 @@ test('agenda feed accepts five days and rejects invalid or oversized day groups'
     expect(JSON.parse(result.stdout).panel.agenda_days[4].events[0].title).toBe('<b>Name</b>');
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+
+
+test('combined calendar colors are bounded hex values before they reach QML', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omacal-colors-'));
+  const path = join(dir, 'feed');
+  const read = (colors: unknown) => {
+    writeFileSync(path, JSON.stringify({events: [{title: 'Design sync', start_ms: 1, end_ms: 2, all_day: false, colors}]}));
+    return spawnSync('/usr/bin/python3', [helper, path], {timeout: 3000, encoding: 'utf8'});
+  };
+  try {
+    for (const colors of [['#112233', '#ABCDEF'], [], Array(200).fill('#123456')]) {
+      const result = read(colors);
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).events[0].colors).toEqual(colors);
+    }
+    for (const invalid of [null, {}, 'red', ['red'], ['#fff'], ['#123456\u202e'], [12], Array(201).fill('#123456')])
+      expect(read(invalid).status).not.toBe(0);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { meetingLabel, countdownDuration, progress, joinable, uniqueAllDay, type Event } from '../../packaging/omarchy-plugin/Timeline.mjs';
+import { meetingLabel, countdownDuration, layout, progress, joinable, uniqueAllDay, type Event } from '../../packaging/omarchy-plugin/Timeline.mjs';
 const at = (hour: number) => Date.UTC(2026, 8, 7, hour);
 const event = (title: string, start: number, end: number, extra = {}): Event => ({
   title, start_ms: at(start), end_ms: at(end), all_day: false, ...extra,
@@ -27,16 +27,28 @@ test('back-to-back Join switches at the lead window and stays with the new call'
   expect(joinable(events, at(14), 0)?.title).toBe('Later');
 });
 
-test('progress clamps completed and future meetings', () => {
-  const e = event('Design', 13, 14);
-  expect([progress(e, at(12)), progress(e, at(13) + 30 * 60000), progress(e, at(15))]).toEqual([0, .5, 1]);
-
+test('day layout preserves overlaps and frees lanes at exact boundaries', () => {
+  const rows = layout([event('Focus', 9, 17), event('First', 10, 11), event('Second', 11, 12), event('Later', 18, 19)], at(0), at(24));
+  expect(rows.map(r => [r.event.title, r.lane, r.lanes])).toEqual([
+    ['Focus', 0, 2], ['First', 1, 2], ['Second', 1, 2], ['Later', 0, 1],
+  ]);
+  expect(rows[0].top).toBe(9 / 24);
+  expect(rows[0].height).toBe(8 / 24);
 });
 
-async function popup(page: import('@playwright/test').Page) {
+test('progress clamps completed and future meetings; multi-day blocks clip to the day', () => {
+  const e = event('Design', 13, 14);
+  expect([progress(e, at(12)), progress(e, at(13) + 30 * 60000), progress(e, at(15))]).toEqual([0, .5, 1]);
+  const rows = layout([event('Long', -3, 26), event('Holiday', 0, 24, { all_day: true })], at(0), at(24));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].top).toBe(0);
+  expect(rows[0].height).toBe(1);
+});
+
+async function popup(page: import('@playwright/test').Page, visibleStart = 0, visibleEnd = 24) {
   await page.clock.install({ time: at(13) + 21 * 60000 });
   await page.setViewportSize({ width: 420, height: 600 });
-  await page.addInitScript(({ start, end }) => {
+  await page.addInitScript(({ start, end, visibleStart, visibleEnd }) => {
     const calls: { action: string }[] = [];
     (window as any).__actions = calls;
     const events = [
@@ -46,12 +58,12 @@ async function popup(page: import('@playwright/test').Page) {
       { title: 'Labor Day', start_ms: start, end_ms: end, all_day: true, color: '#a8bd94', calendar: 'Personal' },
       { title: 'Labor Day', start_ms: start, end_ms: end, all_day: true, color: '#abcdef', calendar: 'Work' },
     ];
-    const panel = { day_start_ms: start, day_end_ms: end, events, timezone: 'UTC', date_format: 'dmy', time_format: '24h', label: true, join_minutes: 5 };
+    const panel = { visible_start_ms: start + visibleStart * 3600000, visible_end_ms: start + visibleEnd * 3600000, day_start_ms: start, day_end_ms: end, events, timezone: 'UTC', date_format: 'dmy', time_format: '24h', day_view: false, label: true, join_minutes: 5 };
     const callbacks = new Map<number, (event: unknown) => void>();
     let nextCallback = 0;
     let changedCallback: number | undefined;
-    (window as any).__changeMenuFormat = () => {
-      panel.time_format = '12h';
+    (window as any).__changeMenuView = () => {
+      panel.day_view = true;
       if (changedCallback !== undefined) callbacks.get(changedCallback)?.({ event: 'menubar-changed', payload: null });
     };
     (window as any).__TAURI_INTERNALS__ = {
@@ -61,15 +73,16 @@ async function popup(page: import('@playwright/test').Page) {
         if (cmd === 'plugin:event|unlisten') return;
         if (cmd === 'menubar_feed') return { events: events.filter(e => e.end_ms > start + 13 * 3600000), panel, tasks: [] };
         if (cmd === 'get_palette') return { bg: '#20232b', surface: '#303540', text: '#e5e7eb', muted: '#9ca3af', accent: '#87b7ff', is_dark: true };
+        if (cmd === 'set_menubar_preferences') { panel.day_view = args.dayView; return {}; }
         if (cmd === 'menubar_action') { calls.push(args); return; }
         throw new Error(cmd);
       },
     };
-  }, { start: at(0), end: at(24) });
+  }, { start: at(0), end: at(24), visibleStart, visibleEnd });
   await page.goto('/?menubar');
 }
 
-test('popup shows elapsed time, renders titles as text, and joins', async ({ page }) => {
+test('popup shows elapsed time, switches views, renders titles as text, and joins', async ({ page }) => {
   await popup(page);
   await expect(page.getByRole('button', { name: 'Join · Design sync' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Morning planning/ })).toHaveClass(/past/);
@@ -91,6 +104,14 @@ test('popup shows elapsed time, renders titles as text, and joins', async ({ pag
   const activeRow = await page.getByRole('button', { name: /Design sync.*38m left/ }).boundingBox();
   expect(marker!.y + marker!.height).toBeLessThanOrEqual(activeRow!.y);
   await page.screenshot({ path: '/tmp/omacal-menubar-agenda.png' });
+  await page.getByRole('button', { name: 'Day', exact: true }).click();
+  await expect(page.getByLabel('Day calendar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Labor Day', exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Now 13:22')).toBeVisible();
+  const blocks = page.locator('.event');
+  const a = await blocks.nth(1).boundingBox(), b = await blocks.nth(2).boundingBox();
+  expect(a && b && a.x + a.width <= b.x).toBeTruthy();
+  await page.screenshot({ path: '/tmp/omacal-menubar-day.png' });
   await page.getByRole('button', { name: 'Join · Design sync' }).click();
   expect(await page.evaluate(() => (window as any).__actions)).toEqual([{ action: 'quick-add' }, { action: 'join' }]);
   await page.keyboard.press('Escape');
@@ -108,6 +129,14 @@ test('all-day duplicates combine only matching titles and spans without changing
 });
 
 
+test('open popup applies changed preferences without waiting for its polling timer', async ({ page }) => {
+  await popup(page);
+  await expect(page.locator('.timeline')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__changeMenuView());
+  await expect(page.locator('.timeline')).toBeVisible();
+});
+
+
 test('popup gear opens OmaCal preferences', async ({ page }) => {
   await popup(page);
   await page.getByRole('button', { name: 'Open preferences' }).click();
@@ -119,11 +148,16 @@ test('countdown uses hours at sixty minutes and omits zero remaining minutes', (
   expect([1, 59, 60, 64, 120, 642].map(countdownDuration)).toEqual(['1m', '59m', '1h', '1h 4m', '2h', '10h 42m']);
 });
 
-test('open agenda applies a changed clock format without waiting for polling', async ({ page }) => {
-  await popup(page);
-  await expect(page.locator('header p')).toHaveText('07/09/2026 · 13:21');
-  await page.evaluate(() => (window as any).__changeMenuFormat());
-  await expect(page.locator('header p')).toHaveText('07/09/2026 · 1:21 PM');
+test('visible hours shorten the menu day without changing event times or agenda contents', async ({ page }) => {
+  await popup(page, 12, 23);
+  await expect(page.getByRole('button', { name: /Morning planning/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Day', exact: true }).click();
+  expect(await page.locator('.timeline').evaluate(el => el.getBoundingClientRect().height)).toBe(660);
+  await expect(page.locator('.event').filter({ hasText: 'Morning planning' })).toHaveCount(0);
+  const event = page.locator('.event').filter({ hasText: 'Design sync' });
+  await expect(event).toContainText('13:00');
+  expect(await event.evaluate(el => (el as HTMLElement).offsetTop)).toBe(60);
+  await expect(page.locator('.hour').first()).toHaveText('12:00');
 });
 
 test('meeting label templates reorder tokens without expanding title text', () => {

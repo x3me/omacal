@@ -13,6 +13,27 @@ export function joinable(events, now, minutes) {
       return aNext ? a.start_ms - b.start_ms : b.start_ms - a.start_ms;
     })[0] || null;
 }
+export function layout(events, start, end) {
+  const rows = (events || []).filter(e => !e.all_day && e.start_ms < end && e.end_ms > start)
+    .map(event => ({ event, start: Math.max(start, event.start_ms), end: Math.min(end, event.end_ms), lane: 0, lanes: 1 }))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  let cluster = [], ends = [], clusterEnd = -Infinity;
+  function finish() { for (const row of cluster) row.lanes = ends.length; }
+  for (const row of rows) {
+    if (row.start >= clusterEnd) { finish(); cluster = []; ends = []; }
+    let lane = ends.findIndex(end => end <= row.start);
+    if (lane < 0) lane = ends.length;
+    ends[lane] = row.end;
+    row.lane = lane;
+    row.top = (row.start - start) / (end - start);
+    row.height = (row.end - row.start) / (end - start);
+    cluster.push(row);
+    clusterEnd = Math.max(clusterEnd, row.end);
+  }
+  finish();
+  return rows;
+}
+
 // Presentation only: preserve the first calendar's color and never merge
 // unnamed entries or entries with different date spans.
 export function uniqueAllDay(events) {
@@ -41,4 +62,10 @@ export function countdownDuration(minutes) {
 export const DEFAULT_MEETING_FORMAT = '{title} @ {time}  {countdown}';
 export function meetingLabel(template, values) {
   return (template || DEFAULT_MEETING_FORMAT).replace(/\{([^{}]+)\}/g, (token, key) => (values[key] ?? token).slice(0, 256)).slice(0, 256);
+}
+
+export function visibleRange(day) {
+  const start = day.visible_start_ms, end = day.visible_end_ms;
+  if (Number.isFinite(start) && Number.isFinite(end) && start >= day.day_start_ms && end <= day.day_end_ms && start < end) return { start, end };
+  return { start: day.day_start_ms, end: day.day_end_ms };
 }

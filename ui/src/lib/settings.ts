@@ -166,6 +166,7 @@ export type AppSettings = {
    *  which *becomes* the date because a tray host draws icons and nothing
    *  else, and the Omarchy bar widget, which reads it from the feed. */
   showDate: boolean;
+  menubarDayView?: boolean;
   menubarLabel?: boolean;
   menubarJoinMinutes?: number;
   /** Which palette the app wears. `'auto'` by default — omacal has no theme
@@ -378,10 +379,10 @@ export const msOfMinutes = (min: number): number => Math.round(min * 60_000);
 
 export const setDateFormatPreference = (format: DateFormat) => invoke<AppSettings>('set_date_format', { format });
 
-export const setVisibleHours = (start: number, end: number) => invoke<AppSettings>("set_visible_hours", { start, end });
-export const setMenubarPreferences = (label: boolean, joinMinutes: number) =>
-  invoke<AppSettings>('set_menubar_preferences', { label, joinMinutes });
+export const setMenubarPreferences = (dayView: boolean, label: boolean, joinMinutes: number) =>
+  invoke<AppSettings>('set_menubar_preferences', { dayView, label, joinMinutes });
 
+export const setVisibleHours = (start: number, end: number) => invoke<AppSettings>("set_visible_hours", { start, end });
 
 export const setMenubarDateFormat = (format: AppSettings['menubarDateFormat'], custom: string) => invoke<AppSettings>('set_menubar_date_format', { format, custom });
 

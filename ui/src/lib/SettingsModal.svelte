@@ -87,7 +87,7 @@
   let menuDateCustom = $state('%-d');
   let menuDateNote = $state('');
   let meetingFormat = $state(DEFAULT_MEETING_FORMAT);
-  /** The menu-bar pane's own three notes, each beside the control it is
+  /** The menu-bar pane's own four notes, each beside the control it is
    *  about — the `rownote` rule below, which this section did not follow
    *  when it arrived. The shared `note` at the foot of the modal was
    *  reporting these saves, and the foot of a scrolling modal is exactly
@@ -101,6 +101,7 @@
    *  nobody could find. */
   let labelNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let formatNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
+  let viewNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let joinNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let menubarBusy = $state(false);
   /** Whether the format box holds something the bar has not been told about.
@@ -155,17 +156,18 @@
 
   /** `where` names the control that asked, so the answer lands beside it. */
   async function saveMenubar(
+    dayView = settings?.menubarDayView ?? false,
     label = settings?.menubarLabel ?? true,
     joinMinutes = settings?.menubarJoinMinutes ?? 5,
-    where: 'label' | 'join' = 'label',
+    where: 'label' | 'join' | 'view' = 'label',
   ) {
     const say = (n: { text: string; kind: 'info' | 'error' } | null) => {
-      if (where === 'label') labelNote = n; else joinNote = n;
+      if (where === 'label') labelNote = n; else if (where === 'view') viewNote = n; else joinNote = n;
     };
     menubarBusy = true;
     say({ text: 'Applying…', kind: 'info' });
     try {
-      settings = await setMenubarPreferences(label, joinMinutes);
+      settings = await setMenubarPreferences(dayView, label, joinMinutes);
       onsettingschange?.(settings);
       say({ text: 'Saved', kind: 'info' });
     } catch (e) { say({ text: String(e), kind: 'error' }); }
@@ -1130,7 +1132,7 @@
             {#each Array.from({ length: 24 }, (_, h) => h + 1) as h}<option value={h} disabled={h <= (settings?.visibleStartHour ?? 0)}>{h === 24 ? 'Midnight (end of day)' : formatClock(new Date(2020, 0, 1, h).getTime(), settings?.timeFormat ?? '24h')}</option>{/each}
           </select></label>
         </div>
-        <p class="hint">Hours shown in Day and Week. Events outside this range remain in the agenda and search.</p>
+        <p class="hint">Hours shown in Day, Week, and the menu-bar day view. Events outside this range remain in the agenda and search.</p>
       </section>
       {#if settings?.transparentWindow ?? true}
       <section class="appearance-section" aria-labelledby="background-style-heading">
@@ -1335,7 +1337,7 @@
         <div class="inline">
           <label class="check"><input type="checkbox" disabled={!settings || menubarBusy}
             checked={settings?.menubarLabel ?? true}
-            onchange={(e) => saveMenubar(e.currentTarget.checked, undefined, 'label')} />
+            onchange={(e) => saveMenubar(undefined, e.currentTarget.checked, undefined, 'label')} />
             Show meeting title and countdown</label>
           {#if labelNote}
             <span class="rownote" class:err={labelNote.kind === 'error'}
@@ -1368,10 +1370,21 @@
           end_time: formatClock(SAMPLE_MS + 30 * 60000, settings?.timeFormat ?? '24h'), countdown: 'in 5m', calendar: 'Work'
         })}</p>
         {#if formatNote?.kind === 'error'}<p class="note err" role="alert">{formatNote.text}</p>{/if}
+        <label class="lab" for="menubar-view">Popup view</label>
+        <div class="inline">
+          <select id="menubar-view" disabled={!settings || menubarBusy} value={settings?.menubarDayView ? 'day' : 'agenda'}
+            onchange={(e) => saveMenubar(e.currentTarget.value === 'day', undefined, undefined, 'view')}>
+            <option value="agenda">Agenda list</option><option value="day">Full day view</option>
+          </select>
+          {#if viewNote}
+            <span class="rownote" class:err={viewNote.kind === 'error'}
+                  data-testid="menubar-view-note">{viewNote.text}</span>
+          {/if}
+        </div>
         <label class="lab" for="menubar-join">Show Join before a meeting</label>
         <div class="inline">
           <select id="menubar-join" disabled={!settings || menubarBusy} value={settings?.menubarJoinMinutes ?? 5}
-            onchange={(e) => saveMenubar(undefined, Number(e.currentTarget.value), 'join')}>
+            onchange={(e) => saveMenubar(undefined, undefined, Number(e.currentTarget.value), 'join')}>
             {#each [0, 1, 5, 10, 15, 30, 60] as minutes}
               <option value={minutes}>{minutes === 0 ? 'At start time' : `${minutes} minutes before`}</option>
             {/each}

@@ -40,6 +40,8 @@ const FILES: &[(&str, &str)] = &[
     ("manifest.json", include_str!("../../packaging/omarchy-plugin/manifest.json")),
     ("Panel.qml", include_str!("../../packaging/omarchy-plugin/Panel.qml")),
     ("read-feed.py", include_str!("../../packaging/omarchy-plugin/read-feed.py")),
+    ("CalendarColors.qml", include_str!("../../packaging/omarchy-plugin/CalendarColors.qml")),
+    ("DayView.qml", include_str!("../../packaging/omarchy-plugin/DayView.qml")),
     ("MeetingPresence.mjs", include_str!("../../packaging/omarchy-plugin/MeetingPresence.mjs")),
     ("Timeline.mjs", include_str!("../../packaging/omarchy-plugin/Timeline.mjs")),
     ("Model.js", include_str!("../../packaging/omarchy-plugin/Model.js")),
