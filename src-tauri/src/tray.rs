@@ -977,6 +977,7 @@ mod tests {
 
     fn ev(title: &str, start: i64, end: i64) -> FeedEvent {
         FeedEvent {
+            colors: Vec::new(),
             title: Some(title.into()),
             start_ms: start,
             end_ms: end,
@@ -992,7 +993,7 @@ mod tests {
     }
 
     fn feed(events: Vec<FeedEvent>) -> Feed {
-        Feed { tray_icon: true, version: 1, generated_ms: T0, events, tasks: Vec::new(), today: None, panel: None }
+        Feed { combine_identical_events: false, tray_icon: true, version: 1, generated_ms: T0, events, tasks: Vec::new(), today: None, panel: None }
     }
 
     /// The wearer's zone. Fixed rather than `TimeZone::system()` so these

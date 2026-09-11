@@ -112,3 +112,6 @@ share a title, so an open-window match is deliberately not labeled “connected.
 No browser extension, browser history access, microphone access, or network
 request is involved. Observation is bounded to 256 windows/events and 1,024
 characters per input field; oversized or ambiguous input stays neutral.
+
+Combined calendar copies use one title and a bottom color segment for each calendar.
+These segments identify calendar membership; they do not indicate RSVP status.

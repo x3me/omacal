@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import { formatDate, type DateFormat } from './datefmt';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
@@ -8,12 +9,13 @@
 
   type Panel = { agenda_days?: { date_label: string; events: Event[] }[]; truncated?: boolean; day_start_ms: number; day_end_ms: number; timezone: string;
     time_format: '12h' | '24h'; date_format?: DateFormat; label: boolean; join_minutes: number; events: Event[] };
-  type Feed = { events: Event[]; panel: Panel; tasks: { title: string; overdue: boolean }[] };
+  type Feed = { combine_identical_events?: boolean; events: Event[]; panel: Panel; tasks: { title: string; overdue: boolean }[] };
   let feed = $state<Feed | null>(null);
   let now = $state(Date.now());
   let error = $state('');
   const panel = $derived(feed?.panel);
-  const today = $derived(uniqueAllDay(panel?.events ?? []));
+  const today = $derived(displayEvents(panel?.events ?? []));
+  function displayEvents(events: Event[]) { return feed?.combine_identical_events === undefined ? uniqueAllDay(events) : events; }
   const timed = $derived(today.filter(e => !e.all_day));
   const active = $derived(timed.find(e => e.start_ms <= now && e.end_ms > now));
   const nowIndex = $derived(timed.findIndex(e => e.end_ms > now));
@@ -79,20 +81,20 @@
     {#if !feed}<p class="empty">Loading calendar…</p>
     {:else}
       <div class="agenda">
-        {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel!.day_start_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>{/if}
+        {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel!.day_start_ms))}>{event.title ?? '(no title)'}<CalendarColors colors={event.colors} /></button>{/each}</div>{/if}
         {#if timed.length === 0}<p class="empty">No timed events today</p>{/if}
         {#each timed as event, i}
           {#if active && i === nowIndex}{@render nowMarker()}{/if}
           <button class="agenda-row" class:past={event.end_ms <= now} style:--event-color={color(event)} onclick={() => action(date(event.start_ms))}>
-            <time>{clock(event.start_ms)}</time><span><strong>{event.title ?? '(no title)'}</strong><small>{event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{event.calendar ? ` · ${event.calendar}` : ''}</small></span>
+            <time>{clock(event.start_ms)}</time><span><strong>{event.title ?? '(no title)'}</strong><small>{event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{event.calendar ? ` · ${event.calendar}` : ''}</small></span><CalendarColors colors={event.colors} />
           </button>
         {/each}
         {#each panel?.agenda_days?.slice(1) ?? [] as day, i}
           <small class="section-label">{i === 0 ? 'TOMORROW' : day.date_label}</small>
-          {#each uniqueAllDay(day.events) as event}
+          {#each displayEvents(day.events) as event}
             <button class="agenda-row" style:--event-color={color(event)} onclick={() => action(date(event.start_ms))}>
               <time>{event.all_day ? 'All day' : clock(event.start_ms)}</time>
-              <span><strong>{event.title ?? '(no title)'}</strong><small>{event.calendar ?? ''}</small></span>
+              <span><strong>{event.title ?? '(no title)'}</strong><small>{event.calendar ?? ''}</small></span><CalendarColors colors={event.colors} />
             </button>
           {/each}
         {/each}
@@ -129,5 +131,5 @@
   .now-marker { display: flex; align-items: center; gap: 10px; color: var(--text, #e5e7eb); padding: 6px 0; margin: 8px 0; font-size: 11px; font-weight: 600; }
   .now-track { flex: 1; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--text, #e5e7eb) 15%, transparent); overflow: hidden; }
   .now-fill { display: block; height: 100%; border-radius: inherit; background: var(--now, #e2564a); }
-  .all-day { border-top: 1px solid var(--hairline, #444); margin-top: 12px; padding-top: 10px; } .all-day button { display: block; width: 100%; text-align: left; } .section-label { display: block; margin-top: 16px; } .empty { padding: 14px 0; }
+  .all-day { border-top: 1px solid var(--hairline, #444); margin-top: 12px; padding-top: 10px; } .all-day button { position: relative; display: block; width: 100%; text-align: left; } .section-label { display: block; margin-top: 16px; } .empty { padding: 14px 0; }
 </style>

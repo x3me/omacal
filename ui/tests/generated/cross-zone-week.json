@@ -55,6 +55,7 @@
   ],
   "all_day_events": [
     {
+      "calendar_id": 1,
       "id": 4245,
       "title": "Berlin trip",
       "location": null,

@@ -298,7 +298,7 @@ Panel {
     stdout: StdioCollector {
       onStreamFinished: {
         var parsed = text.length <= 1048576 ? Model.parseFeed(text) : null
-        if (parsed) {
+        if (parsed && parsed.combine_identical_events === undefined) {
           parsed.events = Timeline.uniqueAllDay(parsed.events)
           if (parsed.panel) {
             parsed.panel.events = Timeline.uniqueAllDay(parsed.panel.events)
@@ -867,6 +867,12 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onEntered: { root.cursorActive = true; root.rowCursor = row.flatIndex }
       onClicked: root.activateRow(row.event)
+    }
+
+    CalendarColors {
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      colors: row.event ? row.event.colors || [] : []
     }
 
     RowLayout {

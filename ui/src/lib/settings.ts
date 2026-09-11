@@ -99,6 +99,7 @@ export type AppSettings = {
    *  view switcher — but it is a preference and is stored beside the others,
    *  which is what makes it survive a restart. */
   listMode: boolean;
+  combineIdenticalEvents: boolean;
   /** Pixels per hour in Day and Week — what a pinch, Ctrl+scroll or Ctrl+=/-
    *  left the grid at. Stored for `listMode`'s reason and, like it, shown by
    *  no tab: the gesture is the control. `zoom.ts` owns the range. */
@@ -386,3 +387,5 @@ export const setMenubarPreferences = (label: boolean, joinMinutes: number) =>
 export const setMenubarDateFormat = (format: AppSettings['menubarDateFormat'], custom: string) => invoke<AppSettings>('set_menubar_date_format', { format, custom });
 
 export const setMenubarLabelFormat = (template: string) => invoke<AppSettings>('set_menubar_label_format', { template });
+
+export const setCombineIdenticalEvents = (on: boolean) => invoke<AppSettings>("set_combine_identical_events", { on });

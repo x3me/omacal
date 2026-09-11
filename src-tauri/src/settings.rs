@@ -442,6 +442,7 @@ pub struct AppSettings {
     /// `▦`/`☰` beside the view switcher, and a second control for the same
     /// value in a modal would be a second place for it to disagree.
     pub list_mode: bool,
+    pub combine_identical_events: bool,
     /// Whether the surfaces that can show today's date do (2026-09-04):
     /// the tray icon, which *becomes* the date because a tray host draws
     /// icons and nothing else, and the Omarchy bar widget, which reads it
@@ -724,6 +725,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // hand-edited row lands on that same default rather than silently
         // turning the calendar into a list.
         list_mode: read(pool, LIST_MODE_KEY).await.map(|v| v == "1").unwrap_or(false),
+        combine_identical_events: combine_identical_events(pool).await,
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
         show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
@@ -1676,6 +1678,21 @@ async fn visible_hours(pool: &SqlitePool) -> (u8, u8) {
 pub async fn set_visible_hours(app: tauri::AppHandle, state: tauri::State<'_, AppState>, start: u8, end: u8) -> Result<AppSettings, String> {
     if start >= end || end > 24 { return Err("Start time must be before end time.".into()); }
     write(&state.pool, "visible_hours", &format!("{start},{end}")).await.map_err(|e| crate::errors::user_facing(&e))?;
+    refresh_menu_surfaces(&app, &state).await;
+    Ok(read_settings(&state.pool).await)
+}
+
+/// Display grouping is opt-in and never changes the stored calendar events.
+pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
+    read(pool, "combine_identical_events").await.as_deref() == Some("1")
+}
+
+#[tauri::command]
+pub async fn set_combine_identical_events(
+    app: tauri::AppHandle, state: tauri::State<'_, AppState>, on: bool,
+) -> Result<AppSettings, String> {
+    write(&state.pool, "combine_identical_events", if on { "1" } else { "0" })
+        .await.map_err(|e| crate::errors::user_facing(&e))?;
     refresh_menu_surfaces(&app, &state).await;
     Ok(read_settings(&state.pool).await)
 }

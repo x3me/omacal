@@ -10,6 +10,7 @@ mod cli_write;
 mod caldav_write;
 mod calendars;
 mod commands;
+mod combined;
 mod errors;
 mod events;
 mod export;
@@ -304,7 +305,9 @@ async fn get_days_impl(
     )
     .await
     .map_err(|e| e.to_string())?;
-    Ok(if n == 7 {
+    Ok(if settings::combine_identical_events(pool).await {
+        commands::assemble_days_combining(&events, start_ms, n, &tz, true)
+    } else if n == 7 {
         commands::assemble_week(&events, start_ms, &tz)
     } else {
         commands::assemble_days(&events, start_ms, n, &tz)
@@ -335,7 +338,9 @@ async fn get_month(
     )
     .await
     .map_err(|e| e.to_string())?;
-    Ok(commands::assemble_month(&events, year, month, &tz, week_start))
+    Ok(if settings::combine_identical_events(&state.pool).await {
+        commands::assemble_month_combining(&events, year, month, &tz, week_start, true)
+    } else { commands::assemble_month(&events, year, month, &tz, week_start) })
 }
 
 #[tauri::command]
@@ -392,7 +397,9 @@ async fn get_big_year_impl(
     )
     .await
     .map_err(|e| e.to_string())?;
-    Ok(commands::assemble_big_year(&events, year, now, tz, week_start))
+    Ok(if settings::combine_identical_events(pool).await {
+        commands::assemble_big_year_combining(&events, year, now, tz, week_start, true)
+    } else { commands::assemble_big_year(&events, year, now, tz, week_start) })
 }
 
 pub(crate) const KEYRING_SERVICE: &str = "omacal";
@@ -1723,6 +1730,7 @@ pub fn run() {
             tasks::delete_task_cmd,
             tasks::task_lists,
             settings::set_list_mode,
+            settings::set_combine_identical_events,
             settings::set_hour_height,
             settings::set_show_date,
             settings::set_menubar_preferences,
@@ -1983,6 +1991,43 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn combine_preference_controls_grid_and_menubar_without_changing_source_events() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let account = seed_account(&pool, "copies", "test@example.com").await;
+        seed_calendar(&pool, account, "work", 1, 1).await;
+        seed_calendar(&pool, account, "home", 1, 1).await;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let day = jiff::Timestamp::from_millisecond(now).unwrap().to_zoned(jiff::tz::TimeZone::system())
+            .date().to_zoned(jiff::tz::TimeZone::system()).unwrap().timestamp().as_millisecond();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc, start_tz, end_tz, updated_at)
+            SELECT id, 'copy', 'Design sync', ?1, ?2, 'UTC', 'UTC', 0 FROM calendars")
+            .bind(now).bind(now + 60000).execute(&pool).await.unwrap();
+        assert!(!settings::read_settings(&pool).await.combine_identical_events);
+        assert_eq!(get_days_impl(&pool, day, 1, 0).await.unwrap().days[0].events.len(), 2);
+        for (value, count) in [("1", 1), ("0", 2)] {
+            settings::write(&pool, "combine_identical_events", value).await.unwrap();
+            assert_eq!(settings::read_settings(&pool).await.combine_identical_events, value == "1");
+            let grid = get_days_impl(&pool, day, 1, 0).await.unwrap();
+            assert_eq!(grid.days[0].events.len(), count);
+            let feed = upcoming::current(&pool, now).await.unwrap();
+            assert_eq!(feed.events.len(), count);
+            let panel = feed.panel.unwrap();
+            assert_eq!(panel.events.len(), count);
+            assert_eq!(panel.agenda_days[0].events.len(), count);
+            if count == 1 {
+                assert_eq!(grid.days[0].events[0].copies.len(), 2);
+                assert_eq!(serde_json::to_value(&panel.events[0]).unwrap()["colors"].as_array().unwrap().len(), 2);
+            }
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM events").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 2, "combining must not write or delete either source");
+        sqlx::query("UPDATE calendars SET selected = 0 WHERE google_id = 'home'").execute(&pool).await.unwrap();
+        settings::write(&pool, "combine_identical_events", "1").await.unwrap();
+        let grid = get_days_impl(&pool, day, 1, 0).await.unwrap();
+        assert!(grid.days[0].events[0].copies.is_empty(), "hidden calendars are not offered for editing");
     }
 
     /// The safety property the whole 1c plan rests on: a calendar hidden from

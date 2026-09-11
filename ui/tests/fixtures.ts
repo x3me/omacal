@@ -157,7 +157,7 @@ const populatedWeek = (): WeekPayload => {
   const th = MON + 3 * 24 * H;
   w.days[3] = day(3, [
     ev({ title: 'Ops review', location: 'Meet', start_ms: th + 10 * H, end_ms: th + 11 * H }),
-    ev({ title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
+    ev({ id: 7301, title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
          start_ms: th + 10 * H, end_ms: th + 11 * H }),
   ], [placed(10 / 24, 1 / 24, 0, 2, 0), placed(10 / 24, 1 / 24, 1, 2, 1)]);
   // All-day band: one span inside the week, one arriving from the previous week.
@@ -191,7 +191,7 @@ const singleDayOverlapWeek = (): WeekPayload => {
   const w = singleDayWeek();
   w.days[0] = day(0, [
     ev({ title: 'Ops review', location: 'Meet', start_ms: MON + 10 * H, end_ms: MON + 11 * H }),
-    ev({ title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
+    ev({ id: 7301, title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
          start_ms: MON + 10 * H, end_ms: MON + 11 * H }),
   ], [placed(10 / 24, 1 / 24, 0, 2, 0), placed(10 / 24, 1 / 24, 1, 2, 1)]);
   return w;

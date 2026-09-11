@@ -1,8 +1,11 @@
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
+  import type { ColorSegment } from './combined';
   import { clockFormat } from './clock.svelte';
   import { RESIZE_EDGE_PX, beganDrag } from './drag';
   import { formatClock } from './timefmt';
-  import type { UiEvent, Placed } from './api';
+  import type { EventCopy, UiEvent, Placed } from './api';
+  import type { Calendar } from './calendars';
   import type { Rect } from './position';
   import { locationLabel } from './location';
 
@@ -16,6 +19,13 @@
     liveSpan = null,
     keyboardSelected = false,
     createMode = false,
+    hovered = null,
+    overlapColors = [],
+    copyHoverLane,
+    obscured = false,
+    calendars = [],
+    onopencopy = null,
+    onfocuschange = null,
   }: {
     event: UiEvent;
     placed: Placed;
@@ -52,6 +62,19 @@
     keyboardSelected?: boolean;
     /** Alt-hover or an active creation sweep: this block is background. */
     createMode?: boolean;
+    /** Grid hover uses the packed columns even while a block is expanded.
+     * Standalone blocks fall back to their own pointer boundary. */
+    hovered?: boolean | null;
+    overlapColors?: ColorSegment[];
+    /** The bottom bars keep their packed positions so moving sideways can
+     * select covered peers. Copy hit targets follow that map; the selected
+     * copy's color paints the whole expanded card. */
+    copyHoverLane?: { left: number; width: number };
+    obscured?: boolean;
+    calendars?: Calendar[];
+    onopencopy?: ((copy: EventCopy, rect: Rect, thenEdit?: boolean) => void) | null;
+    /** The grid owns expansion geometry for keyboard focus as well as hover. */
+    onfocuschange?: ((focused: boolean) => void) | null;
   } = $props();
 
   // What the card *says*: the drag's tentative span while one is in flight,
@@ -77,18 +100,20 @@
   const width = $derived(100 / placed.columns);
   const left = $derived(placed.column * width);
 
-  // `getBoundingClientRect()` here, not the block's own layout numbers
-  // (`placed`, percentages of a scrolling column): the popover positions
-  // itself against the viewport, and this is the one place that rect is
-  // available without the parent re-deriving it from geometry it doesn't own.
-  function rectOf(e: Event): Rect {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    return { top: r.top, left: r.left, width: r.width, height: r.height };
-  }
+  const calendarName = $derived(calendars.find(c => c.id === event.calendar_id)?.summary);
 
-  function open(e: MouseEvent) {
+  function restingRect(): Rect {
+    const r = button!.getBoundingClientRect();
+    // Hover paints across the day, but the popup belongs beside this event's
+    // packed lane. Include the same 3px edge insets as the card geometry.
+    const laneWidth = (r.width + 6) / placed.columns;
+    return { top: r.top, height: r.height,
+      left: expanded ? r.left + placed.column * laneWidth : r.left,
+      width: expanded ? Math.max(0, laneWidth - 6) : r.width };
+  }
+  function open() {
     hideTip();
-    onopen(event, rectOf(e));
+    onopen(event, restingRect());
   }
 
   /** Where a right press started, or `null` when none is in flight.
@@ -110,7 +135,18 @@
    *  `overflow: hidden` cannot clip it. That escape hatch closes when an
    *  ancestor has a transform — which a drag preview does — so the render
    *  below also gates on `!preview`. */
-  let tip = $state<{ x: number; y: number; above: boolean } | null>(null);
+  let tip = $state<{ x: number; y: number; above: boolean; calendarId?: number; color: string } | null>(null);
+  let button = $state<HTMLButtonElement | null>(null);
+  let pointerInside = $state(false);
+  let copyFocus = $state(false);
+  const activeHover = $derived(!createMode && (hovered ?? pointerInside));
+  const showCopies = $derived(!createMode && !preview && !!onopencopy
+    && (event.copies?.length ?? 0) > 1 && (activeHover || (hovered === null && copyFocus)));
+  const expanded = $derived(activeHover || showCopies);
+  $effect(() => {
+    if (!expanded) hideTip();
+    else if (activeHover && !showCopies && button) showTip(restingRect());
+  });
 
   /** The block's rendered height, for the grips below — the one fact the
    *  short-block rule needs and CSS alone cannot ask. */
@@ -126,30 +162,51 @@
    *  invisibly). */
   const grips = $derived(heightPx >= RESIZE_EDGE_PX * 3);
 
-  function showTip(e: MouseEvent) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  function showTip(r: Rect, source: { calendar_id?: number; color: string } = event) {
     // Above the block unless that would leave the viewport; clamped right so
     // a Sunday event's tooltip does not run off the screen edge.
-    const above = r.top > 64;
+    const above = r.top > 90;
     tip = {
       x: Math.max(6, Math.min(r.left, window.innerWidth - 286)),
-      y: above ? r.top - 6 : r.bottom + 6,
-      above,
+      y: above ? r.top - 6 : r.top + r.height + 6,
+      above, calendarId: source.calendar_id, color: source.color,
     };
   }
   const hideTip = () => (tip = null);
+  function showCopyTip(copy: EventCopy, e: Event) {
+    showTip((e.currentTarget as HTMLElement).getBoundingClientRect(), copy);
+  }
+  function chooseCopy(copy: EventCopy, e: MouseEvent, thenEdit = false) {
+    hideTip();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    onopencopy?.(copy, { top: r.top, left: r.left, width: r.width, height: r.height }, thenEdit);
+  }
 </script>
 
 <!-- The calendar-time geometry remains percentage based, inset by one pixel at
      each vertical edge so consecutive cards expose a two-pixel strip of the
      grid between them. Drag deltas stay in those same percentage units, and
      `transform` is absent rather than `none` while idle. -->
+<div class="event-host"
+  onfocusin={() => { copyFocus = true; onfocuschange?.(true); }}
+  onfocusout={(e) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      copyFocus = false;
+      onfocuschange?.(false);
+    }
+  }}>
 <button
   class="ev {event.response}"
+  data-combined-count={event.copies?.length || undefined}
+  style:color={event.copies?.length ? "var(--text)" : undefined}
   class:nobodycoming={event.all_guests_declined}
   class:dragging={preview !== null}
   class:keyboard={keyboardSelected}
   class:create-mode={createMode}
+  class:hovered={expanded}
+  class:copies-open={showCopies}
+  class:with-colors={(!showCopies && (event.copies?.length ?? 0) > 1) || overlapColors.length > 1}
+  class:obscured
   data-kbd-selected-event={keyboardSelected ? '' : undefined}
   data-event-id={event.id}
   data-event-start-ms={event.start_ms}
@@ -164,17 +221,17 @@
     left:calc({left}% + 3px); width:calc({width}% - 6px);
     --cal:{event.color}; z-index:{placed.column + 1};
   "
-  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}"
+  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
   onclick={open}
   onpointerup={(e) => {
     if (e.button !== 2 || !rightPress) return;
     const still = !beganDrag(e.clientX - rightPress.x, e.clientY - rightPress.y);
     rightPress = null;
-    if (still && onedit) { hideTip(); onedit(event, rectOf(e)); }
+    if (still && onedit) { hideTip(); onedit(event, restingRect()); }
   }}
   oncontextmenu={(e) => e.preventDefault()}
-  onmouseenter={showTip}
-  onmouseleave={hideTip}
+  onmouseenter={() => { pointerInside = true; }}
+  onmouseleave={() => { pointerInside = false; }}
   onpointerdown={(e) => {
     hideTip();
     // A right press must never become a drag — `ongrab` is the left button's,
@@ -185,15 +242,16 @@
     ongrab?.(event, e);
   }}
   bind:clientHeight={heightPx}
+  bind:this={button}
 >
   <!-- The resize cursor's home, and nothing else's: no background, no
        handler, no size of their own beyond the band constant — the press
        still lands on the button and `edgeAt` still decides. Hidden while
        this block is the one being dragged, when the only honest cursor is
        the grid's own `grabbing`. -->
-  {#if grips && !preview && !createMode}
+  {#if grips && !preview && !createMode && !event.copies?.length}
     <span class="grip" style="top:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
-    <span class="grip" style="bottom:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
+    <span class="grip bottom-grip" style="bottom:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
   {/if}
   <!-- `?` means MAYBE — the answer niki gave, in the letter Google and
        Outlook both use for it (2026-08-10, by request). An unanswered invite
@@ -211,15 +269,92 @@
   <!-- aria-hidden: the button's own label already says all of this, so the
        tooltip is presentation for the pointer, not a second announcement. -->
   {#if tip && !preview && !createMode}
+    {@const tipCalendar = calendars.find(c => c.id === tip!.calendarId)}
     <span class="tip" class:below={!tip.above} aria-hidden="true"
-          style="left:{tip.x}px; top:{tip.y}px;">
+          style="left:{tip.x}px; top:{tip.y}px; --cal:{tip.color};">
       <b class="tt">{event.title}</b>
       <span class="tw">{hhmm(shownStartMs)} – {hhmm(shownEndMs)}{meta ? ` · ${meta}` : ''}</span>
+      {#if tipCalendar}<span class="calendar-line"><i class="calendar-dot"></i><span class="calendar-label">{tipCalendar.summary}</span></span>{/if}
     </span>
   {/if}
+  <CalendarColors colors={showCopies ? [] : event.copies?.map(copy => copy.color)} segments={overlapColors} />
 </button>
+{#if showCopies}
+  <!-- The selected calendar colors the whole card. Keep the copy targets
+       separate: their fixed bottom-bar columns still select each version,
+       without highlighting a different part of the card from the pointer. -->
+  <div class="copy-colors" aria-hidden="true"
+    style="top:calc({placed.top * 100}% + 1px); height:calc({placed.height * 100}% - 2px);">
+    <span class="copy-color" style:--cal={tip?.color ?? event.copies?.[0]?.color ?? event.color}></span>
+  </div>
+  {#if copyHoverLane}
+    <!-- A staggered card underneath must not receive a click while the shared
+         view owns hover. Covered peers take ownership through the grid's
+         packed-column hit test before a click can land here. -->
+    <button class="copy-backdrop" tabindex="-1" aria-hidden="true" onclick={open}
+      onpointerdown={(e) => { e.preventDefault(); hideTip(); }}
+      style="top:calc({placed.top * 100}% + 1px); height:calc({placed.height * 100}% - 2px);"></button>
+  {/if}
+  <div class="copy-panels" role="group" aria-label="Calendar copies"
+    style:left={copyHoverLane ? `calc(${copyHoverLane.left * 100}% + ${3 - 6 * copyHoverLane.left}px)` : undefined}
+    style:width={copyHoverLane ? `calc(${copyHoverLane.width * 100}% - ${6 * copyHoverLane.width}px)` : undefined}
+    style:right={copyHoverLane ? 'auto' : undefined}
+    style="top:calc({placed.top * 100}% + 1px); height:calc({placed.height * 100}% - 2px);">
+    {#each event.copies! as copy (copy.id)}
+      {@const calendar = calendars.find(c => c.id === copy.calendar_id)}
+      {@const label = `Open ${calendar?.summary ?? `Calendar ${copy.calendar_id}`} copy`}
+      <button class="copy-panel" style:--cal={copy.color}
+        aria-label={label}
+        onmouseenter={(e) => showCopyTip(copy, e)} onmouseleave={hideTip}
+        onfocus={(e) => showCopyTip(copy, e)}
+        onpointerdown={(e) => {
+          rightPress = e.button === 2 ? { x: e.clientX, y: e.clientY } : null;
+        }}
+        onpointerup={(e) => {
+          if (e.button !== 2 || !rightPress) return;
+          const still = !beganDrag(e.clientX - rightPress.x, e.clientY - rightPress.y);
+          rightPress = null;
+          if (still) chooseCopy(copy, e, true);
+        }}
+        oncontextmenu={(e) => e.preventDefault()}
+        onclick={(e) => chooseCopy(copy, e)}></button>
+    {/each}
+  </div>
+{/if}
+</div>
 
 <style>
+  .event-host { display: contents; }
+  /* The shared label floats above the colors and their fixed hover targets.
+     It must never intercept a click intended for a calendar copy. */
+  .ev.hovered.copies-open { pointer-events: none; background: none !important;
+                    box-shadow: none !important; border-color: transparent;
+                    z-index: 27 !important; }
+  /* A quiet backing keeps the shared words on one surface as they cross
+     calendar colors. Fit the text and preserve the panels' click targets. */
+  .ev.copies-open > b, .ev.copies-open > em {
+    width: fit-content; max-width: 100%; border-radius: 2px;
+    background: var(--surface); box-shadow: 0 0 0 2px var(--surface);
+    color: var(--text); opacity: 1;
+  }
+  .ev.copies-open > em { color: var(--muted); }
+  .copy-colors, .copy-panels { position: absolute; left: 3px; right: 3px;
+    display: flex; gap: 0; overflow: hidden;
+    border-radius: var(--event-card-radius, 6px); }
+  .copy-colors { z-index: 25; pointer-events: none; }
+  .copy-color { flex: 1; min-width: 0;
+    --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
+    background: var(--event-fill);
+    box-shadow: inset 2px 0 var(--cal), 0 -1px 0 var(--bg), 0 1px 0 var(--bg); }
+  .copy-backdrop { position: absolute; left: 3px; right: 3px; z-index: 25;
+    border: 0; padding: 0; border-radius: var(--event-card-radius, 6px);
+    cursor: pointer; background: transparent; }
+  .copy-panels { z-index: 26; }
+  .copy-panel { appearance: none; -webkit-appearance: none; flex: 1; min-width: 0;
+    padding: 0; margin: 0; border: 0; border-radius: 0; cursor: pointer;
+    background: transparent; }
+  .copy-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .ev[data-combined-count].hovered { cursor: pointer; }
   /* Lifted while dragging so it reads as picked up, and above every other
      block so it is never hidden behind one it is passing over. No transition:
      the block is following a pointer and easing would put it behind the
@@ -240,16 +375,18 @@
      than as hidden. The bar appears only on hover, so a block at rest is
      unchanged and the committed baselines — which never hover — still hold
      these to invisibility. */
-  .ev:hover:not(.create-mode) { cursor: grab; }
+  .ev.hovered { cursor: grab; }
   .grip { position: absolute; left: 0; right: 0; cursor: ns-resize; }
   /* Centred in the band rather than filling it: the bar says "here", the
      band is what actually answers, and a filled 6px block would read as a
      border on an event that has none by design. */
-  .ev:hover .grip::after {
+  .ev.hovered .grip::after {
     content: ''; position: absolute; left: 50%; transform: translateX(-50%);
     top: 50%; margin-top: -1.5px; width: 26px; height: 3px; border-radius: 2px;
     background: color-mix(in srgb, currentColor 45%, transparent);
   }
+
+  .ev.hovered.with-colors .bottom-grip::after { top: .5px; margin-top: 0; height: 2px; }
 
   .ev {
     /* A <button> keeps native chrome in macOS WKWebView unless appearance is
@@ -294,12 +431,14 @@
      higher-column neighbours. `.ev.dragging` below got this right from day
      one; this rule had been losing the same fight invisibly until a dense
      iCloud week made it obvious. */
-  .ev:hover:not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important; z-index: 20 !important;
+  .ev.hovered { left: 3px !important; width: calc(100% - 6px) !important; z-index: 20 !important;
               box-shadow: inset 2px 0 0 0 var(--spine),
                           0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg),
                           0 4px 14px rgba(0, 0, 0, .5); }
   /* Keep every saved event below the creation preview, regardless of its
      overlap column or keyboard selection. Alt must also override edge grips. */
+  .ev.obscured { z-index: 1 !important; }
+  .ev.obscured b, .ev.obscured em, .ev.obscured .rs { visibility: hidden; }
   .ev.create-mode { cursor: crosshair; z-index: 1 !important; }
 
   /* 11.5/10.5, up from 10/9 (2026-08-14): at 10px the grid read as decoration
@@ -367,7 +506,8 @@
   /* The preference fades the fill colour, never the element: opacity here
      would also fade the title, RSVP mark, outline and colour spine. Hover
      still deepens the same fill before this final alpha is applied. */
-  :global(:root[data-event-transparency]) .ev {
+  :global(:root[data-event-transparency]) .ev,
+  :global(:root[data-event-transparency]) .copy-color {
     background-color: color-mix(
       in srgb,
       var(--event-fill) var(--event-fill-opacity),
@@ -395,6 +535,9 @@
      the block's ellipsis — a card exists precisely to say the whole thing. */
   .tip .tt { display: block; font-size: 12px; font-weight: 600; line-height: 1.35;
              white-space: normal; overflow: visible; }
+  .calendar-line { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; }
+  .calendar-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--cal); }
+  .calendar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tip .tw { display: block; font-size: 11px; color: var(--muted); margin-top: 1px;
              white-space: normal; }
 </style>

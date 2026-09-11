@@ -25,7 +25,7 @@
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
     setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setShowDate, setTrayIcon, setWeatherEnabled, setWeekStart,
-    setWeekStartsToday, setWeekViewDays, setVisibleHours,
+    setWeekStartsToday, setWeekViewDays, setVisibleHours, setCombineIdenticalEvents,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
   } from './settings';
@@ -36,6 +36,11 @@
   async function changeVisibleHours(start: number, end: number) {
     try { settings = await setVisibleHours(start, end); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
+  }
+
+  async function changeCombineIdenticalEvents(on: boolean) {
+    try { settings = await setCombineIdenticalEvents(on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; }
   }
   let {
     accounts,
@@ -1185,6 +1190,12 @@
 
       <section class="appearance-section" aria-labelledby="event-style-heading">
         <h2 id="event-style-heading">Event styling</h2>
+        <label class="check">
+          <input type="checkbox" checked={settings?.combineIdenticalEvents ?? false} disabled={!settings}
+            onchange={(e) => changeCombineIdenticalEvents(e.currentTarget.checked)} />
+          Combine identical events
+        </label>
+        <p class="hint">Show matching events once, with a bottom color segment for each calendar. Hover to choose a copy, or select it in the event details.</p>
         <div class="range-row">
           <label for="event-transparency">Transparency</label>
           <input

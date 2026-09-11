@@ -31,6 +31,11 @@ const EXPAND_LIMIT: u16 = 512;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UiEvent {
+    pub calendar_id: i64,
+    #[serde(skip)]
+    pub all_day_dates: Option<(String, String)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<crate::combined::EventCopy>,
     pub id: i64,
     pub title: String,
     pub location: Option<String>,
@@ -115,8 +120,11 @@ pub struct MonthPayload {
     pub month: u32, // 1-12
 }
 
-fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
+pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
     UiEvent {
+        calendar_id: src.calendar_id,
+        all_day_dates: src.is_all_day.then(|| crate::write::all_day_span_dates(start_ms, end_ms, &src.calendar_timezone)),
+        copies: Vec::new(),
         id: src.id,
         title: src.summary.clone().unwrap_or_else(|| "(no title)".into()),
         location: src.location.clone(),
@@ -420,6 +428,10 @@ fn all_day_columns(src: &StoredEvent, iv: &Interval, col_dates: &[String]) -> (i
 /// where its own calendar's date matches a column's (`all_day_columns`) — see
 /// `date_column` for why anything else misplaces it.
 pub fn assemble_days(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str) -> WeekPayload {
+    assemble_days_combining(events, start_ms, n, tz, false)
+}
+
+pub fn assemble_days_combining(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str, combine: bool) -> WeekPayload {
     let bounds = n_day_boundaries(start_ms, n, tz);
     let end_ms = bounds[n];
     let col_dates = column_dates(&bounds, tz);
@@ -459,6 +471,11 @@ pub fn assemble_days(events: &[StoredEvent], start_ms: i64, n: usize, tz: &str) 
                 }
             }
         }
+    }
+
+    if combine {
+        crate::combined::combine_lanes(&mut all_day_events, &mut segments);
+        for events in &mut day_events { crate::combined::combine(events); }
     }
 
     // Every span that can be positioned is positioned; how many rows to
@@ -507,6 +524,17 @@ pub fn assemble_month(
     tz: &str,
     week_start: crate::settings::WeekStart,
 ) -> MonthPayload {
+    assemble_month_combining(events, year, month, tz, week_start, false)
+}
+
+pub fn assemble_month_combining(
+    events: &[StoredEvent],
+    year: i32,
+    month: u32,
+    tz: &str,
+    week_start: crate::settings::WeekStart,
+    combine: bool,
+) -> MonthPayload {
     use jiff::civil::date;
 
     let grid_start_ms = month_grid_start_ms(year, month, tz, week_start);
@@ -550,6 +578,11 @@ pub fn assemble_month(
                         day_events[col].push(to_ui(src, iv.start_ms, iv.end_ms));
                     }
                 }
+            }
+
+            if combine {
+                crate::combined::combine_lanes(&mut bar_events, &mut segments);
+                for events in &mut day_events { crate::combined::combine(events); }
             }
 
             // Three lanes, matching the spec's month rows.
@@ -780,6 +813,17 @@ pub fn assemble_big_year(
     tz: &str,
     week_start: crate::settings::WeekStart,
 ) -> BigYearPayload {
+    assemble_big_year_combining(events, year, now_ms, tz, week_start, false)
+}
+
+pub fn assemble_big_year_combining(
+    events: &[StoredEvent],
+    year: i32,
+    now_ms: i64,
+    tz: &str,
+    week_start: crate::settings::WeekStart,
+    combine: bool,
+) -> BigYearPayload {
     use jiff::civil::date;
 
     let ribbon_start_ms = big_year_start_ms(year, tz, week_start);
@@ -820,6 +864,8 @@ pub fn assemble_big_year(
                     }
                 }
             }
+
+            if combine { crate::combined::combine_lanes(&mut pill_events, &mut segments); }
 
             // Three lanes, matching the spec's row height.
             let (pills, overflow) = pack_lanes(&segments, 28, 3);
@@ -901,6 +947,96 @@ mod tests {
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
+    }
+
+    #[test]
+    fn displayed_events_serialize_calendar_identity_for_hover_labels() {
+        let mut source = ev("planning", MON + 9 * 3_600_000, MON + 10 * 3_600_000, false);
+        source.calendar_id = 42;
+        let week = assemble_days(&[source], MON, 1, "UTC");
+        let wire = serde_json::to_value(&week).unwrap();
+        assert_eq!(wire["days"][0]["events"][0]["calendar_id"], 42);
+    }
+
+    #[test]
+    fn combined_events_keep_both_identities_and_repack_the_day() {
+        let mut work = ev("work", MON + 9 * 3_600_000, MON + 10 * 3_600_000, false);
+        work.id = 11;
+        work.summary = Some("Design sync".into());
+        work.location = Some("Room 4".into());
+        work.color_hex = Some("#ff0000".into());
+        let mut home = work.clone();
+        home.id = 22; home.calendar_id = 2; home.google_id = "home".into();
+        home.color_hex = Some("#0000ff".into());
+        let events = vec![work, home];
+        let separate = assemble_days(&events, MON, 7, "UTC");
+        assert_eq!(separate.days[0].events.len(), 2);
+        let combined = assemble_days_combining(&events, MON, 7, "UTC", true);
+        let day = &combined.days[0];
+        assert_eq!(day.events.len(), 1);
+        assert_eq!(day.placed[0].columns, 1);
+        let copies = &day.events[0].copies;
+        assert_eq!(copies.iter().map(|c| (c.id, c.calendar_id, c.color.as_str())).collect::<Vec<_>>(),
+            vec![(11, 1, "#ff0000"), (22, 2, "#0000ff")]);
+        assert_eq!(copies[1].start_ms, MON + 9 * 3_600_000);
+
+        let mut distinct = events.clone();
+        distinct[1].location = Some("Room 5".into());
+        assert_eq!(assemble_days_combining(&distinct, MON, 7, "UTC", true).days[0].events.len(), 2);
+        distinct[1] = events[1].clone();
+        distinct[1].end_utc += 1;
+        assert_eq!(assemble_days_combining(&distinct, MON, 7, "UTC", true).days[0].events.len(), 2);
+        distinct[1] = events[1].clone();
+        distinct[1].calendar_id = 1;
+        assert_eq!(assemble_days_combining(&distinct, MON, 7, "UTC", true).days[0].events.len(), 2);
+    }
+
+    #[test]
+    fn combined_all_day_events_use_civil_dates_across_calendar_zones_in_every_view() {
+        let mut a = ev("holiday", MON, MON + DAY, true);
+        a.id = 1;
+        let mut b = a.clone();
+        b.id = 2; b.calendar_id = 2;
+        b.calendar_timezone = "America/New_York".into();
+        b.start_utc += 4 * 3_600_000; b.end_utc += 4 * 3_600_000;
+        let events = vec![a, b];
+        let week = assemble_days_combining(&events, MON, 7, "UTC", true);
+        assert_eq!(week.all_day_events.len(), 1);
+        assert_eq!(week.all_day.len(), 1);
+        assert_eq!(week.all_day_events[0].copies.len(), 2);
+        let month = assemble_month_combining(&events, 2026, 8, "UTC", crate::settings::WeekStart::Monday, true);
+        assert_eq!(month.rows.iter().map(|r| r.bar_events.len()).sum::<usize>(), 1);
+        let year = assemble_big_year_combining(&events, 2026, MON, "UTC", crate::settings::WeekStart::Monday, true);
+        assert_eq!(year.rows.iter().map(|r| r.pill_events.len()).sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn combined_recurring_copies_preserve_occurrences_and_manual_conference_locations() {
+        let mut source = daily_master();
+        source.id = 1;
+        source.location = Some("Room 4".into());
+        source.conference_uri = Some("https://meet.google.com/abc-defg-hij".into());
+        let mut duplicate = source.clone();
+        duplicate.id = 2; duplicate.calendar_id = 2; duplicate.recurrence = None;
+        duplicate.start_utc += DAY; duplicate.end_utc += DAY;
+        duplicate.conference_uri = None;
+        duplicate.location = Some("Room 4 · Google Meet: https://meet.google.com/abc-defg-hij".into());
+        let mut third = duplicate.clone();
+        third.id = 3; third.calendar_id = 3;
+        let mut same_calendar = third.clone(); same_calendar.id = 4;
+        let stored = vec![source, duplicate, third, same_calendar];
+        let week = assemble_days_combining(&stored, MON, 7, "UTC", true);
+        assert_eq!(week.days[0].events.len(), 1);
+        assert!(week.days[0].events[0].copies.is_empty());
+        assert_eq!(week.days[1].events.len(), 2, "same-calendar duplicates remain visible");
+        assert_eq!(week.days[1].events[0].copies.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(week.days[1].events[0].copies[0].start_ms, MON + DAY + 9 * 3_600_000);
+        let mut changed = stored[..2].to_vec();
+        changed[1].summary = Some("Different meeting".into());
+        assert_eq!(assemble_days_combining(&changed, MON, 7, "UTC", true).days[1].events.len(), 2);
+        changed[1].summary = changed[0].summary.clone();
+        changed[1].location = Some("Room 4 · Google Meet: not a meeting URL".into());
+        assert_eq!(assemble_days_combining(&changed, MON, 7, "UTC", true).days[1].events.len(), 2);
     }
 
     /// A daily 09:00–09:30 series starting on the week's Monday.

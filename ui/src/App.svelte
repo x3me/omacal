@@ -1,6 +1,7 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
   import { setVisibleHoursState } from "./lib/visiblehours.svelte";
+  import type { EventCopy } from './lib/api';
   import { formatDate } from './lib/datefmt';
   import { dateFormat } from './lib/date.svelte';
   import { setDateFormat } from './lib/date.svelte';
@@ -763,6 +764,7 @@
   /** Bound into Header so the application-wide preferences chord opens the
    *  same SettingsModal as the menu item. */
   let settingsOpen = $state(false);
+  let combineIdenticalEvents = false;
 
   /** Whether the keyboard-shortcut sheet is up. A session flag and not a
    *  setting: it is a thing you look at, not a thing you configure. */
@@ -794,6 +796,7 @@
     const viewBefore = untrack(() => viewChoices);
     getSettings()
       .then((s) => {
+        combineIdenticalEvents = s.combineIdenticalEvents;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
         setClockFormat(s.timeFormat);
@@ -1282,18 +1285,19 @@
   let gridSelEnd = $state<number | null>(null);
   let gridAnchor = $state<Rect | null>(null);
   let gridDetail = $state<EventDetail | null>(null);
+  let gridCopies = $state<EventCopy[]>([]);
 
   function isGridSelected(event: UiEvent): boolean {
     return gridSelId === event.id && gridSelStart === event.start_ms;
   }
 
   async function openGridEvent(event: UiEvent, rect: Rect) {
-    await openOccurrence(event.id, event.start_ms, event.end_ms, rect);
+    await openOccurrence(event.id, event.start_ms, event.end_ms, rect, event.copies);
   }
 
   /** The same, for a right-click (#109): open the editor, not the card. */
   async function editGridEvent(event: UiEvent, rect: Rect) {
-    await openOccurrence(event.id, event.start_ms, event.end_ms, rect, true);
+    await openOccurrence(event.id, event.start_ms, event.end_ms, rect, event.copies, true);
   }
 
   /**
@@ -1305,7 +1309,8 @@
    * `openGridEvent` is this with a `UiEvent` unpacked; search calls it with a
    * hit's three numbers.
    */
-  async function openOccurrence(id: number, startMs: number, endMs: number, rect: Rect, thenEdit = false) {
+  async function openOccurrence(id: number, startMs: number, endMs: number, rect: Rect, copies: EventCopy[] = [], thenEdit = false) {
+    gridCopies = copies;
     gridSelId = id;
     gridSelStart = startMs;
     gridSelEnd = endMs;
@@ -1342,6 +1347,7 @@
   }
 
   function closeGridEvent() {
+    gridCopies = [];
     gridSelId = null;
     gridSelStart = null;
     gridSelEnd = null;
@@ -2046,6 +2052,10 @@
       applyAppearance(s);
     }}
     onsettingschange={(s) => {
+      if (combineIdenticalEvents !== s.combineIdenticalEvents) {
+        combineIdenticalEvents = s.combineIdenticalEvents;
+        void reload();
+      }
       defaultCalendarId = s.defaultCalendarId;
       defaultEventDurationMinutes = s.defaultEventDurationMinutes;
       setClockFormat(s.timeFormat);
@@ -2135,7 +2145,7 @@
                    keyboardCursor={visibleKeyboardCursor}
                    onopen={openGridEvent} />
       {:else}
-        <WeekGrid {week} {visibleStartMs} visibleDays={visibleCount}
+        <WeekGrid {week} {calendars} {visibleStartMs} visibleDays={visibleCount}
                   onerror={(m) => (error = m)}
                   {weather} {weatherStale} onweather={openWeather}
                   tasks={weekTasks} ontaskmove={moveTask} ontasktoggle={completeTask}
@@ -2209,8 +2219,12 @@
        above already proves a block is selected, and `gridSelEnd` is assigned
        and cleared in lockstep with `gridSelStart`. -->
   {@const occurrence = { detail: gridDetail, startMs, endMs: gridSelEnd ?? startMs }}
+  {#key gridDetail.id}
   <EventPopover
     detail={gridDetail}
+    {calendars}
+    copies={gridCopies}
+    onchoosecopy={(copy) => { void openOccurrence(copy.id, copy.start_ms, copy.end_ms, rect, gridCopies); }}
     anchor={gridAnchor}
     occurrenceStartMs={startMs}
     occurrenceEndMs={occurrence.endMs}
@@ -2221,6 +2235,7 @@
     oncopy={() => copyOccurrence(occurrence)}
     onduplicate={createCalendarId === null ? null : () => duplicateOccurrence(occurrence, rect)}
   />
+  {/key}
 {/if}
 
 {#if weatherCard && weatherReport && weather?.get(dateKey(weatherCard.dayStartMs))}

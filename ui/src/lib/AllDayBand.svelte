@@ -1,5 +1,6 @@
 <!-- ui/src/lib/AllDayBand.svelte -->
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import type { Lane, UiEvent } from './api';
   import type { Rect } from './position';
   import { gutterWidth } from './secondzone.svelte';
@@ -70,6 +71,8 @@
         {@const keyboardSelected = isKeyboardSelected(lane, ev)}
         <button
           class="chip"
+          data-combined-count={ev.copies?.length || undefined}
+          style:color={ev.copies?.length ? "var(--text)" : undefined}
           class:cl={lane.cont_left}
           class:cr={lane.cont_right}
           class:keyboard={keyboardSelected}
@@ -85,6 +88,7 @@
           onclick={(e) => open(ev, e)}
         >
           {lane.cont_left ? '‹ ' : ''}{ev.title}
+          <CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} />
         </button>
       {/each}
       <!-- The fold, and since 2026-09-04 a real control: a week with more
@@ -161,7 +165,7 @@
      Deliberately not the band's own `allday-populated.png`: that frame is
      1280x42 under `maxDiffPixelRatio: 0.01`, ~537 pixels of slack against an
      artifact worth about 3-4 per corner, so it would not notice. */
-  .chip { appearance: none; -webkit-appearance: none;
+  .chip { position: relative; appearance: none; -webkit-appearance: none;
           font: inherit; text-align: left; cursor: pointer;
           border: 0; border-left: 2px solid var(--cal);
           /* The same size and near the same weight as a timed block's title

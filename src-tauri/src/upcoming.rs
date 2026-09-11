@@ -43,6 +43,7 @@ const VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Feed {
+    pub combine_identical_events: bool,
     pub version: u32,
     pub tray_icon: bool,
     /// When this snapshot was computed — the reader's staleness check.
@@ -138,6 +139,9 @@ pub struct FeedEvent {
     pub response: Option<String>,
     /// The conferencing link, when the occurrence has one.
     pub conference: Option<String>,
+    /// Calendar colors for a combined display entry; sources stay separate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub colors: Vec<String>,
     /// The colour the app itself would draw this event in.
     pub color: Option<String>,
     /// The owning calendar's display name.
@@ -268,9 +272,14 @@ pub(crate) fn assemble(
 }
 
 fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize) -> Feed {
+    assemble_window_combining(stored, calendar_names, now_ms, to_ms, cap, false)
+}
+
+fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize, combine: bool) -> Feed {
     let suppressed = crate::commands::suppressed_slots(stored);
 
     let mut events = Vec::new();
+    let mut display_events = Vec::new();
     for src in stored {
         if src.status == "cancelled" {
             continue;
@@ -282,7 +291,9 @@ fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>
             if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                 continue;
             }
+            if combine { display_events.push(crate::commands::to_ui(src, iv.start_ms, iv.end_ms)); }
             events.push(FeedEvent {
+                colors: Vec::new(),
                 title: src.summary.clone(),
                 start_ms: iv.start_ms,
                 end_ms: iv.end_ms,
@@ -309,6 +320,24 @@ fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>
         }
     }
 
+    if combine {
+        // Use the grid's grouping, including calendar-zone all-day dates and
+        // copied conference locations. Group before applying the display cap.
+        let mapping = crate::combined::combine(&mut display_events);
+        let mut seen = std::collections::HashSet::new();
+        events = events.into_iter().enumerate().filter_map(|(i, mut event)| {
+            let group = mapping[i];
+            if !seen.insert(group) { return None; }
+            let copies = &display_events[group].copies;
+            if !copies.is_empty() {
+                event.colors = copies.iter().take(200).map(|c| c.color.clone()).collect();
+                event.calendar = Some(copies.iter().filter_map(|c| calendar_names.get(&c.calendar_id))
+                    .cloned().collect::<Vec<_>>().join(" · "));
+            }
+            Some(event)
+        }).collect();
+    }
+
     events.sort_by(|a, b| {
         (a.start_ms, a.end_ms, &a.title).cmp(&(b.start_ms, b.end_ms, &b.title))
     });
@@ -316,7 +345,7 @@ fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>
 
     // `assemble` stays pure over its events — the tasks and today's date are
     // both filled in by `current`, which has the pool the settings live in.
-    Feed { tray_icon: true, version: VERSION, generated_ms: now_ms, events, tasks: Vec::new(), today: None, panel: None }
+    Feed { combine_identical_events: combine, tray_icon: true, version: VERSION, generated_ms: now_ms, events, tasks: Vec::new(), today: None, panel: None }
 }
 
 /// How far ahead a due date still counts as "worth a glance in the bar".
@@ -406,12 +435,14 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         .into_iter()
         .map(|c| (c.id, c.summary))
         .collect();
-    let mut feed = assemble(&stored, &names, now_ms);
+    let settings = crate::settings::read_settings(pool).await;
+    let combine = settings.combine_identical_events;
+    let mut feed = if combine { assemble_window_combining(&stored, &names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP, true) }
+        else { assemble(&stored, &names, now_ms) };
     // Tasks ride the same snapshot: overdue-or-imminent only, and a store
     // without a single CalDAV account contributes an empty list for free.
     let task_rows = omacal_store::tasks_for_ui(pool, now_ms).await?;
     feed.tasks = assemble_tasks(&task_rows, now_ms);
-    let settings = crate::settings::read_settings(pool).await;
     let tz = jiff::tz::TimeZone::system();
     let today = jiff::Timestamp::from_millisecond(now_ms)?.to_zoned(tz.clone()).date();
     let start = today.to_zoned(tz.clone())?.timestamp().as_millisecond();
@@ -419,7 +450,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     let day_stored = omacal_store::events_in_window(pool, start, end).await?;
     // The agenda needs completed events too, and a larger bound than the
     // glance-sized upcoming slice. Report truncation instead of hiding it.
-    let mut day = assemble_window(&day_stored, &names, start, end, 201);
+    let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine);
     let truncated = day.events.len() > 200;
     day.events.truncate(200);
     let mut agenda_days = Vec::new();
@@ -431,7 +462,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         let next = agenda_date.tomorrow()?;
         let to = next.to_zoned(tz.clone())?.timestamp().as_millisecond();
         let stored = omacal_store::events_in_window(pool, from, to).await?;
-        let mut slice = assemble_window(&stored, &names, from, to, remaining + 1);
+        let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine);
         agenda_truncated |= slice.events.len() > remaining;
         slice.events.truncate(remaining);
         remaining -= slice.events.len();

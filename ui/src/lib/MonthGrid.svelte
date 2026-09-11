@@ -1,5 +1,6 @@
 <!-- ui/src/lib/MonthGrid.svelte -->
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import { rotate } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
   import type { MonthPayload, UiEvent } from './api';
@@ -132,6 +133,8 @@
           {@const keyboardSelected = isBarSelected(lane, ev, row.cells)}
           <button
             class="bar"
+            data-combined-count={ev.copies?.length || undefined}
+            style:color={ev.copies?.length ? "var(--text)" : undefined}
             class:cl={lane.cont_left}
             class:cr={lane.cont_right}
             class:keyboard={keyboardSelected}
@@ -145,7 +148,7 @@
             onpointerdown={(e) => rightDown(ev, e)}
             onpointerup={(e) => rightUp(ev, e)}
             oncontextmenu={(e) => e.preventDefault()}
-          >{lane.cont_left ? '‹ ' : ''}{ev.title}</button>
+          >{lane.cont_left ? '‹ ' : ''}{ev.title}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
         {/each}
         {#if row.bar_overflow.length}
           <!-- A span, not a button: unlike a cell's own overflow, these
@@ -181,6 +184,8 @@
             {#each cell.timed.slice(0, MONTH_GRID_TIMED_LIMIT) as ev}
               <button
                 class="timed"
+                data-combined-count={ev.copies?.length || undefined}
+                style:color={ev.copies?.length ? "var(--text)" : undefined}
                 class:keyboard={keyboardCursor
                   ? cursorNamesEvent(keyboardCursor, cell.start_ms, ev)
                   : false}
@@ -191,7 +196,7 @@
                 onpointerdown={(e) => rightDown(ev, e)}
                 onpointerup={(e) => rightUp(ev, e)}
                 oncontextmenu={(e) => e.preventDefault()}
-              ><i class="dot" style="background:{ev.color}"></i>{ev.title}</button>
+              ><i class="dot" style="background:{ev.color}"></i>{ev.title}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
             {/each}
             {#if cell.timed.length > MONTH_GRID_TIMED_LIMIT}
               <button class="more" onclick={() => pickDay(cell.start_ms)}>
@@ -223,7 +228,7 @@
   .bars { display: grid; grid-template-columns: repeat(7, 1fr);
           grid-auto-rows: 15px; gap: 2px 0; padding: 2px 0; }
 
-  .bar { appearance: none; -webkit-appearance: none; font: inherit;
+  .bar { position: relative; appearance: none; -webkit-appearance: none; font: inherit;
          text-align: left; cursor: pointer; border: 0; border-left: 2px solid var(--cal);
          font-size: 10.5px; border-radius: var(--event-chip-radius, 4px); padding: 1px 6px; white-space: nowrap;
          overflow: hidden; text-overflow: ellipsis; margin: 0 2px;

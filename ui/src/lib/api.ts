@@ -2,7 +2,13 @@ import { startOfWeek } from './weekstart';
 import { weekStartDay } from './weekstartstore.svelte';
 import { invoke } from '@tauri-apps/api/core';
 
+export type EventCopy = {
+  id: number; calendar_id: number; start_ms: number; end_ms: number; color: string;
+};
+
 export type UiEvent = {
+  /** Calendar identity for display labels, independent of color overrides. */
+  calendar_id?: number;
   id: number; title: string; location: string | null;
   start_ms: number; end_ms: number; color: string;
   response: 'accepted' | 'needsAction' | 'tentative' | 'declined';
@@ -21,6 +27,8 @@ export type UiEvent = {
    *  "no" is not this — that is `response`, and it already strikes the
    *  block through. */
   all_guests_declined: boolean;
+  /** All underlying occurrences when several calendars share this display. */
+  copies?: EventCopy[];
 };
 
 /** Opens an event's meeting link in the system browser, backend-side. The
