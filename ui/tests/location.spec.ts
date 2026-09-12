@@ -18,7 +18,7 @@ test.describe('locationLabel', () => {
     expect(locationLabel('https://us02web.zoom.us/j/123456?pwd=x')).toBe('Zoom');
     // Issue #119: Zoom serves meetings from four domains, and only one was
     // recognised. A university on Zoom X could not attach its own links.
-    for (const host of ['uni-kassel.zoom-x.de', 'zoomgov.com', 'us02web.zoomgov.com', 'zoom.com.cn']) {
+    for (const host of ['uni-kassel.zoom-x.de', 'zoomgov.com', 'us02web.zoomgov.com', 'zoom.com.cn', 'zoom.com', 'us05web.zoom.com']) {
       expect(locationLabel(`https://${host}/j/123456789?pwd=x`), host).toBe('Zoom');
       expect(meetingProvider(`https://${host}/j/123456789`), host).toBe('Zoom');
       expect(meetingUrl(`Join: https://${host}/j/123456789`), host).toBe(`https://${host}/j/123456789`);
@@ -27,6 +27,13 @@ test.describe('locationLabel', () => {
     // contains one of them is somebody else's.
     expect(meetingProvider('https://zoom-x.de.evil.example/j/123456789')).toBeNull();
     expect(meetingProvider('https://notzoom.us/j/123456789')).toBeNull();
+    // The same, proactively, for the other providers' regional and sovereign
+    // clouds — each from the vendor's own published endpoint list.
+    for (const host of ['teams.cloud.microsoft', 'gov.teams.microsoft.us', 'dod.teams.microsoft.us', 'teams.microsoftonline.cn']) {
+      expect(meetingProvider(`https://${host}/l/meetup-join/x`), host).toBe('Teams');
+    }
+    expect(meetingProvider('https://gov.webexgov.us/meet/room')).toBe('Webex');
+    expect(meetingProvider('https://teams.microsoft.us.evil.example/l/meetup-join/x')).toBeNull();
     expect(locationLabel('https://meet.google.com/abc-defg-hij')).toBe('Google Meet');
     expect(locationLabel('https://teams.microsoft.com/l/meetup-join/x')).toBe('Teams');
   });

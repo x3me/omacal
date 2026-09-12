@@ -183,7 +183,7 @@ fn launch(cmd: &mut Command) -> std::io::Result<()> {
 /// refused Zoom X, Telekom's German/EU Zoom, plus Zoom for Government and
 /// Zoom China; a meeting on any of them is the same numbered Zoom meeting,
 /// and `zoommtg://` takes the number, not the web host.
-pub(crate) const ZOOM_HOSTS: &[&str] = &["zoom.us", "zoom-x.de", "zoomgov.com", "zoom.com.cn"];
+pub(crate) const ZOOM_HOSTS: &[&str] = &["zoom.us", "zoom.com", "zoom-x.de", "zoomgov.com", "zoom.com.cn"];
 
 /// Whether `host` is Zoom or a subdomain of one of its domains.
 pub(crate) fn is_zoom_host(host: &str) -> bool {
@@ -333,7 +333,7 @@ mod tests {
     /// the authority stays `zoom.us` for all of them.
     #[test]
     fn every_zoom_domain_is_rewritten_to_the_protocol() {
-        for host in ["uni-kassel.zoom-x.de", "zoom-x.de", "zoomgov.com", "us02web.zoomgov.com", "zoom.com.cn"] {
+        for host in ["uni-kassel.zoom-x.de", "zoom-x.de", "zoomgov.com", "us02web.zoomgov.com", "zoom.com.cn", "zoom.com", "us05web.zoom.com"] {
             assert_eq!(
                 zoom_join_uri(&format!("https://{host}/j/123456789?pwd=abc")).as_deref(),
                 Some("zoommtg://zoom.us/join?action=join&confno=123456789&pwd=abc"),

@@ -6,11 +6,21 @@ const MAX_WINDOWS = 256, MAX_EVENTS = 256, MAX_TEXT = 1024;
 // and with it Zoom for Government and Zoom China. One list, exported: the
 // app's `location.ts` builds its matcher from this rather than keeping a
 // second, subtly different idea of what a Zoom link is.
-export const ZOOM_HOSTS = ['zoom.us', 'zoom-x.de', 'zoomgov.com', 'zoom.com.cn'];
-export function isZoomHost(host) {
+// Zoom's own allowlist names `*.zoom.us` and `*.zoom.com` (support.zoom.com,
+// KB0060548); the other three are the government, Telekom-EU and China
+// offerings, each on its own domain.
+export const ZOOM_HOSTS = ['zoom.us', 'zoom.com', 'zoom-x.de', 'zoomgov.com', 'zoom.com.cn'];
+// Microsoft's own endpoint lists: worldwide `teams.microsoft.com` and the
+// newer `teams.cloud.microsoft`; consumer `teams.live.com`; GCC High
+// `gov.teams.microsoft.us` and DoD `dod.teams.microsoft.us` (both under
+// `teams.microsoft.us`); and 21Vianet China `teams.microsoftonline.cn`.
+export const TEAMS_HOSTS = ['teams.microsoft.com', 'teams.cloud.microsoft', 'teams.live.com', 'teams.microsoft.us', 'teams.microsoftonline.cn'];
+const hostIn = (host, list) => {
   const h = typeof host === 'string' ? host.toLowerCase() : '';
-  return ZOOM_HOSTS.some(z => h === z || h.endsWith('.' + z));
-}
+  return list.some(z => h === z || h.endsWith('.' + z));
+};
+export function isZoomHost(host) { return hostIn(host, ZOOM_HOSTS); }
+export function isTeamsHost(host) { return hostIn(host, TEAMS_HOSTS); }
 function text(value) {
   return typeof value === 'string' && value.length <= MAX_TEXT
     && !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(value) ? value.trim().toLowerCase() : '';
@@ -30,7 +40,7 @@ function meeting(event) {
     const id = /^\/(?:j|wc\/join)\/(\d{9,11})(?:\/|$)/.exec(path)?.[1];
     return id ? { provider: 'zoom', id } : null;
   }
-  if (['teams.microsoft.com', 'teams.live.com', 'teams.cloud.microsoft'].includes(host)) {
+  if (isTeamsHost(host)) {
     return /^\/(?:l\/meetup-join|meet)\//.test(path) ? { provider: 'teams', id: path } : null;
   }
   return null;

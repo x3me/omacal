@@ -25,6 +25,12 @@ test('a meeting on a regional Zoom domain is matched like any Zoom meeting', () 
     expect(eventKey(event)).toBe('zoom:12345678901:' + event.start_ms);
     expect(isPresent(observe([], [window('zoom', 'Zoom Meeting - 123 4567 8901')], [event], now, 5), event, now)).toBe(true);
   }
+  // Teams' newer and sovereign-cloud domains, from Microsoft's own lists.
+  for (const host of ['teams.cloud.microsoft', 'gov.teams.microsoft.us', 'teams.microsoftonline.cn']) {
+    const event = meeting(`https://${host}/l/meetup-join/example`);
+    expect(eventKey(event), host).toBe('teams:/l/meetup-join/example:' + event.start_ms);
+    expect(isPresent(observe([], [window('teams-for-linux', 'Design sync | Microsoft Teams')], [event], now, 5), event, now), host).toBe(true);
+  }
   // A lookalike domain is not Zoom, so it has no key and can never be present.
   expect(eventKey(meeting('https://zoom-x.de.evil.example/j/12345678901'))).toBe('');
 });

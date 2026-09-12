@@ -146,9 +146,17 @@ pub struct FeedEvent {
 
 /// Zoom is not in this list: its domains live in `browser::ZOOM_HOSTS`, one
 /// place for the join rewrite and this scan both (#119).
+/// Teams is every cloud Microsoft publishes an endpoint list for: worldwide
+/// (`teams.microsoft.com`, the newer `teams.cloud.microsoft`), consumer
+/// (`teams.live.com`), GCC High and DoD (`gov.`/`dod.teams.microsoft.us`) and
+/// 21Vianet China (`teams.microsoftonline.cn`). `webexgov.us` is Webex for
+/// Government's own domain. The JS twin is `TEAMS_HOSTS` in
+/// `MeetingPresence.mjs`; keep the two in step.
 const MEETING_PROVIDERS: &[&str] = &[
-    "meet.google.com", "teams.microsoft.com",
-    "teams.live.com", "webex.com", "meet.jit.si",
+    "meet.google.com",
+    "teams.microsoft.com", "teams.cloud.microsoft", "teams.live.com",
+    "teams.microsoft.us", "teams.microsoftonline.cn",
+    "webex.com", "webexgov.us", "meet.jit.si",
 ];
 
 /// Walks every URL in `text`, in order, and returns the first one whose host
@@ -677,6 +685,24 @@ mod tests {
             assert_eq!(conference_join_url(Some(&url), None), Some(url.clone()), "{host}");
         }
         assert_eq!(conference_join_url(Some("https://zoom-x.de.evil.example/j/1"), None), None);
+    }
+
+    /// Proactively, the same for every other provider's regional cloud, each
+    /// taken from the vendor's own endpoint list rather than guessed.
+    #[test]
+    fn every_providers_regional_domains_are_conferences() {
+        for (host, path) in [
+            ("us05web.zoom.com", "/j/123456789"),
+            ("teams.cloud.microsoft", "/meet/9876"),
+            ("gov.teams.microsoft.us", "/l/meetup-join/x"),
+            ("dod.teams.microsoft.us", "/l/meetup-join/x"),
+            ("teams.microsoftonline.cn", "/l/meetup-join/x"),
+            ("gov.webexgov.us", "/meet/room"),
+        ] {
+            let url = format!("https://{host}{path}");
+            assert_eq!(conference_join_url(Some(&url), None), Some(url.clone()), "{host}");
+        }
+        assert_eq!(conference_join_url(Some("https://teams.microsoft.us.evil.example/l/x"), None), None);
     }
 
     /// `location` still wins over `description` when both carry a link.
