@@ -69,9 +69,12 @@ so hack in the repo checkout, not in `~/.config`.)
 The bar button is OmaCal's own mark, and the popup carries everything the
 app's tray menu does — open, sync now, quit (the latter two need OmaCal ≥
 0.1.10, which accepts `--sync-now` and `--quit` on a second invocation).
-So with this widget installed the tray icon is redundant: turn it off in
-the shell's tray settings. **OmaCal → Settings → Menu bar → Show the tray icon**
-controls the OmaCal widget as well as its native tray icon.
+So with this widget installed the tray icon is redundant: turn it off with
+**OmaCal → Settings → Menu bar → Show the tray icon**. That switch controls
+the native tray icon only — the widget stays. Whether the widget is in the
+bar at all is the shell's decision, made in the bar's own widget settings
+like any other widget. (Between v3.3.0 and v3.5.0 the switch hid both,
+which made "widget on, tray off" impossible; that was a mistake.)
 
 The `maxEvents` setting (default 12) caps each of the agenda's past and
 remaining slices; edit it from the bar's widget settings or in `shell.json`.

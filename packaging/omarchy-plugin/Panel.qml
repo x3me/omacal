@@ -261,10 +261,14 @@ Panel {
     rowCursor = Math.max(0, Math.min(flatRows.length - 1, rowCursor + dy))
   }
 
-  readonly property bool showTray: !feed || feed.tray_icon !== false
-  visible: showTray
-  onShowTrayChanged: if (!showTray) root.close()
-  implicitWidth: showTray ? button.implicitWidth + (barJoin.visible ? barJoin.implicitWidth : 0) + (barTitle.visible ? barTitle.implicitWidth : 0) : 0
+  // Not gated on the feed's `tray_icon`. That flag is OmaCal's *native* tray
+  // icon, and the widget is not it: with this widget in the bar the tray icon
+  // is the redundant one (README, "One icon, not two"), so the switch that
+  // hides it must leave the widget standing — otherwise the recommended
+  // setup, widget on and tray off, cannot exist. Whether this widget is in
+  // the bar at all is the shell's decision, in its own bar settings, the same
+  // as every other widget here.
+  implicitWidth: button.implicitWidth + (barJoin.visible ? barJoin.implicitWidth : 0) + (barTitle.visible ? barTitle.implicitWidth : 0)
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
