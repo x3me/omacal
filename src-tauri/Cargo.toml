@@ -1,6 +1,6 @@
 [package]
 name = "omacal"
-version = "3.5.0"
+version = "3.5.1"
 description = "A minimal desktop Google Calendar client for Omarchy Linux"
 authors = ["Extreme Labs"]
 edition.workspace = true
