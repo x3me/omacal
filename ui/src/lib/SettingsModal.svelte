@@ -1290,9 +1290,25 @@
         />
         Show the tray icon
       </label>
-      <p class="hint">
-        The tray provides Quit and Sync. Keep another way to access these
-        actions available when hiding it.
+      <!-- What the switch takes with it differs by desktop, and the hint says
+           which — because on macOS the icon *is* the agenda's only door,
+           while on Omarchy the bar widget is a separate thing that stays
+           (v3.3.0–v3.5.0 hid it too, which the widget's README calls a
+           mistake). A single sentence for all three would be wrong on two
+           of them. -->
+      <p class="hint" data-testid="tray-icon-hint">
+        {#if settings?.desktop === 'macos'}
+          On macOS this is the menu-bar item itself: the agenda popup, the
+          meeting label and the Join button all go with it. The app window
+          and its shortcuts stay.
+        {:else if settings?.desktop === 'omarchy'}
+          The bar widget is separate and stays — the tray icon is the
+          redundant one once the widget is there. Add or remove the widget
+          itself in the bar's own settings.
+        {:else}
+          The tray provides Quit and Sync. Keep another way to access these
+          actions available when hiding it.
+        {/if}
       </p>
 
       <label class="check">

@@ -5233,6 +5233,31 @@ test.describe("App: showing today's date", () => {
     await expect(reset).toBeDisabled();
   });
 
+  /**
+   * What "Show the tray icon" takes with it differs by desktop, and the hint
+   * has to say which: on macOS the icon *is* the agenda's only door, on
+   * Omarchy the bar widget is separate and stays. v3.3.0–v3.5.0 coupled the
+   * Omarchy widget to this switch; the wording is the user-facing half of
+   * undoing that.
+   */
+  for (const [desktop, phrase] of [
+    ['macos', 'the agenda popup, the meeting label and the Join button all go with it'],
+    ['omarchy', 'The bar widget is separate and stays'],
+    ['linux', 'Keep another way to access these actions'],
+  ] as const) {
+    test(`the tray-icon hint says what the switch does on ${desktop}`, async ({ page }) => {
+      // The stub reads its settings from sessionStorage at install, so
+      // seeding the desktop there is how a spec chooses one.
+      await page.addInitScript(([k, d]) => sessionStorage.setItem(k, JSON.stringify({ desktop: d })), ['omacal-stub-settings', desktop] as const);
+      await page.goto(app('writable'));
+      await page.getByRole('button', { name: 'Menu' }).click();
+      await page.getByRole('button', { name: 'Settings…' }).click();
+      const modal = page.getByRole('dialog', { name: 'Settings' });
+      await modal.getByRole('tab', { name: 'Menu bar' }).click();
+      await expect(modal.getByTestId('tray-icon-hint')).toContainText(phrase);
+    });
+  }
+
   test("today's date can be asked for, and is remembered", async ({ page }) => {
     // Asked for 2026-09-04. One switch dresses two surfaces: the tray icon
     // *becomes* the date, because a tray host draws icons and nothing else,
