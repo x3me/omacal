@@ -88,10 +88,7 @@ fn sanitize(cmd: &mut Command, appdir: &OsStr) {
 fn zoom_join_uri(raw: &str) -> Option<String> {
     let url = reqwest::Url::parse(raw).ok()?;
     let host = url.host_str()?;
-    if url.scheme() != "https"
-        || !(host.eq_ignore_ascii_case("zoom.us")
-            || host.to_ascii_lowercase().ends_with(".zoom.us"))
-    {
+    if url.scheme() != "https" || !is_zoom_host(host) {
         return None;
     }
 
@@ -179,6 +176,19 @@ fn launch(cmd: &mut Command) -> std::io::Result<()> {
             None => std::thread::sleep(LAUNCHER_POLL),
         }
     }
+}
+
+/// Every domain Zoom itself serves meetings from — the Rust twin of the
+/// widget's `ZOOM_HOSTS` in `MeetingPresence.mjs` (#119). `zoom.us` alone
+/// refused Zoom X, Telekom's German/EU Zoom, plus Zoom for Government and
+/// Zoom China; a meeting on any of them is the same numbered Zoom meeting,
+/// and `zoommtg://` takes the number, not the web host.
+pub(crate) const ZOOM_HOSTS: &[&str] = &["zoom.us", "zoom-x.de", "zoomgov.com", "zoom.com.cn"];
+
+/// Whether `host` is Zoom or a subdomain of one of its domains.
+pub(crate) fn is_zoom_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    ZOOM_HOSTS.iter().any(|z| h == *z || h.ends_with(&format!(".{z}")))
 }
 
 /// Opens one URI with the default handler, the AppImage's environment stripped
@@ -315,6 +325,25 @@ mod tests {
             zoom_join_uri("https://zoom.us/w/987654321?pwd=secret").as_deref(),
             Some("zoommtg://zoom.us/join?action=join&confno=987654321&pwd=secret"),
         );
+    }
+
+    /// Issue #119: the rewrite was keyed on `zoom.us` alone, so a meeting on
+    /// Zoom X, Zoom for Government or Zoom China never reached the native
+    /// client. The protocol takes the meeting number, not the web host, so
+    /// the authority stays `zoom.us` for all of them.
+    #[test]
+    fn every_zoom_domain_is_rewritten_to_the_protocol() {
+        for host in ["uni-kassel.zoom-x.de", "zoom-x.de", "zoomgov.com", "us02web.zoomgov.com", "zoom.com.cn"] {
+            assert_eq!(
+                zoom_join_uri(&format!("https://{host}/j/123456789?pwd=abc")).as_deref(),
+                Some("zoommtg://zoom.us/join?action=join&confno=123456789&pwd=abc"),
+                "{host}",
+            );
+        }
+        // A suffix match, not a substring one.
+        assert!(!is_zoom_host("zoom-x.de.evil.example"));
+        assert!(!is_zoom_host("notzoom.us"));
+        assert!(is_zoom_host("ZOOM.US"), "hosts are case-insensitive");
     }
 
     #[test]

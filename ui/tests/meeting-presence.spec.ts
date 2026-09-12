@@ -16,6 +16,19 @@ test('scheduled time and clicking Join alone never establish window presence', (
   }
 });
 
+/** #119: the presence matcher keyed on `zoom.us` too, so a meeting on Zoom X
+ *  never lit up even with its own numbered window open. */
+test('a meeting on a regional Zoom domain is matched like any Zoom meeting', () => {
+  const zoomX = meeting('https://uni-kassel.zoom-x.de/j/12345678901?pwd=private');
+  const gov = meeting('https://zoomgov.com/j/12345678901');
+  for (const event of [zoomX, gov]) {
+    expect(eventKey(event)).toBe('zoom:12345678901:' + event.start_ms);
+    expect(isPresent(observe([], [window('zoom', 'Zoom Meeting - 123 4567 8901')], [event], now, 5), event, now)).toBe(true);
+  }
+  // A lookalike domain is not Zoom, so it has no key and can never be present.
+  expect(eventKey(meeting('https://zoom-x.de.evil.example/j/12345678901'))).toBe('');
+});
+
 test('a specific meeting window matches its provider and calendar identity', () => {
   for (const [event, win] of [
     [zoom, zm], [zoom, window('zoom', 'Zoom Meeting - 123 4567 8901')],

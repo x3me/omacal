@@ -144,8 +144,10 @@ pub struct FeedEvent {
     pub calendar: Option<String>,
 }
 
+/// Zoom is not in this list: its domains live in `browser::ZOOM_HOSTS`, one
+/// place for the join rewrite and this scan both (#119).
 const MEETING_PROVIDERS: &[&str] = &[
-    "zoom.us", "meet.google.com", "teams.microsoft.com",
+    "meet.google.com", "teams.microsoft.com",
     "teams.live.com", "webex.com", "meet.jit.si",
 ];
 
@@ -213,7 +215,8 @@ fn first_recognised_url(text: &str) -> Option<String> {
             .unwrap_or_default();
 
         if !host.is_empty()
-            && MEETING_PROVIDERS.iter().any(|p| host == *p || host.ends_with(&format!(".{p}")))
+            && (crate::browser::is_zoom_host(&host)
+                || MEETING_PROVIDERS.iter().any(|p| host == *p || host.ends_with(&format!(".{p}"))))
         {
             return Some(url.to_string());
         }
@@ -661,6 +664,19 @@ mod tests {
             ),
             Some("https://us02web.zoom.us/j/123".into()),
         );
+    }
+
+    /// Issue #119, as the reporter reproduced it from the CLI: an event whose
+    /// location is a Zoom X link came back with `"conference": null`, so the
+    /// feed, the tray and the bar never offered Join. Same walk, every Zoom
+    /// domain.
+    #[test]
+    fn a_regional_zoom_link_is_a_conference() {
+        for host in ["uni-kassel.zoom-x.de", "zoomgov.com", "zoom.com.cn"] {
+            let url = format!("https://{host}/j/123456789?pwd=x");
+            assert_eq!(conference_join_url(Some(&url), None), Some(url.clone()), "{host}");
+        }
+        assert_eq!(conference_join_url(Some("https://zoom-x.de.evil.example/j/1"), None), None);
     }
 
     /// `location` still wins over `description` when both carry a link.

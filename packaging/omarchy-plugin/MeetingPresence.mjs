@@ -1,6 +1,16 @@
 // Window presence, not a claim that a provider has connected audio/video.
 // Inputs come from Wayland; nothing is persisted or sent outside the shell.
 const MAX_WINDOWS = 256, MAX_EVENTS = 256, MAX_TEXT = 1024;
+// Every domain Zoom itself serves meetings from (#119). `zoom.us` alone
+// refused Zoom X — Telekom's German/EU Zoom, the one a university runs —
+// and with it Zoom for Government and Zoom China. One list, exported: the
+// app's `location.ts` builds its matcher from this rather than keeping a
+// second, subtly different idea of what a Zoom link is.
+export const ZOOM_HOSTS = ['zoom.us', 'zoom-x.de', 'zoomgov.com', 'zoom.com.cn'];
+export function isZoomHost(host) {
+  const h = typeof host === 'string' ? host.toLowerCase() : '';
+  return ZOOM_HOSTS.some(z => h === z || h.endsWith('.' + z));
+}
 function text(value) {
   return typeof value === 'string' && value.length <= MAX_TEXT
     && !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(value) ? value.trim().toLowerCase() : '';
@@ -16,7 +26,7 @@ function meeting(event) {
     const id = /^\/([a-z]{3}-[a-z]{4}-[a-z]{3})(?:\/|$)/.exec(path)?.[1];
     return id ? { provider: 'meet', id } : null;
   }
-  if (host === 'zoom.us' || host.endsWith('.zoom.us')) {
+  if (isZoomHost(host)) {
     const id = /^\/(?:j|wc\/join)\/(\d{9,11})(?:\/|$)/.exec(path)?.[1];
     return id ? { provider: 'zoom', id } : null;
   }

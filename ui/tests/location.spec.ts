@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { locationLabel, meetingUrl } from '../src/lib/location';
+import { locationLabel, meetingProvider, meetingUrl } from '../src/lib/location';
 
 test.describe('locationLabel', () => {
   test('a plain place is left alone', () => {
@@ -16,6 +16,17 @@ test.describe('locationLabel', () => {
   // `https://us02we…` — the truncation of a URL tells you nothing.
   test('known providers become their name', () => {
     expect(locationLabel('https://us02web.zoom.us/j/123456?pwd=x')).toBe('Zoom');
+    // Issue #119: Zoom serves meetings from four domains, and only one was
+    // recognised. A university on Zoom X could not attach its own links.
+    for (const host of ['uni-kassel.zoom-x.de', 'zoomgov.com', 'us02web.zoomgov.com', 'zoom.com.cn']) {
+      expect(locationLabel(`https://${host}/j/123456789?pwd=x`), host).toBe('Zoom');
+      expect(meetingProvider(`https://${host}/j/123456789`), host).toBe('Zoom');
+      expect(meetingUrl(`Join: https://${host}/j/123456789`), host).toBe(`https://${host}/j/123456789`);
+    }
+    // Suffix match on a real domain, not a substring: a host that merely
+    // contains one of them is somebody else's.
+    expect(meetingProvider('https://zoom-x.de.evil.example/j/123456789')).toBeNull();
+    expect(meetingProvider('https://notzoom.us/j/123456789')).toBeNull();
     expect(locationLabel('https://meet.google.com/abc-defg-hij')).toBe('Google Meet');
     expect(locationLabel('https://teams.microsoft.com/l/meetup-join/x')).toBe('Teams');
   });

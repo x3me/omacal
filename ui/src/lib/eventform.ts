@@ -1456,7 +1456,7 @@ export function videoCallProblem(value: EventFormValue, calendarProvider: string
   }
   if (call.provider === 'zoom') {
     if (!call.uri) return 'Paste the Zoom meeting link before creating the event.';
-    if (meetingProvider(call.uri) !== 'Zoom') return 'That is not a zoom.us meeting link.';
+    if (meetingProvider(call.uri) !== 'Zoom') return 'That is not a Zoom meeting link.';
   }
   return null;
 }

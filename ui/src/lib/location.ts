@@ -1,6 +1,13 @@
+import { ZOOM_HOSTS } from '../../../packaging/omarchy-plugin/MeetingPresence.mjs';
+
 // Matched against the URL's host. Order does not matter; hosts are distinct.
+// Zoom's entry is built from the widget's own list (#119): `zoom.us` alone
+// refused Zoom X, Zoom for Government and Zoom China, and a second copy of
+// the list here is exactly what this file's own comment below warns against.
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const ZOOM_RE = new RegExp(`(^|\\.)(${ZOOM_HOSTS.map(escape).join('|')})$`, 'i');
 const PROVIDERS: Array<[RegExp, string]> = [
-  [/(^|\.)zoom\.us$/i, 'Zoom'],
+  [ZOOM_RE, 'Zoom'],
   [/(^|\.)meet\.google\.com$/i, 'Google Meet'],
   [/(^|\.)teams\.microsoft\.com$/i, 'Teams'],
   [/(^|\.)teams\.live\.com$/i, 'Teams'],

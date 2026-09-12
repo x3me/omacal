@@ -2458,7 +2458,13 @@ test.describe('video calls in the value and on the wire', () => {
     value.videoCall = { provider: 'zoom', uri: null, source: 'new' };
     expect(videoCallProblem(value, 'google')).toContain('Paste the Zoom');
     value.videoCall = { provider: 'zoom', uri: 'https://example.com/room', source: 'new' };
-    expect(videoCallProblem(value, 'google')).toContain('not a zoom.us');
+    // "Zoom", not "zoom.us": the message named one host and the check
+    // refused Zoom's other three (#119).
+    expect(videoCallProblem(value, 'google')).toContain('not a Zoom meeting link');
+    expect(videoCallProblem(value, 'google')).not.toContain('zoom.us');
+    // The reported link, verbatim in shape: Zoom X, Telekom's EU Zoom.
+    value.videoCall = { provider: 'zoom', uri: 'https://uni-kassel.zoom-x.de/j/123456789?pwd=x', source: 'new' };
+    expect(videoCallProblem(value, 'google')).toBeNull();
     expect(sameVideoCall(
       { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'conference' },
       { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'location' },
