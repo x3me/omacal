@@ -2539,7 +2539,7 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Settings…' }).click();
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await expect(modal.getByRole('tab')).toHaveText([
-      'General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications',
+      'General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications', 'About',
     ]);
     const look = ['#appearance', '#window-frame', '#week-view'];
     const behaviour = ['#sync-interval', '#time-format', '#display-tz', '#start-on-login'];
@@ -5260,6 +5260,28 @@ test.describe("App: showing today's date", () => {
 
   /** The three section choices save together, answer beside the control
    *  that asked, and are what the pane shows again afterwards. */
+  test('the About tab says who made OmaCal and opens its two links through the backend', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'About' }).click();
+
+    const pane = modal.getByRole('tabpanel', { name: 'About' });
+    await expect(pane).toContainText('Extreme Labs');
+    await expect(pane).toContainText('open source');
+    await expect(pane).toContainText('Pull requests, issues and feedback are all welcome.');
+    // The running version is the footer's job, on every tab, so About does not repeat it.
+    await expect(modal.getByTestId('app-version')).toBeVisible();
+
+    // A name, never a URL: what the page can send is what the backend can refuse.
+    await pane.getByRole('link', { name: 'GitHub repository' }).click();
+    await pane.getByRole('link', { name: 'omacal.app' }).click();
+    const asked = await page.evaluate(() => window.__harness.calls
+      .filter((c) => c.cmd === 'open_project_link').map((c) => (c.args as { link: string }).link));
+    expect(asked).toEqual(['repository', 'site']);
+  });
+
   test('the agenda popup section choices save and answer beside the control', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();

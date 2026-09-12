@@ -1348,7 +1348,7 @@ test.describe('Header', () => {
 
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await expect(modal).toBeVisible();
-    await expect(modal.getByRole('tab')).toHaveCount(6);
+    await expect(modal.getByRole('tab')).toHaveCount(7);
 
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);

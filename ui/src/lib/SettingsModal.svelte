@@ -729,10 +729,22 @@
 
   // Group controls by what they affect. Menu-bar controls live together;
   // calendar appearance stays separate from provider/account management.
-  const TABS = ['General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications'] as const;
+  const TABS = ['General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications', 'About'] as const;
   type Tab = (typeof TABS)[number];
 
   let tab = $state<Tab>('General');
+
+  /** The About pane's own answer, beside its own links, like every other pane's
+   *  note. Only a failure has anything to say here: a browser coming up is its
+   *  own confirmation. */
+  let aboutNote = $state<string | null>(null);
+  /** The backend holds the addresses; this names which of the two it wants.
+   *  `open_conference`'s rule, and `open_latest_release`'s before it: a page
+   *  that can only name a link cannot point the browser somewhere of its own. */
+  const openLink = (link: 'repository' | 'site') => {
+    aboutNote = null;
+    void invoke('open_project_link', { link }).catch(e => { aboutNote = String(e); });
+  };
 
   let panelEl: HTMLDivElement | undefined = $state();
   let preferredHeight = $state<number | null>(null);
@@ -1613,6 +1625,25 @@
         {/if}
       </div>
 
+    {:else if pane === 'About'}
+      <div class="about">
+        <p>
+          OmaCal is a native desktop calendar for Google Calendar, iCloud and
+          any CalDAV server. Your events live in a database on this machine and
+          your account tokens in your keyring, so nothing of yours passes
+          through a server of ours.
+        </p>
+        <p>
+          It is made by Extreme Labs and it is open source, under the MIT
+          licence. Pull requests, issues and feedback are all welcome.
+        </p>
+        <div class="links">
+          <a href="https://github.com/x3me/omacal" onclick={e => { e.preventDefault(); openLink('repository'); }}>GitHub repository</a>
+          <a href="https://omacal.app" onclick={e => { e.preventDefault(); openLink('site'); }}>omacal.app</a>
+        </div>
+        {#if aboutNote}<p class="note err" role="alert" data-testid="about-note">{aboutNote}</p>{/if}
+      </div>
+
     {:else}
       <label class="check">
         <input
@@ -1710,6 +1741,11 @@
   .visible-hours-controls label { display: flex; flex-direction: column; gap: 8px; }
   .format-template { box-sizing: border-box; width: 100%; min-width: 0; }
   .hint a { color: var(--accent); }
+  /* Prose, not controls: a reading measure and room to breathe, unlike the
+     dense label-and-field rows every other pane is made of. */
+  .about p { margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
+  .about .links { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 4px; }
+  .about a { color: var(--accent); }
   .appearance-section { align-self: stretch; display: flex; flex-direction: column;
                         gap: 14px; padding: 8px 0 16px; margin-top: 16px; }
   .appearance-section + .appearance-section {

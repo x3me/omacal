@@ -1738,6 +1738,7 @@ pub fn run() {
             settings::set_menubar_date_format,
             settings::set_menubar_label_format,
             settings::open_date_format_guide,
+            settings::open_project_link,
             settings::set_temperature_unit,
             settings::set_default_view,
             settings::set_default_view_follows_last,

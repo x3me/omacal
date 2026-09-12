@@ -1071,6 +1071,8 @@ export function installTauriStub(scenario: string): Harness {
         settings = saveSettings({ ...settings, menubarLabelFormat: args.template as string });
         return heldMenubar(cmd, settings);
       case 'open_date_format_guide': return null;
+      // The backend resolves the address; the stub only records which was asked for.
+      case 'open_project_link': return null;
       case 'set_menubar_date_format':
         settings = saveSettings({ ...settings, menubarDateFormat: args.format as typeof settings.menubarDateFormat, menubarDateCustom: args.custom as string });
         return settings;

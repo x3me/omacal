@@ -1528,6 +1528,24 @@ pub fn open_date_format_guide() -> Result<(), String> {
         .map_err(|e| crate::errors::user_facing(&e.into()))
 }
 
+/// The two addresses the About pane offers, resolved here rather than in the
+/// webview.
+///
+/// `open_conference`'s rule, and `open_latest_release`'s before it: the UI
+/// sends a *name*, never a URL, so a link the page could be tricked into
+/// building is not a link this can open. The pair is exhaustive and the
+/// refusal is deliberately not in `errors.rs`'s allowlist, because a name the
+/// shipped UI cannot send is a bug rather than something to explain.
+#[tauri::command]
+pub fn open_project_link(link: String) -> Result<(), String> {
+    let url = match link.as_str() {
+        "repository" => "https://github.com/x3me/omacal",
+        "site" => "https://omacal.app",
+        _ => return Err("that link is not available".into()),
+    };
+    crate::browser::open_external(url).map_err(|e| crate::errors::user_facing(&e.into()))
+}
+
 /// Persist the snapshot before notifying either popup; neither waits for a poll.
 pub(crate) async fn refresh_menu_surfaces(app: &tauri::AppHandle, state: &AppState) {
     use tauri::Emitter;
@@ -1843,6 +1861,16 @@ mod tests {
         // A hand-edited row out of range reads as the default, like the Join window.
         write(&p, "menubar_days_ahead", "40").await.unwrap();
         assert_eq!(read_settings(&p).await.menubar_days_ahead, 0);
+    }
+
+    /// The About pane's links, as a pair rather than as a URL the page sends.
+    /// A name that is not one of the two is refused rather than opened, which
+    /// is the whole point of resolving them here.
+    #[test]
+    fn only_the_two_project_links_can_be_opened() {
+        assert!(open_project_link("https://example.com".into()).is_err());
+        assert!(open_project_link("Repository".into()).is_err());
+        assert!(open_project_link(String::new()).is_err());
     }
 
     #[tokio::test]
