@@ -4,7 +4,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
   import { applyPalette } from './theme';
-  import { progress, joinable, uniqueAllDay, type Event } from '../../../packaging/omarchy-plugin/Timeline.mjs';
+  import { agendaSections, progress, joinable, uniqueAllDay, type Event } from '../../../packaging/omarchy-plugin/Timeline.mjs';
 
   type Panel = { agenda_days?: { date_label: string; events: Event[] }[]; truncated?: boolean; day_start_ms: number; day_end_ms: number; timezone: string;
     time_format: '12h' | '24h'; date_format?: DateFormat; label: boolean; join_minutes: number; events: Event[] };
@@ -13,11 +13,13 @@
   let now = $state(Date.now());
   let error = $state('');
   const panel = $derived(feed?.panel);
-  const today = $derived(uniqueAllDay(panel?.events ?? []));
-  const timed = $derived(today.filter(e => !e.all_day));
-  const active = $derived(timed.find(e => e.start_ms <= now && e.end_ms > now));
-  const nowIndex = $derived(timed.findIndex(e => e.end_ms > now));
-  const allDay = $derived(today.filter(e => e.all_day));
+  // Whether the fold of finished events is open. Renderer state, not a
+  // setting: a fold that stayed open across popups would not be a fold.
+  let earlierOpen = $state(false);
+  const sections = $derived(panel ? agendaSections(panel, now, { earlierOpen }) : []);
+  const todayTimed = $derived(uniqueAllDay(panel?.events ?? []).filter(e => !e.all_day));
+  const active = $derived(todayTimed.find(e => e.start_ms <= now && e.end_ms > now));
+  const hasOngoing = $derived(sections.some(s => s.title === 'ONGOING'));
   const call = $derived(feed ? joinable(feed.events, now, panel?.join_minutes ?? 5) : null);
   const heading = $derived(panel ? formatDate(panel.day_start_ms, panel.date_format, { weekday: 'long', month: 'short', day: 'numeric', timeZone: panel.timezone }) : 'Today');
   function clock(ms: number) {
@@ -79,22 +81,32 @@
     {#if !feed}<p class="empty">Loading calendar…</p>
     {:else}
       <div class="agenda">
-        {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel!.day_start_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>{/if}
-        {#if timed.length === 0}<p class="empty">No timed events today</p>{/if}
-        {#each timed as event, i}
-          {#if active && i === nowIndex}{@render nowMarker()}{/if}
-          <button class="agenda-row" class:past={event.end_ms <= now} style:--event-color={color(event)} onclick={() => action(date(event.start_ms))}>
-            <time>{clock(event.start_ms)}</time><span><strong>{event.title ?? '(no title)'}</strong><small>{event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{event.calendar ? ` · ${event.calendar}` : ''}</small></span>
-          </button>
-        {/each}
-        {#each panel?.agenda_days?.slice(1) ?? [] as day, i}
-          <small class="section-label">{i === 0 ? 'TOMORROW' : day.date_label}</small>
-          {#each uniqueAllDay(day.events) as event}
-            <button class="agenda-row" style:--event-color={color(event)} onclick={() => action(date(event.start_ms))}>
-              <time>{event.all_day ? 'All day' : clock(event.start_ms)}</time>
-              <span><strong>{event.title ?? '(no title)'}</strong><small>{event.calendar ?? ''}</small></span>
-            </button>
-          {/each}
+        {#if sections.length === 0}<p class="empty">Nothing coming up</p>{/if}
+        {#each sections as sec (sec.title)}
+          {#if sec.kind === 'folded'}
+            <!-- One line for what has happened, so it never pushes what is
+                 next down; a click opens it, for the rare "did I miss
+                 something". -->
+            <button class="fold" onclick={() => (earlierOpen = true)}>{sec.count} earlier today · show</button>
+          {:else if sec.title === 'ALL DAY'}
+            <!-- Today's all-day events keep their compact block: a title is
+                 all there is to say, and the day is the one already open. -->
+            <div class="all-day"><small>ALL DAY</small>{#each sec.rows as event}<button onclick={() => action(date(sec.anchor_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>
+          {:else}
+            {#if sec.title !== 'ONGOING' && sec.title !== 'UPCOMING'}<small class="section-label">{sec.title}</small>{/if}
+            {#if sec.title === 'ONGOING' || (sec.title === 'UPCOMING' && !hasOngoing)}{@render nowMarker()}{/if}
+            {#each sec.rows as event}
+              <button class="agenda-row" class:past={event.end_ms <= now} style:--event-color={color(event)} onclick={() => action(date(event.all_day ? sec.anchor_ms : event.start_ms))}>
+                <time>{event.all_day ? 'All day' : clock(event.start_ms)}</time>
+                <span><strong>{event.title ?? '(no title)'}</strong><small>{event.all_day ? (event.calendar ?? '') : event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{!event.all_day && event.calendar ? ` · ${event.calendar}` : ''}</small></span>
+              </button>
+            {/each}
+            {#if sec.more > 0}
+              <!-- The cut is the feed's `per_day`, the same one the Omarchy
+                   widget cuts at; the row opens OmaCal on that day. -->
+              <button class="more" onclick={() => action(date(sec.anchor_ms))}>+{sec.more} more · open OmaCal</button>
+            {/if}
+          {/if}
         {/each}
       </div>
     {/if}
@@ -124,6 +136,8 @@
   .join { background: var(--accent, #87b7ff); color: var(--on-accent, #10151c); flex-shrink: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
   .scroll { overflow: auto; flex: 1; min-height: 0; } footer { border-top: 1px solid var(--hairline, #444); padding-top: 8px; } footer button:first-child { margin-right: auto; }
   .past { opacity: .5; }
+  .fold, .more { width: 100%; text-align: left; color: var(--muted, #999); font-size: 12px; padding: 8px 8px; }
+  .fold:hover, .more:hover { color: var(--text, #e5e7eb); }
   .agenda-row { display: flex; width: 100%; text-align: left; align-items: center; gap: 12px; padding: 12px 8px; position: relative; border-left: 3px solid var(--event-color); margin: 5px 0; overflow: hidden; }
   time { width: 66px; flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 12px; } .agenda-row > span { min-width: 0; } .agenda-row strong, .agenda-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } small { color: var(--muted, #999); font-size: 11px; } .agenda-row small { margin-top: 4px; }
   .now-marker { display: flex; align-items: center; gap: 10px; color: var(--text, #e5e7eb); padding: 6px 0; margin: 8px 0; font-size: 11px; font-weight: 600; }

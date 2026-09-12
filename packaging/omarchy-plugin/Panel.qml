@@ -108,7 +108,15 @@ Panel {
   // — a Quit that silently no-ops reads as broken, and was reported as such.
   property bool appRunning: true
   readonly property var taskRows: Model.taskRows(feed, nowMs)
-  readonly property var panelSections: Model.agendaSections(feed, nowMs, root.setting("maxEvents", 12))
+  // Whether the fold of finished events is open. Popup state, not a setting;
+  // it closes with the popup, which is what makes it a fold.
+  property bool earlierOpen: false
+  // One plan for both surfaces (Timeline.agendaSections): what is folded,
+  // where a day is cut and what "+N more" points at are decided there. The
+  // Model.js path stays for a feed from an app older than the panel.
+  readonly property var panelSections: (feed && feed.panel && feed.panel.agenda_days)
+    ? Timeline.agendaSections(feed.panel, nowMs, { earlierOpen: root.earlierOpen })
+    : Model.agendaSections(feed, nowMs, root.setting("maxEvents", 12))
   readonly property var runningEvent: Model.current(events, nowMs)
   readonly property var nextEvent: Model.nextAhead(events, nowMs)
   readonly property bool empty: panelSections.length === 0
@@ -754,6 +762,23 @@ Panel {
                     sectionTitle: sectionColumn.modelData.title
                   }
                 }
+
+                // The fold: what has happened, as one line that opens on
+                // click, so it never pushes what is next down.
+                NoteRow {
+                  visible: sectionColumn.modelData.kind === "folded"
+                  width: sectionColumn.width
+                  text: (sectionColumn.modelData.count || 0) + " earlier today · show"
+                  onActivated: root.earlierOpen = true
+                }
+                // The cut, at the feed's per_day, the same row the macOS
+                // popup cuts at; opens OmaCal on that day.
+                NoteRow {
+                  visible: (sectionColumn.modelData.more || 0) > 0
+                  width: sectionColumn.width
+                  text: "+" + (sectionColumn.modelData.more || 0) + " more · open OmaCal"
+                  onActivated: root.openApp(Model.formattedDate(sectionColumn.modelData.anchor_ms, "iso"))
+                }
               }
             }
           }
@@ -837,6 +862,26 @@ Panel {
 
         }
       }
+    }
+  }
+
+  // A single clickable line of muted text — the fold and the "+N more" row.
+  component NoteRow: CursorSurface {
+    id: note
+    property alias text: noteText.text
+    signal activated()
+    hasCursor: false
+    foreground: root.foreground
+    implicitHeight: noteText.implicitHeight + Style.spacing.rowPaddingX
+    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: note.activated() }
+    Text {
+      id: noteText
+      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(10)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      elide: Text.ElideRight
     }
   }
 

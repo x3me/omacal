@@ -71,21 +71,21 @@ test('zero-duration events keep the feed available in every agenda list', () => 
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 
-test('agenda feed accepts five days and rejects invalid or oversized day groups', () => {
+test('agenda feed accepts eight days and rejects invalid or oversized day groups', () => {
   const dir = mkdtempSync(join(tmpdir(), 'omacal-agenda-feed-'));
   try {
     const path = join(dir, 'feed');
     const event = {title: '<b>Name</b>\u202e', start_ms: 1, end_ms: 2, all_day: false};
     const day = {date_label: 'Sep 7', events: [event]};
     const panel = {events: [], day_view: false, label: true, day_start_ms: 0, day_end_ms: 86400000, join_minutes: 5, clocks: {}, hours: []};
-    for (const days of [null, [null], Array(8).fill(day), [{...day, events: [null]}],
+    for (const days of [null, [null], Array(9).fill(day), [{...day, events: [null]}],
       [{...day, events: Array(101).fill(event)}, {...day, events: Array(100).fill(event)}]]) {
       writeFileSync(path, JSON.stringify({events: [], panel: {...panel, agenda_days: days}}));
       expect(spawnSync('/usr/bin/python3', [helper, path]).status).not.toBe(0);
     }
-    writeFileSync(path, JSON.stringify({events: [], panel: {...panel, agenda_days: Array(5).fill(day)}}));
+    writeFileSync(path, JSON.stringify({events: [], panel: {...panel, agenda_days: Array(8).fill(day)}}));
     const result = spawnSync('/usr/bin/python3', [helper, path], {encoding:'utf8'});
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).panel.agenda_days[4].events[0].title).toBe('<b>Name</b>');
+    expect(JSON.parse(result.stdout).panel.agenda_days[7].events[0].title).toBe('<b>Name</b>');
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });

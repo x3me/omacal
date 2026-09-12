@@ -12,3 +12,14 @@ export function countdownDuration(minutes: number): string;
 
 export const DEFAULT_MEETING_FORMAT: string;
 export function meetingLabel(template: string, values: Record<string, string>): string;
+
+export const PER_DAY_CAP: number;
+export interface AgendaPanel<T extends Event = Event> {
+  agenda_days?: { date_label: string; events: T[] }[];
+  day_start_ms: number;
+  earlier?: string; tomorrow?: boolean; days_ahead?: number; per_day?: number;
+}
+export interface AgendaSection<T extends Event = Event> {
+  title: string; kind: 'rows' | 'folded'; rows: T[]; more: number; anchor_ms: number; count?: number;
+}
+export function agendaSections<T extends Event>(panel: AgendaPanel<T> | null | undefined, now: number, opts?: { earlierOpen?: boolean }): AgendaSection<T>[];

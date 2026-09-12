@@ -102,9 +102,9 @@ export type Harness = {
    *  seconds for it, and the pane now says so while that happens. A stub that
    *  answers instantly cannot produce the pause the message exists for.
    *  Mirrors `holdNextCalendarCall`; it is not a second mechanism. */
-  holdNextMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format'): void;
+  holdNextMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format' | 'set_menubar_sections'): void;
   /** Answer the parked menu-bar write and let its `.then` chain run. */
-  releaseMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format'): Promise<void>;
+  releaseMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format' | 'set_menubar_sections'): Promise<void>;
   holdNextSettings(): void;
   /** Releases the parked `get_settings` call, answering with the settings as
    *  the stub now holds them. */
@@ -617,6 +617,9 @@ type StubSettings = {
   showDate: boolean;
   menubarLabel?: boolean;
   menubarJoinMinutes?: number;
+  menubarEarlier?: 'folded' | 'off';
+  menubarTomorrow?: boolean;
+  menubarDaysAhead?: number;
   hourHeight: number;
   fallbackReminderMinutes: number[];
   defaultCalendarId: number | null;
@@ -698,6 +701,10 @@ const DEFAULT_SETTINGS: StubSettings = {
   menubarDateFormat: 'general',
   menubarDateCustom: '%-d',
   menubarLabelFormat: '{title} @ {time}  {countdown}',
+  // The glance defaults, so every existing popup spec keeps its shape.
+  menubarEarlier: 'folded',
+  menubarTomorrow: true,
+  menubarDaysAhead: 0,
   // The week omacal has always drawn, so every golden holds.
   weekStart: 'monday',
   weekStartsToday: false,
@@ -1022,6 +1029,10 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_menubar_preferences':
         settings = saveSettings({ ...settings,
           menubarLabel: args.label as boolean, menubarJoinMinutes: args.joinMinutes as number });
+        return heldMenubar(cmd, settings);
+      case 'set_menubar_sections':
+        settings = saveSettings({ ...settings,
+          menubarEarlier: args.earlier as 'folded' | 'off', menubarTomorrow: args.tomorrow as boolean, menubarDaysAhead: args.daysAhead as number });
         return heldMenubar(cmd, settings);
       case 'set_show_date':
         settings = saveSettings({ ...settings, showDate: args.on as boolean });

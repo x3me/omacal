@@ -168,6 +168,12 @@ export type AppSettings = {
   showDate: boolean;
   menubarLabel?: boolean;
   menubarJoinMinutes?: number;
+  /** The agenda popups' section choices — the Omarchy widget and the macOS
+   *  menu bar alike, through the feed. Today is always shown and is not a
+   *  choice; these are what comes before and after it. */
+  menubarEarlier?: 'folded' | 'off';
+  menubarTomorrow?: boolean;
+  menubarDaysAhead?: number;
   /** Which palette the app wears. `'auto'` by default — omacal has no theme
    *  of its own and wears Omarchy's, which is exactly why the other two rows
    *  exist: off Omarchy there was no theme to wear and dark was the only
@@ -381,6 +387,8 @@ export const setDateFormatPreference = (format: DateFormat) => invoke<AppSetting
 export const setVisibleHours = (start: number, end: number) => invoke<AppSettings>("set_visible_hours", { start, end });
 export const setMenubarPreferences = (label: boolean, joinMinutes: number) =>
   invoke<AppSettings>('set_menubar_preferences', { label, joinMinutes });
+export const setMenubarSections = (earlier: 'folded' | 'off', tomorrow: boolean, daysAhead: number) =>
+  invoke<AppSettings>('set_menubar_sections', { earlier, tomorrow, daysAhead });
 
 
 export const setMenubarDateFormat = (format: AppSettings['menubarDateFormat'], custom: string) => invoke<AppSettings>('set_menubar_date_format', { format, custom });

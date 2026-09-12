@@ -85,6 +85,13 @@ pub struct FeedPanel {
     pub label: bool,
     pub label_format: String,
     pub join_minutes: u32,
+    /// The three section choices (`settings::AppSettings`), and the fixed
+    /// per-day cap for days other than today — carried in the feed so both
+    /// renderers cut at the same row and say "+N more" about the same N.
+    pub earlier: String,
+    pub tomorrow: bool,
+    pub days_ahead: u32,
+    pub per_day: u32,
     pub events: Vec<FeedEvent>,
 }
 
@@ -409,6 +416,12 @@ pub fn refresh_soon(pool: SqlitePool, demo: bool) {
 /// reader (spec 2026-08-29): the tray needs this in-process rather than
 /// parsed back out of the JSON it would otherwise race, and two call sites
 /// assembling their own "upcoming" would be two definitions of it.
+/// Days after today the agenda carries. See the loop in [`current`].
+pub(crate) const AGENDA_LOOKAHEAD_DAYS: usize = 7;
+/// Rows a day other than today shows before "+N more". Today is never cut:
+/// missing a meeting is worse than a long list.
+pub(crate) const PER_DAY_CAP: u32 = 6;
+
 pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Feed> {
     let stored =
         omacal_store::events_in_window(pool, now_ms, now_ms.saturating_add(HORIZON_MS)).await?;
@@ -437,7 +450,12 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     let mut agenda_date = today;
     let mut remaining = 200usize;
     let mut agenda_truncated = false;
-    for _ in 0..settings.week_view_days {
+    // Today plus a fixed week ahead, whatever the Week view shows. The
+    // renderers decide how much of it to draw (`Timeline.agendaSections`):
+    // the "next day with anything" rule needs the lookahead even when the
+    // user asked for no further days. Tying this to `week_view_days` was
+    // how the popups came to list seven days nobody chose (v3.3.0–v3.5.1).
+    for _ in 0..=AGENDA_LOOKAHEAD_DAYS {
         let from = agenda_date.to_zoned(tz.clone())?.timestamp().as_millisecond();
         let next = agenda_date.tomorrow()?;
         let to = next.to_zoned(tz.clone())?.timestamp().as_millisecond();
@@ -459,6 +477,8 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         time_format: settings.time_format,
         label_format: settings.menubar_label_format.clone(),
         label: settings.menubar_label, join_minutes: settings.menubar_join_minutes,
+        earlier: settings.menubar_earlier.as_str().into(), tomorrow: settings.menubar_tomorrow,
+        days_ahead: settings.menubar_days_ahead, per_day: PER_DAY_CAP,
         events: day.events,
     });
     feed.tray_icon = settings.tray_icon;
@@ -882,15 +902,24 @@ mod today_field_tests {
     /// zone is the app's setting, and a widget reading the desktop's clock
     /// would disagree with the grid beside it for hours at a time.
     #[tokio::test]
-    async fn agenda_horizon_follows_week_view_days() {
+    /// The agenda carries today plus a week whatever the Week view shows:
+    /// what the popups *draw* is the user's section choice, and the "next
+    /// day with anything" rule needs the lookahead regardless.
+    async fn the_agenda_carries_a_week_whatever_the_week_view_shows() {
         let pool = omacal_store::connect_memory().await.unwrap();
         for count in [3, 5, 7] {
             sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('week_view_days', ?1)")
                 .bind(count.to_string()).execute(&pool).await.unwrap();
             let panel = current(&pool, 1_786_352_400_000).await.unwrap().panel.unwrap();
-            assert_eq!(panel.agenda_days.len(), count);
+            assert_eq!(panel.agenda_days.len(), 1 + AGENDA_LOOKAHEAD_DAYS);
             assert!(panel.agenda_days.windows(2).all(|d| d[0].date_label != d[1].date_label));
+            assert_eq!((panel.earlier.as_str(), panel.tomorrow, panel.days_ahead, panel.per_day), ("folded", true, 0, PER_DAY_CAP));
         }
+        for (key, value) in [("menubar_earlier", "off"), ("menubar_tomorrow", "0"), ("menubar_days_ahead", "2")] {
+            crate::settings::write(&pool, key, value).await.unwrap();
+        }
+        let panel = current(&pool, 1_786_352_400_000).await.unwrap().panel.unwrap();
+        assert_eq!((panel.earlier.as_str(), panel.tomorrow, panel.days_ahead), ("off", false, 2));
     }
 
     #[tokio::test]

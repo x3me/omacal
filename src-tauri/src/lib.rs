@@ -1726,6 +1726,7 @@ pub fn run() {
             settings::set_hour_height,
             settings::set_show_date,
             settings::set_menubar_preferences,
+            settings::set_menubar_sections,
             menubar::menubar_feed,
             menubar::menubar_action,
             settings::set_fallback_reminders,

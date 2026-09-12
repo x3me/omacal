@@ -54,7 +54,7 @@ def read_feed(path):
             raise ValueError('invalid day')
         if 'agenda_days' in panel:
             days = panel['agenda_days']
-            if not isinstance(days, list) or not 1 <= len(days) <= 7 or not all(
+            if not isinstance(days, list) or not 1 <= len(days) <= 8 or not all(
                 isinstance(d, dict) and isinstance(d.get('date_label'), str) and events_valid(d.get('events')) for d in days
             ) or sum(len(d['events']) for d in days) > 200:
                 raise ValueError('invalid agenda days')

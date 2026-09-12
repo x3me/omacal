@@ -76,11 +76,15 @@ bar at all is the shell's decision, made in the bar's own widget settings
 like any other widget. (Between v3.3.0 and v3.5.0 the switch hid both,
 which made "widget on, tray off" impossible; that was a mistake.)
 
-The `maxEvents` setting (default 12) caps each of the agenda's past and
-remaining slices; edit it from the bar's widget settings or in `shell.json`.
-The agenda snapshot includes completed events, capped at 200 with a visible
-notice if there are more. Times use OmaCal's display clock. The original
-upcoming-only feed remains compatible with older readers.
+What the popup shows is chosen in **OmaCal → Settings → Menu bar**, and the
+same choice drives the macOS menu bar: today is always complete; finished
+events fold into one line ("3 earlier today", opened with a click) or hide;
+tomorrow is on or off; and 0–6 further days follow. Days other than today
+show six events, then "+N more" opens OmaCal on that day. When today is
+over, the nearest later day with anything takes its place. The widget's old
+`maxEvents` shell setting only applies to a feed from an app older than
+v3.3.0; it is otherwise ignored. The agenda snapshot is capped at 200 events
+with a visible notice if there are more. Times use OmaCal's display clock.
 
 `Timeline.mjs` supplies the same elapsed-progress and Join-window
 calculations to this widget and the macOS webview. The app embeds it and

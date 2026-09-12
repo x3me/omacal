@@ -5258,6 +5258,39 @@ test.describe("App: showing today's date", () => {
     });
   }
 
+  /** The three section choices save together, answer beside the control
+   *  that asked, and are what the pane shows again afterwards. */
+  test('the agenda popup section choices save and answer beside the control', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+
+    await modal.getByLabel('Further days').selectOption('2');
+    await expect(modal.getByTestId('menubar-sections-note')).toHaveText('Saved');
+    await modal.getByLabel('Tomorrow', { exact: true }).uncheck();
+    await expect(modal.getByTestId('menubar-sections-note')).toHaveText('Saved');
+    await modal.getByLabel('Earlier today').selectOption('off');
+    await expect(modal.getByTestId('menubar-sections-note')).toHaveText('Saved');
+
+    const calls = await page.evaluate(() => window.__harness.calls
+      .filter((c) => c.cmd === 'set_menubar_sections').map((c) => c.args));
+    expect(calls).toEqual([
+      { earlier: 'folded', tomorrow: true, daysAhead: 2 },
+      { earlier: 'folded', tomorrow: false, daysAhead: 2 },
+      { earlier: 'off', tomorrow: false, daysAhead: 2 },
+    ]);
+
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    await expect(modal.getByLabel('Further days')).toHaveValue('2');
+    await expect(modal.getByLabel('Tomorrow', { exact: true })).not.toBeChecked();
+    await expect(modal.getByLabel('Earlier today')).toHaveValue('off');
+  });
+
   test("today's date can be asked for, and is remembered", async ({ page }) => {
     // Asked for 2026-09-04. One switch dresses two surfaces: the tray icon
     // *becomes* the date, because a tray host draws icons and nothing else,

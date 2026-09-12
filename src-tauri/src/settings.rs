@@ -423,7 +423,23 @@ impl WeekStart {
 /// edited by hand with `sqlite3` — which the platform guides documented as the
 /// only way to change this until now — and reporting the clamped value here
 /// would make the form silently disagree with the database it is editing.
+/// How finished events show in the agenda popups: folded into one line
+/// ("3 earlier today", opened on click) or not at all. Not "expanded": the
+/// fold is what keeps what has happened from pushing what is next down, and
+/// one click is the cost of the rare "did I miss something".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MenubarEarlier { Folded, Off }
+
+impl MenubarEarlier {
+    pub(crate) fn as_str(self) -> &'static str { match self { Self::Folded => "folded", Self::Off => "off" } }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
+/// How finished events show in the agenda popups: folded into one line
+/// ("3 earlier today", opened on click) or not at all. Not "expanded": the
+/// fold is what keeps what has happened from pushing what is next down, and
+/// one click is the cost of the rare "did I miss something".
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub sync_interval_ms: i64,
@@ -451,6 +467,15 @@ pub struct AppSettings {
     pub show_date: bool,
     pub menubar_label: bool,
     pub menubar_join_minutes: u32,
+    /// The three choices the agenda popups (Omarchy widget, macOS menu bar)
+    /// leave to the user — see `Timeline.agendaSections`, which both surfaces
+    /// share. Today is always shown in full and is not a choice.
+    pub menubar_earlier: MenubarEarlier,
+    pub menubar_tomorrow: bool,
+    /// Further days after tomorrow, 0–6. Zero is the default: a bar glance
+    /// is not a planner, and the whole-week horizon the popups showed from
+    /// v3.3.0 was the Week view's day count leaking through, not a choice.
+    pub menubar_days_ahead: u32,
     /// Pixels per hour in Day and Week (2026-09-03): what a pinch,
     /// Ctrl+scroll or Ctrl+=/- left the grid at. Here for `list_mode`'s
     /// reason — a zoom that lasted one session would be redone every
@@ -730,6 +755,13 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         menubar_label: read(pool, "menubar_label").await.as_deref() != Some("0"),
         menubar_join_minutes: read(pool, "menubar_join_minutes").await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 60).unwrap_or(5),
+        menubar_earlier: match read(pool, "menubar_earlier").await.as_deref() {
+            Some("off") => MenubarEarlier::Off,
+            _ => MenubarEarlier::Folded,
+        },
+        menubar_tomorrow: read(pool, "menubar_tomorrow").await.as_deref() != Some("0"),
+        menubar_days_ahead: read(pool, "menubar_days_ahead").await
+            .and_then(|v| v.parse().ok()).filter(|v| *v <= 6).unwrap_or(0),
         // **Clamped, not discarded.** A number outside the range is still an
         // answer to "how tall do you like your hours" — when the floor rose
         // from 30 to 48, discarding sent everyone who had zoomed out past it
@@ -1530,6 +1562,37 @@ pub async fn set_menubar_preferences(
     Ok(read_settings(&state.pool).await)
 }
 
+/// The agenda popups' three section choices, stored atomically like the
+/// label and Join window above and refused — not clamped — outside their
+/// ranges, because each is a picked value rather than a gesture's endpoint.
+#[tauri::command]
+pub async fn set_menubar_sections(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    earlier: String,
+    tomorrow: bool,
+    days_ahead: u32,
+) -> Result<AppSettings, String> {
+    store_menubar_sections(&state.pool, &earlier, tomorrow, days_ahead).await?;
+    refresh_menu_surfaces(&app, &state).await;
+    Ok(read_settings(&state.pool).await)
+}
+
+async fn store_menubar_sections(pool: &SqlitePool, earlier: &str, tomorrow: bool, days_ahead: u32) -> Result<(), String> {
+    if !matches!(earlier, "folded" | "off") { return Err("Earlier today is either folded or off.".into()); }
+    if days_ahead > 6 { return Err("Show up to six further days.".into()); }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    for (key, value) in [
+        ("menubar_earlier", earlier.to_string()),
+        ("menubar_tomorrow", if tomorrow { "1".into() } else { "0".into() }),
+        ("menubar_days_ahead", days_ahead.to_string()),
+    ] {
+        sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(key).bind(value).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
 async fn store_menubar_preferences(pool: &SqlitePool, label: bool, join_minutes: u32) -> Result<(), String> {
     if join_minutes > 60 { return Err("Choose a Join window from 0 to 60 minutes.".into()); }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -1760,6 +1823,26 @@ mod tests {
             write(&p, "visible_hours", value).await.unwrap();
             assert_eq!(visible_hours(&p).await, (0, 24));
         }
+    }
+
+    #[tokio::test]
+    async fn menubar_sections_default_to_a_glance_and_refuse_out_of_range_values() {
+        let p = pool().await;
+        let d = read_settings(&p).await;
+        assert_eq!(d.menubar_earlier, MenubarEarlier::Folded);
+        assert!(d.menubar_tomorrow);
+        assert_eq!(d.menubar_days_ahead, 0, "a glance is not a planner");
+        store_menubar_sections(&p, "off", false, 3).await.unwrap();
+        let s = read_settings(&p).await;
+        assert_eq!((s.menubar_earlier, s.menubar_tomorrow, s.menubar_days_ahead), (MenubarEarlier::Off, false, 3));
+        // Refused, and atomically: nothing of a bad write lands.
+        assert!(store_menubar_sections(&p, "expanded", true, 1).await.is_err());
+        assert!(store_menubar_sections(&p, "folded", true, 7).await.is_err());
+        let s = read_settings(&p).await;
+        assert_eq!((s.menubar_earlier, s.menubar_tomorrow, s.menubar_days_ahead), (MenubarEarlier::Off, false, 3));
+        // A hand-edited row out of range reads as the default, like the Join window.
+        write(&p, "menubar_days_ahead", "40").await.unwrap();
+        assert_eq!(read_settings(&p).await.menubar_days_ahead, 0);
     }
 
     #[tokio::test]

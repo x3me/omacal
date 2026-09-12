@@ -24,7 +24,7 @@
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setShowDate, setTrayIcon, setWeatherEnabled, setWeekStart,
+    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setWeatherEnabled, setWeekStart,
     setWeekStartsToday, setWeekViewDays, setVisibleHours,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
@@ -103,6 +103,25 @@
   let formatNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let joinNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let menubarBusy = $state(false);
+  /** The agenda popup's three section choices, saved together like the label
+   *  and Join window: the backend stores them in one transaction. `where`
+   *  puts the answer beside the control that asked. */
+  let sectionsNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
+  let sectionsWhere = $state<'earlier' | 'tomorrow' | 'days'>('days');
+  async function saveSections(patch: { earlier?: 'folded' | 'off'; tomorrow?: boolean; daysAhead?: number }, where: 'earlier' | 'tomorrow' | 'days') {
+    const earlier = patch.earlier ?? settings?.menubarEarlier ?? 'folded';
+    const tomorrow = patch.tomorrow ?? settings?.menubarTomorrow ?? true;
+    const daysAhead = patch.daysAhead ?? settings?.menubarDaysAhead ?? 0;
+    sectionsWhere = where;
+    menubarBusy = true;
+    sectionsNote = { text: 'Applying…', kind: 'info' };
+    try {
+      settings = await setMenubarSections(earlier, tomorrow, daysAhead);
+      onsettingschange?.(settings);
+      sectionsNote = { text: 'Saved', kind: 'info' };
+    } catch (e) { sectionsNote = { text: String(e), kind: 'error' }; }
+    finally { menubarBusy = false; }
+  }
   /** Whether the format box holds something the bar has not been told about.
    *  What makes Save mean "there is something to save" rather than being a
    *  button that is always there and usually does nothing. */
@@ -1420,6 +1439,44 @@
           {/if}
         </div>
         <p class="hint">Join stays available while the meeting is running. These preferences apply to the {settings?.desktop === 'macos' ? 'macOS menu bar' : settings?.desktop === 'omarchy' ? 'Omarchy widget' : 'menu bar'}.</p>
+      </section>
+
+      <!-- What the agenda popup shows. Today is not a choice — it is the
+           reason the popup exists and is never cut. These are the three
+           things worth deciding around it, and the defaults are a glance:
+           finished events folded to one line, tomorrow on, nothing further.
+           The whole-week list the popups showed from v3.3.0 was the Week
+           view's day count leaking through, not anybody's choice. -->
+      <section class="appearance-section" aria-labelledby="agenda-popup-heading">
+        <h2 id="agenda-popup-heading">Agenda popup</h2>
+        <p class="hint">Today is always shown in full. When today is over, the next day with anything takes its place.</p>
+        <div class="inline">
+          <label class="lab" for="menubar-earlier">Earlier today</label>
+          <select id="menubar-earlier" disabled={!settings || menubarBusy} value={settings?.menubarEarlier ?? 'folded'}
+            onchange={(e) => saveSections({ earlier: e.currentTarget.value as 'folded' | 'off' }, 'earlier')}>
+            <option value="folded">Folded into one line</option>
+            <option value="off">Hidden</option>
+          </select>
+          {#if sectionsNote && sectionsWhere === 'earlier'}<span class="rownote" class:err={sectionsNote.kind === 'error'} data-testid="menubar-sections-note">{sectionsNote.text}</span>{/if}
+        </div>
+        <div class="inline">
+          <label class="check"><input type="checkbox" disabled={!settings || menubarBusy}
+            checked={settings?.menubarTomorrow ?? true}
+            onchange={(e) => saveSections({ tomorrow: e.currentTarget.checked }, 'tomorrow')} />
+            Tomorrow</label>
+          {#if sectionsNote && sectionsWhere === 'tomorrow'}<span class="rownote" class:err={sectionsNote.kind === 'error'} data-testid="menubar-sections-note">{sectionsNote.text}</span>{/if}
+        </div>
+        <div class="inline">
+          <label class="lab" for="menubar-days-ahead">Further days</label>
+          <select id="menubar-days-ahead" disabled={!settings || menubarBusy} value={settings?.menubarDaysAhead ?? 0}
+            onchange={(e) => saveSections({ daysAhead: Number(e.currentTarget.value) }, 'days')}>
+            {#each [0, 1, 2, 3, 4, 5, 6] as n}
+              <option value={n}>{n === 0 ? 'None' : n === 1 ? '1 day' : `${n} days`}</option>
+            {/each}
+          </select>
+          {#if sectionsNote && sectionsWhere === 'days'}<span class="rownote" class:err={sectionsNote.kind === 'error'} data-testid="menubar-sections-note">{sectionsNote.text}</span>{/if}
+        </div>
+        <p class="hint">Days after today show up to six events, then "+N more" opens OmaCal on that day.</p>
       </section>
     {:else if pane === 'Calendars'}
       <!-- **The same rows the header's popover shows, from the same
