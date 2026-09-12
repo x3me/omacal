@@ -1190,6 +1190,17 @@
 
       <section class="appearance-section" aria-labelledby="event-style-heading">
         <h2 id="event-style-heading">Event styling</h2>
+        <!-- Offered only where the window can be seen through, like the
+             canvas slider above (2026-09-12, reported from macOS as "not
+             doing anything"). The fade goes toward `transparent`, and on
+             the Day and Week grid the fill it fades is a 7% tint of the
+             calendar colour over `--bg` — with an opaque `--bg` behind it,
+             the slider's whole range turns 7% into 5.25%, which nobody can
+             see. Only Big Year's full-colour fills ever showed it there,
+             and a control that visibly does nothing on the surfaces people
+             live in is worse than its absence. Corner shape stays: it is
+             not about transparency. -->
+        {#if settings?.transparentWindow ?? true}
         <div class="range-row">
           <label for="event-transparency">Transparency</label>
           <input
@@ -1214,6 +1225,7 @@
           Only event fills fade; titles, colour spines, outlines and controls
           remain visible.
         </p>
+        {/if}
 
         <fieldset class="shape" disabled={!settings}>
           <legend>Corner shape</legend>

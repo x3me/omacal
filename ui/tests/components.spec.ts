@@ -1376,10 +1376,14 @@ test.describe('Header', () => {
     });
     await page.goto(show('Header', 'connected'));
     const modal = await openSettings(page, 'Appearance');
-    // The rest of the tab is still there — only the canvas slider is missing.
-    await expect(modal.getByRole('slider', { name: 'Event transparency' })).toHaveCount(1);
-    await expect(modal.getByRole('radio', { name: 'Rounded' })).toHaveCount(1);
+    // Neither slider: the event fade goes toward `transparent` too, and over
+    // an opaque `--bg` the Day/Week fill's 7% tint has nowhere visible to go
+    // (reported from macOS 2026-09-12 as "not doing anything"). The rest of
+    // the tab is still there — corner shape is not about transparency.
+    await expect(modal.getByRole('slider', { name: 'Event transparency' })).toHaveCount(0);
     await expect(modal.getByRole('slider', { name: 'Active background transparency', exact: true })).toHaveCount(0);
+    await expect(modal.getByRole('radio', { name: 'Rounded' })).toHaveCount(1);
+    await expect(modal.getByRole('heading', { name: 'Event styling' })).toHaveCount(1);
   });
 
   test('Appearance starts opaque off Omarchy and persists absolute values', async ({ page }) => {
