@@ -45,10 +45,12 @@ pub(crate) struct EventFields {
     /// would be guesswork — see [`crate::events::attendees_for_edit`], which is
     /// where the target is reconciled against what is actually stored.
     ///
-    /// **Read by both write paths.** The edit path reconciles this target list
-    /// against what is stored ([`crate::events::attendees_for_edit`]); the
-    /// create path runs the same builder against an empty list, since a
-    /// brand-new event has nobody on it. The absent/present distinction above
+    /// **Read by all three write paths.** Google's edit path reconciles this
+    /// target list against what is stored
+    /// ([`crate::events::attendees_for_edit`]); its create path runs the same
+    /// builder against an empty list, since a brand-new event has nobody on
+    /// it; CalDAV's ([`crate::caldav_write::attendees_for`]) turns it into
+    /// `ATTENDEE` lines reconciled against the resource itself. The absent/present distinction above
     /// still does different work on each: on an edit, absent is the only way to
     /// say "leave the list alone", while on a create there is no list to leave
     /// alone and absent simply means nobody was invited.
@@ -108,6 +110,17 @@ pub(crate) struct Guest {
     /// invitation is.
     #[serde(default)]
     pub optional: bool,
+    /// The name to write beside the address, for the one provider where the
+    /// editor owns it (issue #114).
+    ///
+    /// iCalendar keeps `CN` apart from the address it names, and a CalDAV
+    /// attendee may not have a mailbox to fall back on — `urn:uuid:…` has no
+    /// readable half. Google ignores this: there, `displayName` is the
+    /// person's own and is echoed back from what is stored, never sent from
+    /// the form. The field is on `Guest` rather than a second type because a
+    /// form editing either provider shows one guest list.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// An event's reminder settings, as the form sends them (reminders spec §2).

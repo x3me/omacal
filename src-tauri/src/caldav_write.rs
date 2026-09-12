@@ -267,6 +267,7 @@ pub(crate) async fn create(
         recurrence_id: None,
         alarms: alarms_for(&fields.reminders, None),
         sequence: 0,
+        attendees: attendees_for(&fields.guests),
         conference: None,
     };
     let ics = omacal_caldav::new_event_ics(&ev, now_ts());
@@ -276,6 +277,25 @@ pub(crate) async fn create(
     resync(state, calendar_id).await?;
     let id = row_id_by_uid(state, calendar_id, &uid).await?;
     crate::events::event_detail_impl(state, id).await
+}
+
+/// The attendee list a write owns, out of the guest list the form sends.
+///
+/// `None` all the way through: a path with no guest editor (a drag, the CLI's
+/// time edit) leaves every `ATTENDEE` line on the resource alone, which is the
+/// rule [`omacal_caldav::EventWrite::attendees`] is built on. Nothing is
+/// validated here beyond what the form allows, because an address this app
+/// cannot parse is still an address the server may know.
+fn attendees_for(guests: &Option<Vec<crate::write::Guest>>) -> Option<Vec<omacal_caldav::AttendeeWrite>> {
+    guests.as_ref().map(|list| {
+        list.iter()
+            .map(|g| omacal_caldav::AttendeeWrite {
+                address: g.email.clone(),
+                display_name: g.display_name.clone(),
+                optional: g.optional,
+            })
+            .collect()
+    })
 }
 
 /// Edits an event (or one occurrence, or the rest of a series).
@@ -312,6 +332,7 @@ pub(crate) async fn update(
                 recurrence_id: None,
                 alarms: alarms_for(&fields.reminders, Some(&master)),
                 sequence: master.sequence + 1,
+                attendees: attendees_for(&fields.guests),
                 conference: None,
             };
             let out = omacal_caldav::rewrite_master(&raw, &uid, &ev, now, moved)
@@ -344,6 +365,7 @@ pub(crate) async fn update(
                 recurrence_id: None,
                 alarms: alarms_for(&fields.reminders, Some(&master)),
                 sequence: 0,
+                attendees: attendees_for(&fields.guests),
                 conference: None,
             };
             let ics = omacal_caldav::new_event_ics(&ev, now);
@@ -364,6 +386,7 @@ pub(crate) async fn update(
                 recurrence_id: Some(rid),
                 alarms: alarms_for(&fields.reminders, Some(&viewed)),
                 sequence: 0,
+                attendees: attendees_for(&fields.guests),
                 conference: None,
             };
             let out = omacal_caldav::upsert_exception(&raw, &ev, now)
@@ -572,6 +595,28 @@ pub(crate) async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three-state that keeps every guest-free write harmless (#114): a
+    /// path with no attendee editor sends `None`, and `None` is what tells
+    /// `rewrite_master` to leave every ATTENDEE line where the server put it.
+    /// `Some(vec![])` is a different thing entirely and has to survive as one.
+    #[test]
+    fn only_an_edit_that_owns_the_list_carries_attendees() {
+        assert_eq!(attendees_for(&None), None);
+        assert_eq!(attendees_for(&Some(Vec::new())), Some(Vec::new()));
+        let list = Some(vec![
+            crate::write::Guest { email: "ada@example.com".into(), optional: false, display_name: Some("Ada".into()) },
+            crate::write::Guest { email: "urn:uuid:12345678".into(), optional: true, display_name: None },
+        ]);
+        let out = attendees_for(&list).unwrap();
+        assert_eq!(out[0].address, "ada@example.com");
+        assert_eq!(out[0].display_name.as_deref(), Some("Ada"));
+        assert!(!out[0].optional);
+        // The URI is carried as typed. What becomes of it is `cal_address`'s
+        // business, and it is tested where it lives.
+        assert_eq!(out[1].address, "urn:uuid:12345678");
+        assert!(out[1].optional);
+    }
 
     fn master(recurrence: Option<&str>) -> StoredEvent {
         StoredEvent {

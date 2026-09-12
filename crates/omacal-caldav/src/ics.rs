@@ -75,6 +75,26 @@ fn unfold(src: &str) -> Vec<String> {
 
 /// Splits `NAME;PARAMS:value`, honouring quoted parameter values (a TZID may
 /// legally contain a colon inside quotes).
+/// Splits on a separator that is outside quotes, keeping the quotes in place
+/// for the caller to trim.
+fn split_unquoted(text: &str, sep: char) -> std::vec::IntoIter<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in text.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                cur.push(ch);
+            }
+            c if c == sep && !in_quotes => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out.into_iter()
+}
+
 fn parse_line(line: &str) -> Option<Property> {
     let mut in_quotes = false;
     let mut colon = None;
@@ -90,7 +110,12 @@ fn parse_line(line: &str) -> Option<Property> {
     }
     let colon = colon?;
     let (head, value) = (&line[..colon], &line[colon + 1..]);
-    let mut segs = head.split(';');
+    // The same quote rule as the colon scan above, and for the same reason: a
+    // quoted parameter value may legally hold the `;` this splits on. `CN="Ada;
+    // the second"` is one parameter, not two, and splitting it blindly loses
+    // half the name — which is exactly what a name this app now *writes* would
+    // have hit.
+    let mut segs = split_unquoted(head, ';');
     let name = segs.next()?.trim().to_ascii_uppercase();
     if name.is_empty() {
         return None;
@@ -871,6 +896,24 @@ impl WriteTime {
 /// Everything a written VEVENT carries. One shape serves creates, full
 /// rewrites, and exception components — presence of `recurrence_id` is what
 /// makes it an exception.
+/// One person to write onto an event, as the *editor* can author them.
+///
+/// Two things the user types and one they tick, which is all an attendee line
+/// this app composes ever says. `PARTSTAT` is absent on purpose: an answer
+/// belongs to the person who gave it, and nothing here may overwrite one
+/// (guest-list spec §2, in the vocabulary of iCalendar).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttendeeWrite {
+    /// A calendar user address. **Not necessarily an email** (RFC 5545 §3.3.3
+    /// is a URI): `urn:uuid:…` is as legal as `mailto:…`, and a bare mailbox
+    /// is written as `mailto:` by [`cal_address`] rather than guessed at.
+    pub address: String,
+    /// `CN`, kept apart from the address it names.
+    pub display_name: Option<String>,
+    /// `ROLE=OPT-PARTICIPANT`.
+    pub optional: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventWrite {
     pub uid: String,
@@ -885,6 +928,18 @@ pub struct EventWrite {
     /// `(method, minutes)` — `popup` renders DISPLAY, `email` EMAIL.
     pub alarms: Vec<(String, i64)>,
     pub sequence: i64,
+    /// **The attendee list this edit owns**, or `None` for "the attendees were
+    /// not touched" — [`crate::EventFields::guests`]' own three-state, and
+    /// load bearing for the same reason. `None` leaves every `ATTENDEE` line
+    /// on the resource exactly as the server has it, which is what every
+    /// write did before attendees were editable and what a drag still does.
+    /// `Some(vec![])` removes everyone.
+    ///
+    /// A `Some` is reconciled against the lines already there rather than
+    /// replacing them: an attendee who stays keeps their own line, and with it
+    /// their `PARTSTAT` and anything else the server put on it. Retyping a
+    /// title must not reset everybody's reply to needs-action.
+    pub attendees: Option<Vec<AttendeeWrite>>,
     /// A video-call link, written as RFC 7986 `CONFERENCE`.
     ///
     /// `None` on every CalDAV write, and deliberately: this app does not
@@ -896,6 +951,115 @@ pub struct EventWrite {
     /// not, which is what makes this the difference between a whole event
     /// and most of one.
     pub conference: Option<String>,
+}
+
+/// The CAL-ADDRESS to write for an authored address.
+///
+/// A value that already names a scheme is written as it stands, which is the
+/// whole of issue #114's second half: `urn:uuid:12345678` is a real attendee
+/// and must survive a round trip rather than be "fixed" into a mailbox. A bare
+/// `ada@example.com` gets `mailto:`, because that is what it means.
+///
+/// Control characters are dropped rather than escaped: a newline in a property
+/// value is a second line, and a second line the user wrote is an injected
+/// property. URI values take no `\` escaping (RFC 5545 §3.3.13), so there is
+/// nothing else to encode.
+fn cal_address(address: &str) -> String {
+    let clean: String = address.trim().chars().filter(|c| !c.is_control()).collect();
+    let scheme = clean
+        .split_once(':')
+        .map(|(s, _)| !s.is_empty()
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .unwrap_or(false);
+    if scheme { clean } else { format!("mailto:{clean}") }
+}
+
+/// The address an attendee is *matched* by: the CAL-ADDRESS with a `mailto:`
+/// scheme taken off, which is the form [`read_attendee`] stores and
+/// [`is_attendee_of`] compares.
+fn match_key(address: &str) -> String {
+    let v = cal_address(address);
+    match v.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("mailto:") => v[7..].to_string(),
+        _ => v,
+    }
+}
+
+/// A parameter value, quoted when it has to be.
+///
+/// RFC 5545 §3.1: a param value carrying `;`, `:` or `,` must be a quoted
+/// string, and a quoted string cannot itself contain `"`. Quotes are dropped
+/// rather than escaped, because there is no escape for them to use.
+fn param_value(v: &str) -> String {
+    let clean: String = v.chars().filter(|c| !c.is_control() && *c != '"').collect();
+    if clean.contains([';', ':', ',']) { format!("\"{clean}\"") } else { clean }
+}
+
+/// A fresh `ATTENDEE` line for somebody who is not on the resource yet.
+///
+/// `PARTSTAT=NEEDS-ACTION` is written rather than left implied: it is the
+/// default either way, and a reader that shows a list is friendlier when every
+/// row carries the same property. No `RSVP=TRUE` — that asks a server to chase
+/// an answer, which is scheduling, which this does not do.
+fn attendee_line(a: &AttendeeWrite) -> String {
+    let mut line = "ATTENDEE".to_string();
+    if let Some(cn) = a.display_name.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        line.push_str(&format!(";CN={}", param_value(cn)));
+    }
+    if a.optional {
+        line.push_str(";ROLE=OPT-PARTICIPANT");
+    }
+    line.push_str(";PARTSTAT=NEEDS-ACTION:");
+    line.push_str(&cal_address(&a.address));
+    line
+}
+
+/// The list `want` describes, expressed over the lines already on the block.
+///
+/// Somebody who stays keeps their own line byte for byte, save for the two
+/// parameters the editor owns (`CN`, and `ROLE` when it is the optional flag
+/// being turned off). Everything else the server put there — `PARTSTAT`,
+/// `RSVP`, `CUTYPE`, `SENT-BY`, `DIR`, `X-`… — rides along, which is the only
+/// way an unrelated edit can be non-destructive. Somebody dropped loses their
+/// line; somebody new gets [`attendee_line`]. Order follows `want`, so the
+/// list reads the way the form showed it.
+fn merge_attendee_lines(existing: &[String], want: &[AttendeeWrite]) -> Vec<String> {
+    want
+        .iter()
+        .filter(|a| !match_key(&a.address).is_empty())
+        .map(|a| {
+            let key = match_key(&a.address);
+            let Some(line) = existing.iter().find(|l| is_attendee_of(l, &key)) else {
+                return attendee_line(a);
+            };
+            let named = match a.display_name.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                Some(cn) => with_param(line, "CN", Some(&param_value(cn))),
+                None => with_param(line, "CN", None),
+            };
+            if a.optional {
+                with_param(&named, "ROLE", Some("OPT-PARTICIPANT"))
+            } else if parse_line(&named)
+                .and_then(|p| p.param("ROLE").map(|r| r.eq_ignore_ascii_case("OPT-PARTICIPANT")))
+                .unwrap_or(false)
+            {
+                // Only the flag this app sets is cleared. A `ROLE=CHAIR` the
+                // server wrote is not ours to take off.
+                with_param(&named, "ROLE", None)
+            } else {
+                named
+            }
+        })
+        .collect()
+}
+
+/// Every `ATTENDEE` line of one block, in the order it has them.
+fn attendee_lines_of(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| l.to_ascii_uppercase().starts_with("ATTENDEE"))
+        .cloned()
+        .collect()
 }
 
 fn vevent_lines(ev: &EventWrite, now: Timestamp) -> Vec<String> {
@@ -939,6 +1103,11 @@ fn vevent_lines(ev: &EventWrite, now: Timestamp) -> Vec<String> {
         lines.push("DESCRIPTION:Reminder".to_string());
         lines.push(format!("TRIGGER:-PT{minutes}M"));
         lines.push("END:VALARM".to_string());
+    }
+    if let Some(want) = &ev.attendees {
+        // Nothing to reconcile against on a render: every line is a new one.
+        // The rewriting paths merge with what the resource already has.
+        lines.extend(merge_attendee_lines(&[], want));
     }
     lines.push("END:VEVENT".to_string());
     lines
@@ -1024,7 +1193,18 @@ pub fn rewrite_master(
             || u.starts_with("DESCRIPTION;") || u.starts_with("DTSTART") || u.starts_with("DTEND")
             || u.starts_with("DURATION") || u.starts_with("RRULE") || u.starts_with("RDATE")
             || u.starts_with("SEQUENCE") || u.starts_with("DTSTAMP")
+            // Only when this edit owns the list. An edit that does not touch
+            // attendees leaves every line where it is, exactly as before.
+            || (ev.attendees.is_some() && u.starts_with("ATTENDEE"))
     };
+
+    // Reconciled against the block's own lines, so an attendee who stays keeps
+    // their answer. Rendered here rather than by `vevent_lines`, which has
+    // nothing to reconcile against.
+    let merged = ev
+        .attendees
+        .as_ref()
+        .map(|want| merge_attendee_lines(&attendee_lines_of(&lines[master.start..=master.end]), want));
     // A time change invalidates EXDATEs too (they name occurrence starts).
     let drop_exdates = drop_exceptions;
 
@@ -1044,12 +1224,16 @@ pub fn rewrite_master(
             continue;
         }
         if u == "END:VEVENT" {
-            // Insert the owned properties just before the close.
-            let fresh = vevent_lines(ev, now);
+            // Insert the owned properties just before the close. Attendees are
+            // the merged lines below, not the render's fresh ones.
+            let fresh = vevent_lines(&EventWrite { attendees: None, ..ev.clone() }, now);
             // Skip BEGIN:VEVENT/UID from the fresh render — the block keeps
             // its own — and take everything else.
             for f in &fresh[2..fresh.len() - 1] {
                 patched.push(f.clone());
+            }
+            if let Some(m) = &merged {
+                patched.extend(m.iter().cloned());
             }
         }
         patched.push(l.clone());
@@ -1095,6 +1279,18 @@ pub fn upsert_exception(raw: &str, ev: &EventWrite, now: Timestamp) -> Option<St
     let replaced: Option<(usize, usize)> =
         blocks.iter().find(|b| same_occurrence(b)).map(|b| (b.start, b.end));
 
+    // The exception block is rewritten wholesale, so its `ATTENDEE` lines have
+    // to be carried across by hand or editing one occurrence would empty its
+    // guest list. `None` keeps them verbatim, which is the promise every other
+    // path already makes; `Some` reconciles against them.
+    let existing = replaced
+        .map(|(s, e)| attendee_lines_of(&lines[s..=e]))
+        .unwrap_or_default();
+    let merged = match &ev.attendees {
+        Some(want) => merge_attendee_lines(&existing, want),
+        None => existing,
+    };
+
     let close = lines
         .iter()
         .rposition(|l| l.eq_ignore_ascii_case("END:VCALENDAR"))?;
@@ -1107,7 +1303,11 @@ pub fn upsert_exception(raw: &str, ev: &EventWrite, now: Timestamp) -> Option<St
             }
         }
         if i == close {
-            out.extend(vevent_lines(ev, now));
+            let fresh = vevent_lines(&EventWrite { attendees: None, ..ev.clone() }, now);
+            // Before END:VEVENT, where every other property of the block sits.
+            out.extend(fresh[..fresh.len() - 1].iter().cloned());
+            out.extend(merged.iter().cloned());
+            out.push("END:VEVENT".to_string());
         }
         out.push(l.clone());
     }
@@ -1224,13 +1424,17 @@ fn is_attendee_of(line: &str, email: &str) -> bool {
     v.eq_ignore_ascii_case(email)
 }
 
-/// The line with its `PARTSTAT` replaced (or added) and every other byte
-/// kept. Its own scanner rather than a `parse_line` round trip, because a
+/// The line with one parameter replaced, added or removed, and every other
+/// byte kept. Its own scanner rather than a `parse_line` round trip, because a
 /// reparse would strip parameter quotes — and a quoted `CN` may legally
 /// contain the `;` and `:` this splits on, so both splits honour quotes.
 /// Only called on lines [`is_attendee_of`] already parsed, so the colon is
 /// known to exist.
-fn with_partstat(line: &str, partstat: &str) -> String {
+///
+/// `None` removes the parameter, which is how a display name is cleared and an
+/// optional attendee made required. The value is written as given: a caller
+/// with user text runs it through [`param_value`] first.
+fn with_param(line: &str, name: &str, value: Option<&str>) -> String {
     let mut in_quotes = false;
     let mut colon = line.len();
     for (i, ch) in line.char_indices() {
@@ -1243,7 +1447,7 @@ fn with_partstat(line: &str, partstat: &str) -> String {
             _ => {}
         }
     }
-    let (head, value) = line.split_at(colon);
+    let (head, value_str) = line.split_at(colon);
 
     let mut segs: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -1260,17 +1464,26 @@ fn with_partstat(line: &str, partstat: &str) -> String {
     }
     segs.push(cur);
 
+    let prefix = format!("{}=", name.to_ascii_uppercase());
     let mut replaced = false;
-    for s in segs.iter_mut().skip(1) {
-        if s.trim().to_ascii_uppercase().starts_with("PARTSTAT=") {
-            *s = format!("PARTSTAT={partstat}");
+    let mut out: Vec<String> = Vec::with_capacity(segs.len());
+    for (i, s) in segs.iter().enumerate() {
+        if i > 0 && s.trim().to_ascii_uppercase().starts_with(&prefix) {
+            match value {
+                Some(v) if !replaced => out.push(format!("{name}={v}")),
+                // A duplicate of the same parameter is not legal, and keeping
+                // the first is the reading every parser gives it.
+                _ => {}
+            }
             replaced = true;
+            continue;
         }
+        out.push(s.clone());
     }
-    if !replaced {
-        segs.push(format!("PARTSTAT={partstat}"));
+    if let (Some(v), false) = (value, replaced) {
+        out.push(format!("{name}={v}"));
     }
-    format!("{}{value}", segs.join(";"))
+    format!("{}{value_part}", out.join(";"), value_part = value_str)
 }
 
 /// Sets `email`'s `PARTSTAT` across every VEVENT of `uid` — master and
@@ -1296,7 +1509,7 @@ pub fn respond_all(raw: &str, uid: &str, email: &str, partstat: &str) -> Option<
     for b in blocks.iter().filter(|b| b.uid.as_deref() == Some(uid)) {
         for i in b.start..=b.end {
             if is_attendee_of(&lines[i], email) {
-                out[i] = with_partstat(&lines[i], partstat);
+                out[i] = with_param(&lines[i], "PARTSTAT", Some(partstat));
                 touched = true;
             }
         }
@@ -1339,7 +1552,7 @@ pub fn respond_occurrence(
         let mut touched = false;
         for i in b.start..=b.end {
             if is_attendee_of(&lines[i], email) {
-                out[i] = with_partstat(&lines[i], partstat);
+                out[i] = with_param(&lines[i], "PARTSTAT", Some(partstat));
                 touched = true;
             }
         }
@@ -1365,7 +1578,7 @@ pub fn respond_occurrence(
         }
         let line = if is_attendee_of(l, email) {
             touched = true;
-            with_partstat(l, partstat)
+            with_param(l, "PARTSTAT", Some(partstat))
         } else {
             l.clone()
         };
@@ -1695,6 +1908,136 @@ mod tests {
         }
     }
 
+    /// Issue #114's own example, both halves of it: the common case gets the
+    /// `mailto:` it means, and a `urn:uuid:` attendee is written as the URI it
+    /// already is rather than mangled into something mailbox-shaped.
+    #[test]
+    fn a_new_attendee_is_a_mailto_and_a_urn_address_survives_verbatim() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let mut ev = write_sample("n1");
+        ev.attendees = Some(vec![
+            AttendeeWrite { address: "ada@example.com".into(), display_name: Some("Ada Lovelace".into()), optional: false },
+            AttendeeWrite { address: "urn:uuid:12345678".into(), display_name: None, optional: true },
+        ]);
+        let out = new_event_ics(&ev, now);
+        assert!(out.contains("ATTENDEE;CN=Ada Lovelace;PARTSTAT=NEEDS-ACTION:mailto:ada@example.com\r\n"), "{out}");
+        assert!(out.contains("ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:urn:uuid:12345678\r\n"), "{out}");
+        // And it reads back as what was written, addresses included.
+        let parsed = events_in(&parse(&out).unwrap());
+        let names: Vec<&str> = parsed[0].attendees.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(names, ["ada@example.com", "urn:uuid:12345678"]);
+        assert!(parsed[0].attendees[1].optional);
+    }
+
+    /// The reason a `Some` is reconciled rather than rendered: an unrelated
+    /// edit must not reset anybody's reply. The one who stays keeps their
+    /// `PARTSTAT` and the `X-` line the server hung off them; the one dropped
+    /// loses their line; the new one arrives needing action.
+    #[test]
+    fn editing_a_guest_list_keeps_the_answers_of_the_guests_who_stay() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g1\r\nSUMMARY:Review\r\n\
+DTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\n\
+ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED;X-NUM-GUESTS=0:mailto:ada@example.com\r\n\
+ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com\r\n\
+END:VEVENT\r\nEND:VCALENDAR";
+        let mut ev = write_sample("g1");
+        ev.summary = Some("Review, renamed".into());
+        ev.attendees = Some(vec![
+            AttendeeWrite { address: "ADA@example.com".into(), display_name: Some("Ada".into()), optional: false },
+            AttendeeWrite { address: "cleo@example.com".into(), display_name: None, optional: false },
+        ]);
+        let out = rewrite_master(raw, "g1", &ev, now, false).unwrap();
+        assert!(out.contains("ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED;X-NUM-GUESTS=0:mailto:ada@example.com"),
+            "the mailbox matched case-insensitively and the line came through whole: {out}");
+        assert!(!out.contains("bob@example.com"), "removed: {out}");
+        assert!(out.contains("ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:cleo@example.com"), "{out}");
+        assert_eq!(out.matches("ATTENDEE").count(), 2);
+    }
+
+    /// `None` is the three-state's whole point, and the behaviour every write
+    /// had before attendees were editable: a drag, a resize, a title change
+    /// from a path with no guest editor leaves the list exactly as found.
+    #[test]
+    fn an_edit_that_does_not_own_the_list_leaves_every_attendee_line() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g2\r\nSUMMARY:Review\r\n\
+DTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\n\
+ORGANIZER;CN=Ivan:mailto:ivan@example.com\r\n\
+ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED:mailto:ada@example.com\r\n\
+END:VEVENT\r\nEND:VCALENDAR";
+        let mut ev = write_sample("g2");
+        ev.summary = Some("Review, renamed".into());
+        assert_eq!(ev.attendees, None);
+        let out = rewrite_master(raw, "g2", &ev, now, false).unwrap();
+        assert!(out.contains("ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED:mailto:ada@example.com"), "{out}");
+        assert!(out.contains("ORGANIZER;CN=Ivan:mailto:ivan@example.com"), "{out}");
+    }
+
+    /// A name is the editor's to set and to clear, and a `;` in one is why
+    /// `param_value` exists: unquoted it would read as the end of the
+    /// parameter and the start of another.
+    #[test]
+    fn a_display_name_is_quoted_when_it_has_to_be_and_can_be_cleared() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g3\r\nSUMMARY:Review\r\n\
+DTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\n\
+ATTENDEE;CN=Ada;ROLE=OPT-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ada@example.com\r\n\
+END:VEVENT\r\nEND:VCALENDAR";
+        let mut ev = write_sample("g3");
+        ev.attendees = Some(vec![
+            AttendeeWrite { address: "ada@example.com".into(), display_name: None, optional: false },
+            AttendeeWrite { address: "cleo@example.com".into(), display_name: Some("Cleo; the second".into()), optional: false },
+        ]);
+        let out = rewrite_master(raw, "g3", &ev, now, false).unwrap();
+        assert!(out.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:ada@example.com"),
+            "the name and the optional flag both came off, the answer did not: {out}");
+        assert!(out.contains("ATTENDEE;CN=\"Cleo; the second\";PARTSTAT=NEEDS-ACTION:mailto:cleo@example.com"), "{out}");
+        // And the quoted name survives the reader that has to split on that `;`.
+        let parsed = events_in(&parse(&out).unwrap());
+        let cleo = parsed[0].attendees.iter().find(|a| a.email == "cleo@example.com").unwrap();
+        assert_eq!(cleo.display_name.as_deref(), Some("Cleo; the second"));
+    }
+
+    /// A quoted parameter holds the `;` the parameter list splits on, and
+    /// iCloud quotes display names as a matter of course. Reading it wrong
+    /// cost half a name and a mis-read `ROLE`; writing one made it ours to get
+    /// right. Pinned at the parser rather than only through an attendee.
+    #[test]
+    fn a_quoted_parameter_may_hold_the_separators_around_it() {
+        let p = parse_line("ATTENDEE;CN=\"Ada; of: Lovelace\";ROLE=CHAIR:mailto:ada@example.com").unwrap();
+        assert_eq!(p.param("CN"), Some("Ada; of: Lovelace"));
+        assert_eq!(p.param("ROLE"), Some("CHAIR"));
+        assert_eq!(p.value, "mailto:ada@example.com");
+    }
+
+    /// An exception block is rewritten whole, so its own `ATTENDEE` lines have
+    /// to be carried across by hand. Before this they were dropped: editing one
+    /// occurrence of a series emptied that occurrence's guest list, silently,
+    /// on a resource nobody was looking at.
+    #[test]
+    fn editing_one_occurrence_keeps_that_occurrence_s_own_attendees() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:s2\r\nSUMMARY:Standup\r\n\
+DTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\n\
+RRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:s2\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260819T091500\r\n\
+SUMMARY:Standup (moved)\r\nDTSTART;TZID=Europe/Sofia:20260819T140000\r\n\
+DTEND;TZID=Europe/Sofia:20260819T141500\r\n\
+ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED:mailto:ada@example.com\r\n\
+END:VEVENT\r\nEND:VCALENDAR";
+        let mut ev = write_sample("s2");
+        ev.summary = Some("Standup (moved again)".into());
+        ev.recurrence_id = Some(WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 19).at(9, 15, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        });
+        let out = upsert_exception(raw, &ev, now).unwrap();
+        assert!(out.contains("ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED:mailto:ada@example.com"), "{out}");
+        assert!(out.contains("SUMMARY:Standup (moved again)"), "{out}");
+        assert_eq!(out.matches("BEGIN:VEVENT").count(), 2, "still one master and one exception: {out}");
+    }
+
     #[test]
     fn patching_one_uid_leaves_its_siblings_alone() {
         let two = "BEGIN:VCALENDAR\nBEGIN:VTODO\nUID:a\nSTATUS:NEEDS-ACTION\nEND:VTODO\nBEGIN:VTODO\nUID:b\nSTATUS:NEEDS-ACTION\nEND:VTODO\nEND:VCALENDAR";
@@ -1707,6 +2050,9 @@ mod tests {
     fn write_sample(uid: &str) -> EventWrite {
         EventWrite {
             uid: uid.into(),
+            // The default every existing case wants: this edit does not own
+            // the guest list, so every ATTENDEE line stays where it is.
+            attendees: None,
             summary: Some("Planning".into()),
             location: Some("Room 2; annex".into()),
             description: None,

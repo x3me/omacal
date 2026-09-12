@@ -236,6 +236,21 @@ async fn the_whole_loop_against_a_real_server() {
         recurrence_id: None,
         alarms: Vec::new(),
         sequence: 1,
+        // The rename owns the attendee list too (#114), so this one PUT proves
+        // both halves against a real server: a mailbox and a `urn:uuid:`
+        // attendee go up, and the sync reads them back with their names.
+        attendees: Some(vec![
+            omacal_caldav::AttendeeWrite {
+                address: "ada@example.com".into(),
+                display_name: Some("Ada; Lovelace".into()),
+                optional: false,
+            },
+            omacal_caldav::AttendeeWrite {
+                address: "urn:uuid:12345678".into(),
+                display_name: Some("Ali".into()),
+                optional: true,
+            },
+        ]),
         conference: None,
     };
     let renamed = omacal_caldav::rewrite_master(&raw, "e2e-series", &ev, now, false)
@@ -252,6 +267,23 @@ async fn the_whole_loop_against_a_real_server() {
     assert!(
         events.iter().any(|e| e.recurring_event_id.as_deref() == Some("e2e-series")),
         "the moved occurrence survived a no-time-change rename"
+    );
+    // #114 end to end: written, stored by the server, parsed back. The quoted
+    // `CN` is the one that used to come back halved, and the `urn:uuid:` the
+    // one a mailbox check would have refused to write at all.
+    let mut who: Vec<(&str, Option<&str>, bool)> = master
+        .attendees
+        .iter()
+        .map(|a| (a.email.as_str(), a.display_name.as_deref(), a.optional))
+        .collect();
+    who.sort();
+    assert_eq!(
+        who,
+        [
+            ("ada@example.com", Some("Ada; Lovelace"), false),
+            ("urn:uuid:12345678", Some("Ali"), true),
+        ],
+        "attendees survived the round trip through Radicale"
     );
 
     // A stale etag must now be refused — the guard is real on this server.

@@ -8,6 +8,7 @@ import {
   toEventInput, toggledGuestOptional,
   toggledWeeklyDay, valueFromDetail, videoCallProblem, weekdayCodeForDate, whenOf,
   type EventFormValue,
+  isCalendarAddress, renamedGuest,
 } from '../src/lib/eventform';
 
 /** How long a **timed** value is, in ms.
@@ -2153,6 +2154,36 @@ test.describe('the guest list a form edits', () => {
       const value = { ...initial, guests: [{ email: 'ana@x.com', optional: false }] };
       expect(mailableGuests(value, initial)).toBe(1);
     });
+  });
+});
+
+test.describe('what an attendee address may be', () => {
+  /** Issue #114: an `ATTENDEE` value is a URI, and `urn:uuid:…` is the case
+   *  the reporter named. A mailbox check would refuse it. */
+  test('accepts an email address, or any URI with something after the scheme', () => {
+    for (const ok of ['ada@example.com', 'urn:uuid:12345678', 'mailto:ada@example.com',
+      'https://rooms.example/big-room', 'ADA@EXAMPLE.COM']) {
+      expect(isCalendarAddress(ok), ok).toBe(true);
+    }
+  });
+
+  test('refuses a typo, an empty scheme and anything with a space in it', () => {
+    for (const no of ['ada', '', '   ', 'urn:', ':12345678', '1nvalid:x', 'ada example.com',
+      'urn:uuid: 12345678']) {
+      expect(isCalendarAddress(no), JSON.stringify(no)).toBe(false);
+    }
+  });
+
+  /** The name is the editor's on CalDAV, so it is set, cleared and compared
+   *  like any other field the form owns. */
+  test('a display name is set, cleared, and noticed by the save comparison', () => {
+    const one = addGuest([], 'ada@example.com');
+    expect(one[0].displayName ?? null).toBeNull();
+    const named = renamedGuest(one, 'ADA@example.com', '  Ada  ');
+    expect(named[0].displayName).toBe('  Ada  ');
+    expect(sameGuests(one, named)).toBe(false);
+    expect(renamedGuest(named, 'ada@example.com', '   ')[0].displayName).toBeNull();
+    expect(addGuest([], 'ada@example.com', 'Ada')[0].displayName).toBe('Ada');
   });
 });
 

@@ -58,7 +58,10 @@ test('duplicate opens an unsaved draft with the calendar picker, then creates on
   expect(created.fields.description).toBe('Bring the project notes.');
   expect(created.fields.location).toContain('Room 4');
   expect(created.fields.location).toContain('https://meet.google.com/abc-defg-hij');
-  expect(created.fields.guests).toEqual([{ email: 'ana@x.com', optional: false }]);
+  // The name rides along with the address (#114). Google ignores it — a
+  // person's display name there is theirs and is echoed back, never sent —
+  // and on CalDAV it is the CN the copy should keep.
+  expect(created.fields.guests).toEqual([{ email: 'ana@x.com', optional: false, displayName: 'Ana' }]);
   expect(created.sendUpdates).toBe('none');
   expect(await calls(page, 'update_event')).toEqual([]);
 });

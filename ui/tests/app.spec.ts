@@ -1628,8 +1628,11 @@ test.describe('App', () => {
     // Ana alone: `me@x.com` is the copier's own row (`is_self` on the
     // source), and the copier is the new event's organizer, not its guest —
     // sending it invited the user to their own copy.
+    // Her name rides along with her address (#114): inert on Google, where a
+    // person's display name is echoed back rather than sent, and the `CN` a
+    // pasted CalDAV event should keep.
     expect(args.fields.guests).toEqual([
-      { email: 'ana@x.com', optional: false },
+      { email: 'ana@x.com', optional: false, displayName: 'Ana' },
     ]);
   });
 

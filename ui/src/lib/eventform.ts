@@ -245,6 +245,15 @@ export type VideoCall = {
 export type Guest = {
   email: string;
   optional: boolean;
+  /**
+   * The name to show beside the address, and on CalDAV the one the form owns.
+   *
+   * iCalendar keeps `CN` apart from the address it names (issue #114), and a
+   * CalDAV attendee need not have a readable half at all: `urn:uuid:12345678`
+   * is a legal attendee. On Google this is echoed back from what is stored and
+   * never sent — a person's name there is theirs, not the editor's.
+   */
+  displayName?: string | null;
 };
 
 const MIN_MS = 60_000;
@@ -327,12 +336,39 @@ export const isAddress = (address: string): boolean => {
  * An empty address is the same answer for the same reason: a stray Return in
  * the field is not a request.
  */
-export const addGuest = (guests: Guest[], address: string): Guest[] => {
+export const addGuest = (guests: Guest[], address: string, displayName?: string): Guest[] => {
   const email = address.trim();
   if (email === '') return guests;
   if (guests.some((g) => sameAddress(g.email, email))) return guests;
-  return [...guests, { email, optional: false }];
+  const name = displayName?.trim();
+  // The key is absent unless there is a name: `displayName` is a CalDAV
+  // concern, and a Google guest list has no business carrying a null for it.
+  return [...guests, name ? { email, optional: false, displayName: name } : { email, optional: false }];
 };
+
+/**
+ * Whether `address` is one an iCalendar `ATTENDEE` line can carry.
+ *
+ * RFC 5545 §3.3.3's calendar user address is a URI, and issue #114 is the case
+ * that proves it matters: `urn:uuid:12345678` names a real attendee on servers
+ * that use it, and a form that insisted on a mailbox would refuse a value the
+ * server itself wrote. So: an email address, or anything with a scheme and
+ * something after it. Still refused, and deliberately: whitespace, and a bare
+ * word that is neither — those are typos, not addresses.
+ */
+export const isCalendarAddress = (address: string): boolean => {
+  const at = address.trim();
+  if (at === '' || /\s/.test(at)) return false;
+  if (isAddress(at)) return true;
+  const [scheme, ...rest] = at.split(':');
+  return rest.join(':').length > 0
+    && /^[A-Za-z][A-Za-z0-9+.-]*$/.test(scheme);
+};
+
+/** `guests` with `email`'s display name set, or cleared when it is blank. */
+export const renamedGuest = (guests: Guest[], email: string, name: string): Guest[] =>
+  guests.map((g) =>
+    sameAddress(g.email, email) ? { ...g, displayName: name.trim() === '' ? null : name } : g);
 
 /** `guests` without `email`, matched however either side spells it. */
 export const removeGuest = (guests: Guest[], email: string): Guest[] =>
@@ -370,8 +406,12 @@ export const toggledGuestOptional = (guests: Guest[], email: string): Guest[] =>
  */
 export const sameGuests = (a: Guest[], b: Guest[]): boolean => {
   if (a.length !== b.length) return false;
+  // The name counts: on CalDAV it is the editor's to set, so a save that
+  // changed only a `CN` would otherwise send nothing and look like a no-op.
   return a.every((g) =>
-    b.some((h) => sameAddress(g.email, h.email) && g.optional === h.optional));
+    b.some((h) => sameAddress(g.email, h.email)
+      && g.optional === h.optional
+      && (g.displayName ?? null) === (h.displayName ?? null)));
 };
 
 /**
@@ -965,7 +1005,9 @@ export function valueFromDetail(
     recurrence: detail.recurrence,
     // **Everyone** — see `EventFormValue.guests` for how this differs from
     // `mailableGuests`.
-    guests: detail.attendees.map((a) => ({ email: a.email, optional: a.optional })),
+    guests: detail.attendees.map((a) => (a.display_name
+      ? { email: a.email, optional: a.optional, displayName: a.display_name }
+      : { email: a.email, optional: a.optional })),
     organizerEmail: detail.organizer_email,
     selfEmail: detail.attendees.find((a) => a.is_self)?.email ?? null,
     // The *effective* rows (reminders spec §3): the event's own overrides, or

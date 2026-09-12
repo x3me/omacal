@@ -4824,6 +4824,54 @@ test.describe('EventForm', () => {
     expect(saved.fields.guests).toEqual([{ email: 'ana@x.com', optional: false }]);
   });
 
+  /**
+   * Issue #114, and the three things that make a CalDAV attendee not a Google
+   * guest: the word, the addresses it takes, and who gets told.
+   *
+   * The `urn:uuid:` row is the reporter's own example. Google's form refuses
+   * it and should — it has to mail the thing — but on CalDAV it is a legal
+   * attendee, and a form that insisted on a mailbox would refuse a value the
+   * server itself may have written.
+   */
+  test('a CalDAV event takes attendees, any calendar address, and mails nobody', async ({ page }) => {
+    await open(page, 'create-attendees');
+    const card = page.getByTestId('guests');
+    await expect(card).toContainText('Attendees');
+    await expect(page.getByTestId('attendee-hint'))
+      .toContainText('OmaCal does not send invitations');
+
+    await page.getByLabel('Add attendee', { exact: true }).fill('ada@example.com');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await page.getByLabel('Add attendee', { exact: true }).fill('urn:uuid:12345678');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await expect(guestRows(page)).toHaveCount(2);
+
+    // The name is separate from the address, which is the only readable half
+    // a `urn:uuid:` attendee has.
+    await page.getByLabel('Name: urn:uuid:12345678').fill('Ali');
+
+    await page.getByLabel('Title', { exact: true }).fill('Standup');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+
+    // No notify choice on CalDAV: there is nothing to send, so nothing to ask.
+    const [saved] = await saves(page);
+    expect(saved.notify).toBe('none');
+    expect(saved.fields.guests).toEqual([
+      { email: 'ada@example.com', optional: false },
+      { email: 'urn:uuid:12345678', optional: false, displayName: 'Ali' },
+    ]);
+  });
+
+  /** A typo is still a typo. The rule widened to "a calendar user address",
+   *  not to "anything", and the refusal names what would be accepted. */
+  test('a CalDAV attendee still has to be an address', async ({ page }) => {
+    await open(page, 'create-attendees');
+    await page.getByLabel('Add attendee', { exact: true }).fill('ada');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await expect(page.getByTestId('form-error')).toContainText('is not an address');
+    await expect(guestRows(page)).toHaveCount(0);
+  });
+
   /** A create with nobody on it must not grow a dialog. Nobody to tell means
    *  nothing to choose between, and the save goes straight out — the same
    *  shortcut an edit takes, now reached through `mailableGuests`. */

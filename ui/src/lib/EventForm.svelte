@@ -16,7 +16,8 @@
   import { editReach, type SendUpdates } from './eventdetail';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
-    mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest, removeGuest, ruleInWords,
+    isCalendarAddress, mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest,
+    removeGuest, renamedGuest, ruleInWords,
     dateOf, timeOf,
     repeatEndProblem, shiftedEndDate, toEventInput, toggledGuestOptional, toggledWeeklyDay, timeProblem,
     toggledAllDay, videoCallProblem, weekdayCodeForDate,
@@ -120,9 +121,12 @@
       ? offerable.filter((c) => c.account_id === account)
       : offerable,
   );
-  /** The selected calendar's provider. CalDAV has no guest management and no
-   *  notify question — the editor hides and Save never asks; attendee lines
-   *  on the server survive our rewrites untouched. */
+  /** The selected calendar's provider, which decides what the attendee editor
+   *  is. On Google it is a guest list and Save asks whether to mail it; on
+   *  CalDAV (#114) it is a list of participants, it takes any calendar user
+   *  address, the name beside each one is the editor's to write, and Save
+   *  never asks because nothing is sent. An edit that does not touch the list
+   *  still leaves every ATTENDEE line on the server exactly as it found it. */
   const provider = $derived(
     calendars.find((c) => c.id === value.calendarId)?.provider ?? 'google',
   );
@@ -268,7 +272,9 @@
    * user's own spelling for it would invite the wrong person.
    */
   const soleMatch = $derived(
-    guestMatches.length === 1 && !isAddress(draft.trim()) ? guestMatches[0] : undefined,
+    guestMatches.length === 1 && !isAddress(draft.trim()) && !isCalendarAddress(draft.trim())
+      ? guestMatches[0]
+      : undefined,
   );
 
   function pickGuest(p: KnownGuest) {
@@ -565,8 +571,12 @@
     // §5: refused **here**, before Save, the way every other invalid field is —
     // never by a 400 coming back from Google after the user has stopped
     // looking.
-    if (!isAddress(typed)) {
-      error = `${typed} is not an email address.`;
+    // CalDAV takes any calendar user address, which is what an ATTENDEE line
+    // holds; Google takes a mailbox, because it has to mail it.
+    if (provider === 'caldav' ? !isCalendarAddress(typed) : !isAddress(typed)) {
+      error = provider === 'caldav'
+        ? `${typed} is not an address. Use an email address, or a URI such as urn:uuid:….`
+        : `${typed} is not an email address.`;
       invalidField = 'guest';
       return;
     }
@@ -961,14 +971,32 @@
          removable and neither the "(you)" marker nor the self-removal hint
          appears. All three are right — there is no organizer row and no self
          row on an event that does not exist yet. -->
-    {#if provider === 'google'}
+    <!-- CalDAV shows the same editor under its own name (issue #114). What
+         differs is not the list but what happens to it: Google mails an
+         invitation, CalDAV writes an ATTENDEE line and tells nobody, which is
+         what the note below the list says out loud. -->
     <div class="guests card" data-testid="guests">
-      <span class="lab">Guests</span>
+      <span class="lab">{provider === 'caldav' ? 'Attendees' : 'Guests'}</span>
       <ul>
         {#each value.guests as g (g.email)}
           {@const isSelf = g.email.toLowerCase() === (value.selfEmail ?? '').toLowerCase()}
           <li class="guest" data-guest={g.email}>
             <span class="addr" title={g.email}>{g.email}{isSelf ? ' (you)' : ''}</span>
+            {#if provider === 'caldav'}
+              <!-- §114: `CN` is separate from the address, and on an address
+                   with no readable half (`urn:uuid:…`) it is the only thing
+                   anybody can read. Editable per row, because a name typed
+                   once is a name that can be got wrong once. -->
+              <input
+                class="cn"
+                aria-label="Name: {g.email}"
+                placeholder="Name"
+                value={g.displayName ?? ''}
+                oninput={(e) => (value.guests = renamedGuest(value.guests, g.email, e.currentTarget.value))}
+              />
+            {:else if g.displayName}
+              <span class="cn-shown">{g.displayName}</span>
+            {/if}
             <label class="opt">
               <!-- §4. The one field of somebody else's row this form may
                    author — everything else about them is echoed back from
@@ -997,8 +1025,8 @@
       </ul>
       <div class="addguest">
         <input
-          aria-label="Add guest"
-          placeholder="name@example.com"
+          aria-label={provider === 'caldav' ? 'Add attendee' : 'Add guest'}
+          placeholder={provider === 'caldav' ? 'name@example.com or urn:uuid:…' : 'name@example.com'}
           bind:value={draft}
           aria-invalid={invalidField === 'guest' ? 'true' : undefined}
           oninput={() => {
@@ -1064,8 +1092,18 @@
           declining — to say you cannot come, use the event's RSVP buttons.
         </p>
       {/if}
+      {#if provider === 'caldav'}
+        <!-- The sentence this feature stands or falls on. Adding somebody here
+             records that they are a participant; it does not tell them. A
+             server doing CalDAV scheduling (RFC 6638) may send the invitation
+             itself, which is the server's decision and not this app's, and
+             saying so is better than letting a user find out either way. -->
+        <p class="hint" data-testid="attendee-hint">
+          Attendees are recorded on the event. OmaCal does not send
+          invitations; a server that handles scheduling may.
+        </p>
+      {/if}
     </div>
-    {/if}
 
     {#if guests > 0 && provider === 'google'}
       <!-- What used to say "Saving will notify N guests." It cannot say that
@@ -1225,6 +1263,10 @@
   .guest { display: flex; align-items: center; gap: 6px; font-size: 11px; min-width: 0; }
   /* The address takes what is left and truncates rather than wrapping: a long
      one would otherwise push the two controls beside it off the panel. */
+  /* The name sits beside the address it names, and gives way to it when the
+     row is narrow: an address identifies, a name only helps. */
+  .cn { min-width: 0; flex: 1 1 7rem; }
+  .cn-shown { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
   .addr { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
           white-space: nowrap; }
   .opt { display: flex; align-items: center; gap: 4px; color: var(--muted);

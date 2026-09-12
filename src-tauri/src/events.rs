@@ -3000,7 +3000,7 @@ mod tests {
     fn guests_of(attendees: &[Attendee]) -> Vec<crate::write::Guest> {
         attendees
             .iter()
-            .map(|a| crate::write::Guest { email: a.email.clone(), optional: a.optional })
+            .map(|a| crate::write::Guest { email: a.email.clone(), optional: a.optional, display_name: None })
             .collect()
     }
 
@@ -3008,7 +3008,7 @@ mod tests {
     /// has just invited.
     fn guests_plus(attendees: &[Attendee], email: &str) -> Vec<crate::write::Guest> {
         let mut w = guests_of(attendees);
-        w.push(crate::write::Guest { email: email.into(), optional: false });
+        w.push(crate::write::Guest { email: email.into(), optional: false, display_name: None });
         w
     }
 
@@ -4284,8 +4284,8 @@ mod tests {
     async fn creating_an_event_with_guests_invites_them() {
         let fields = crate::write::EventFields {
             guests: Some(vec![
-                crate::write::Guest { email: "dan@x.com".into(), optional: false },
-                crate::write::Guest { email: "eve@x.com".into(), optional: true },
+                crate::write::Guest { email: "dan@x.com".into(), optional: false, display_name: None },
+                crate::write::Guest { email: "eve@x.com".into(), optional: true, display_name: None },
             ]),
             ..sample_fields()
         };
@@ -4409,6 +4409,7 @@ mod tests {
                 guests: Some(vec![crate::write::Guest {
                     email: "dan@x.com".into(),
                     optional: false,
+                    display_name: None,
                 }]),
                 ..sample_fields()
             };
@@ -6905,9 +6906,9 @@ mod tests {
 
         let after = crate::write::EventFields {
             guests: Some(vec![
-                crate::write::Guest { email: "ana@x.com".into(), optional: false },
-                crate::write::Guest { email: "cy@x.com".into(), optional: false },
-                crate::write::Guest { email: "dan@x.com".into(), optional: false },
+                crate::write::Guest { email: "ana@x.com".into(), optional: false, display_name: None },
+                crate::write::Guest { email: "cy@x.com".into(), optional: false, display_name: None },
+                crate::write::Guest { email: "dan@x.com".into(), optional: false, display_name: None },
             ]),
             ..form("Standup", OCCURRENCE, OCCURRENCE + HOUR)
         };
@@ -7031,9 +7032,9 @@ mod tests {
         // that quietly demotes him.
         let after = crate::write::EventFields {
             guests: Some(vec![
-                crate::write::Guest { email: "ana@x.com".into(), optional: false },
-                crate::write::Guest { email: "bo@x.com".into(), optional: true },
-                crate::write::Guest { email: "cy@x.com".into(), optional: false },
+                crate::write::Guest { email: "ana@x.com".into(), optional: false, display_name: None },
+                crate::write::Guest { email: "bo@x.com".into(), optional: true, display_name: None },
+                crate::write::Guest { email: "cy@x.com".into(), optional: false, display_name: None },
             ]),
             ..form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR)
         };

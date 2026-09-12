@@ -20,7 +20,8 @@ pub use client::{CalDavClient, CalDavError, DiscoveredCalendar, Resource, NOT_PR
 pub use ics::{
     escape, events_in, exclude_occurrence, new_event_ics, new_todo_ics, parse, parse_time,
     patch_todo_fields, patch_todo_status, resolve, respond_all, respond_occurrence,
-    rewrite_master, todos_in, truncate_series, unescape, upsert_exception, CalAttendee,
+    rewrite_master, todos_in, truncate_series, unescape, upsert_exception, AttendeeWrite,
+    CalAttendee,
     CalEvent, CalTodo, Component, EventWrite, IcsTime, Property, TodoDue, TodoEdit, WriteTime,
 };
 

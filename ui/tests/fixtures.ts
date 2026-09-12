@@ -1463,6 +1463,18 @@ const FORM_CALENDARS: Calendar[] = [
 ];
 
 /**
+ * One CalDAV calendar, for the attendee editor (issue #114).
+ *
+ * A separate list rather than a fifth row on `FORM_CALENDARS`: the editor's
+ * whole behaviour turns on the *selected* calendar's provider, and a fixture
+ * where the first writable calendar is Google would test the Google form with
+ * extra steps.
+ */
+const FORM_CALDAV_CALENDARS: Calendar[] = [
+  cal({ id: 7, account_id: 3, account_email: 'me@dav.example', summary: 'Radicale', provider: 'caldav', access_role: 'owner', is_primary: true }),
+];
+
+/**
  * `FORM_CALENDARS` plus one writable calendar on a **second account**.
  *
  * A move is same-account only — across accounts there is no move, only a copy
@@ -3023,6 +3035,12 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // against a form whose Add button did nothing.
     'create-guests': {
       anchor: ANCHOR, initial: blankValue(FORM_NOW, null), calendars: FORM_CALENDARS,
+    },
+    // The same create, on CalDAV: attendees rather than guests, any calendar
+    // user address rather than a mailbox, and nobody mailed. Typed by the spec
+    // for `create-guests`' reason — a seeded list would skip the Add path.
+    'create-attendees': {
+      anchor: ANCHOR, initial: blankValue(FORM_NOW, 7), calendars: FORM_CALDAV_CALENDARS,
     },
     // 14:00 to 13:00 on the same day — backwards by an hour, not by a minute,
     // so no rounding anywhere could make the two ends agree.

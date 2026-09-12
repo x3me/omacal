@@ -66,6 +66,11 @@ pub(crate) fn ics_for(
         summary: event.summary.clone(),
         location: event.location.clone(),
         description: event.description.clone(),
+        // No guest list, as before attendees were writable. `AttendeeWrite`
+        // carries no `PARTSTAT` by design, so an export through it would name
+        // everybody and answer for nobody — worse than the honest omission,
+        // and an exported file is a thing other people's calendars read.
+        attendees: None,
         start,
         end,
         // Empty: a single occurrence does not repeat. See the UID note above
