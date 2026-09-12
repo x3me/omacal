@@ -755,7 +755,7 @@ fn apply(app: &AppHandle, feed: &crate::upcoming::Feed, now_ms: i64,
             None => title,
         }
     } else { title };
-    tray.set_title(title)?;
+    tray.set_title(title_to_set(title, cfg!(target_os = "macos")))?;
 
     // The date *is* the icon where it is wanted (2026-09-04): a tray host
     // draws icons and nothing else, which is the same fact the title branch
@@ -770,6 +770,23 @@ fn apply(app: &AppHandle, feed: &crate::upcoming::Feed, now_ms: i64,
     }))?;
 
     Ok(())
+}
+
+/// What actually goes to `set_title`, given what the bar should show.
+///
+/// **`None` does not clear a macOS title.** `tray-icon` 0.24.2's macOS
+/// `set_title_inner` acts only `if let Some(title)` — a `None` stores the
+/// intent and leaves the status item's button saying whatever it last said.
+/// So once any title has been shown, nothing ever took it down: not the
+/// "Show meeting title and countdown" switch (reported 2026-09-12, saved and
+/// honoured, text still there) and not the day's last meeting ending. An
+/// empty string is what reaches `NSButton.setTitle` and clears it.
+///
+/// Linux keeps `None`, where a title is never shown and an empty one is
+/// still a string beside the icon. The platform is a parameter rather than
+/// `cfg!` inside, so the macOS branch is what the Linux-only CI tests.
+fn title_to_set(title: Option<String>, macos: bool) -> Option<String> {
+    if macos { Some(title.unwrap_or_default()) } else { title }
 }
 
 /// Recomputes the snapshot and dresses the tray with it.
@@ -1115,6 +1132,17 @@ mod tests {
 
     /// `None`, not `Some("")` — AppKit treats the two differently, and a
     /// stale title after the meeting is worse than no title at all.
+    /// The switch was saved and honoured and the text stayed: `None` is not
+    /// a clear on macOS, it is a no-op in the tray crate. Nothing upcoming
+    /// and label-off both have to reach the button as an empty string.
+    #[test]
+    fn on_macos_no_title_is_sent_as_an_empty_string_so_the_old_one_is_cleared() {
+        assert_eq!(title_to_set(None, true).as_deref(), Some(""));
+        assert_eq!(title_to_set(Some("Design sync in 5m".into()), true).as_deref(), Some("Design sync in 5m"));
+        // Linux never shows a title and must not gain an empty one beside the icon.
+        assert_eq!(title_to_set(None, false), None);
+    }
+
     #[test]
     fn an_empty_calendar_gets_no_title_rather_than_an_empty_one() {
         assert_eq!(menu_title(&feed(vec![]), T0, &sofia(), TimeFormat::H24), None);
