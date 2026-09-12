@@ -633,12 +633,17 @@
     }
   }
 
+  /** Beside the control, like the rest of this pane (2026-09-12, reported
+   *  from macOS: "no Saved coming"). The save was real; the shared note only
+   *  ever carried the error, so success looked identical to nothing. */
+  let dateNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   async function toggleShowDate(on: boolean) {
-    note = null;
+    dateNote = { text: 'Applying…', kind: 'info' };
     try {
       settings = await setShowDate(on);
+      dateNote = { text: 'Saved', kind: 'info' };
     } catch (e) {
-      note = { text: String(e), kind: 'error' };
+      dateNote = { text: String(e), kind: 'error' };
       // Same checkbox repair as `toggleTrayIcon`.
       settings = settings ? { ...settings } : null;
     }
@@ -1311,15 +1316,20 @@
         {/if}
       </p>
 
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={settings?.showDate ?? false}
-          disabled={!settings}
-          onchange={(e) => toggleShowDate(e.currentTarget.checked)}
-        />
-        Show today's date
-      </label>
+      <div class="inline">
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={settings?.showDate ?? false}
+            disabled={!settings}
+            onchange={(e) => toggleShowDate(e.currentTarget.checked)}
+          />
+          Show today's date
+        </label>
+        {#if dateNote}
+          <span class="rownote" class:err={dateNote.kind === 'error'} data-testid="show-date-note">{dateNote.text}</span>
+        {/if}
+      </div>
       <p class="hint">Show the date beside the menu-bar icon. Existing day-only displays use Custom (%-d).</p>
       {#if settings?.showDate}
       <div class="row">

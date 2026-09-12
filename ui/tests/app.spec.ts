@@ -5276,6 +5276,9 @@ test.describe("App: showing today's date", () => {
       () => window.__harness.calls.filter((c) => c.cmd === 'set_show_date').map((c) => c.args),
     );
     expect(calls).toEqual([{ on: true }]);
+    // And it says so beside the box — the save was always real; the answer
+    // went to the foot of the modal, which reads as no answer.
+    await expect(modal.getByTestId('show-date-note')).toHaveText('Saved');
 
     // Reopened, the box shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
