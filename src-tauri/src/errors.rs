@@ -218,6 +218,16 @@ const SAFE_EXACT: &[&str] = &[
     // two calendars, only the user can say which copy to delete, and nothing
     // else in the app will ever tell them.
     crate::events::MOVED_NOT_REMOVED,
+    // src-tauri/src/zoom.rs — fixed, secret-free refusals from the Zoom OAuth
+    // and create path. Endpoint status/error detail is logged separately and
+    // never interpolated into these strings; each reaches `connect_zoom` or an
+    // event command through a bare `?` and exact `user_facing` match.
+    crate::zoom::NOT_CONFIGURED,
+    crate::zoom::RECONNECT,
+    crate::zoom::AUTH_FAILED,
+    crate::zoom::CREATE_FAILED,
+    crate::zoom::ALL_DAY_UNSUPPORTED,
+    crate::zoom::TOO_LONG,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -501,6 +511,12 @@ mod tests {
             crate::export::EXPORT_FAILED,
             crate::export::EXPORT_DISMISSED,
             crate::export::EXPORT_GONE,
+            crate::zoom::NOT_CONFIGURED,
+            crate::zoom::RECONNECT,
+            crate::zoom::AUTH_FAILED,
+            crate::zoom::CREATE_FAILED,
+            crate::zoom::ALL_DAY_UNSUPPORTED,
+            crate::zoom::TOO_LONG,
         ];
         for expected in EXPECTED {
             assert!(
