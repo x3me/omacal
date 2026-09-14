@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import { formatDate, type DateFormat } from './datefmt';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
@@ -8,7 +9,7 @@
 
   type Panel = { agenda_days?: { date_label: string; events: Event[] }[]; truncated?: boolean; day_start_ms: number; day_end_ms: number; timezone: string;
     time_format: '12h' | '24h'; date_format?: DateFormat; label: boolean; join_minutes: number; events: Event[] };
-  type Feed = { events: Event[]; panel: Panel; tasks: { title: string; overdue: boolean }[] };
+  type Feed = { combine_identical_events?: boolean; events: Event[]; panel: Panel; tasks: { title: string; overdue: boolean }[] };
   let feed = $state<Feed | null>(null);
   let now = $state(Date.now());
   let error = $state('');
@@ -16,7 +17,7 @@
   // Whether the fold of finished events is open. Renderer state, not a
   // setting: a fold that stayed open across popups would not be a fold.
   let earlierOpen = $state(false);
-  const sections = $derived(panel ? agendaSections(panel, now, { earlierOpen }) : []);
+  const sections = $derived(panel ? agendaSections(panel, now, { earlierOpen, deduplicateAllDay: feed?.combine_identical_events === undefined }) : []);
   const todayTimed = $derived(uniqueAllDay(panel?.events ?? []).filter(e => !e.all_day));
   const active = $derived(todayTimed.find(e => e.start_ms <= now && e.end_ms > now));
   const hasOngoing = $derived(sections.some(s => s.title === 'ONGOING'));
@@ -91,14 +92,14 @@
           {:else if sec.title === 'ALL DAY'}
             <!-- Today's all-day events keep their compact block: a title is
                  all there is to say, and the day is the one already open. -->
-            <div class="all-day"><small>ALL DAY</small>{#each sec.rows as event}<button onclick={() => action(date(sec.anchor_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>
+            <div class="all-day"><small>ALL DAY</small>{#each sec.rows as event}<button onclick={() => action(date(sec.anchor_ms))}>{event.title ?? '(no title)'}<CalendarColors colors={event.colors} /></button>{/each}</div>
           {:else}
             {#if sec.title !== 'ONGOING' && sec.title !== 'UPCOMING'}<small class="section-label">{sec.title}</small>{/if}
             {#if sec.title === 'ONGOING' || (sec.title === 'UPCOMING' && !hasOngoing)}{@render nowMarker()}{/if}
             {#each sec.rows as event}
               <button class="agenda-row" class:past={event.end_ms <= now} style:--event-color={color(event)} onclick={() => action(date(event.all_day ? sec.anchor_ms : event.start_ms))}>
                 <time>{event.all_day ? 'All day' : clock(event.start_ms)}</time>
-                <span><strong>{event.title ?? '(no title)'}</strong><small>{event.all_day ? (event.calendar ?? '') : event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{!event.all_day && event.calendar ? ` · ${event.calendar}` : ''}</small></span>
+                <span><strong>{event.title ?? '(no title)'}</strong><small>{event.all_day ? (event.calendar ?? '') : event.end_ms <= now ? 'Ended' : event.start_ms <= now ? `${Math.ceil((event.end_ms - now) / 60000)}m left` : clock(event.end_ms)}{!event.all_day && event.calendar ? ` · ${event.calendar}` : ''}</small></span><CalendarColors colors={event.colors} />
               </button>
             {/each}
             {#if sec.more > 0}
@@ -143,5 +144,5 @@
   .now-marker { display: flex; align-items: center; gap: 10px; color: var(--text, #e5e7eb); padding: 6px 0; margin: 8px 0; font-size: 11px; font-weight: 600; }
   .now-track { flex: 1; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--text, #e5e7eb) 15%, transparent); overflow: hidden; }
   .now-fill { display: block; height: 100%; border-radius: inherit; background: var(--now, #e2564a); }
-  .all-day { border-top: 1px solid var(--hairline, #444); margin-top: 12px; padding-top: 10px; } .all-day button { display: block; width: 100%; text-align: left; } .section-label { display: block; margin-top: 16px; } .empty { padding: 14px 0; }
+  .all-day { border-top: 1px solid var(--hairline, #444); margin-top: 12px; padding-top: 10px; } .all-day button { position: relative; display: block; width: 100%; text-align: left; } .section-label { display: block; margin-top: 16px; } .empty { padding: 14px 0; }
 </style>

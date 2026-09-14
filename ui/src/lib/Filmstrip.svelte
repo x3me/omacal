@@ -1,5 +1,6 @@
 <!-- ui/src/lib/Filmstrip.svelte -->
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import { formatDate } from './datefmt';
   import { dateFormat } from './date.svelte';
   import { clockFormat } from './clock.svelte';
@@ -183,6 +184,8 @@
                    tooltip did; the popover is one click away for the rest. -->
               <button
                 class="srow"
+                data-combined-count={ev.copies?.length || undefined}
+                style:color={ev.copies?.length ? "var(--text)" : undefined}
                 class:allday={ev.is_all_day}
                 class:nobodycoming={ev.all_guests_declined}
                 title={ev.all_guests_declined ? 'Everyone declined' : undefined}
@@ -197,6 +200,7 @@
                   {ev.is_all_day ? 'All day' : `${hhmm(ev.start_ms)}–${hhmm(ev.end_ms)}`}
                 </em>
                 <b>{ev.title}</b>
+                <CalendarColors colors={ev.copies?.map(copy => copy.color)} />
                 {#if locationLabel(ev.location)}
                   <!-- Right beside the title, not across the row: the second
                        thing anyone looks for should not be a screen-width
@@ -290,7 +294,7 @@
   .srow-li:hover, .srow-li:focus-within {
     background: color-mix(in srgb, var(--text) 6%, transparent); }
 
-  .srow { appearance: none; -webkit-appearance: none; font: inherit;
+  .srow { position: relative; appearance: none; -webkit-appearance: none; font: inherit;
           display: flex; align-items: baseline; gap: 10px;
           flex: 0 1 auto; min-width: 0;
           text-align: left; cursor: pointer; border: 0;

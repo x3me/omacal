@@ -2,6 +2,7 @@
 """Read one bounded snapshot for the shell; never wait on a FIFO or follow a link."""
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -26,11 +27,20 @@ def clean(value, depth=0):
     raise ValueError('invalid field')
 
 
+def colors_valid(event):
+    if 'colors' not in event:
+        return True
+    colors = event['colors']
+    return isinstance(colors, list) and len(colors) <= 200 and all(
+        isinstance(c, str) and len(c) == 7 and re.fullmatch(r'#[0-9a-fA-F]{6}', c) for c in colors)
+
+
 def events_valid(events):
     # The app can publish point-in-time events. Rejecting an equal start/end
     # here blanks the entire widget, including every other upcoming meeting.
     return isinstance(events, list) and len(events) <= 200 and all(isinstance(e, dict)
         and all(type(e.get(k)) in (int, float) and abs(e[k]) < 8640000000000000 for k in ('start_ms', 'end_ms'))
+        and colors_valid(e)
         and e['end_ms'] >= e['start_ms'] and type(e.get('all_day')) is bool
         and all(e.get(k) is None or isinstance(e[k], str) for k in ('title', 'color', 'conference', 'location', 'calendar', 'response'))
         for e in events)

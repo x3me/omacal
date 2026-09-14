@@ -115,7 +115,7 @@ Panel {
   // where a day is cut and what "+N more" points at are decided there. The
   // Model.js path stays for a feed from an app older than the panel.
   readonly property var panelSections: (feed && feed.panel && feed.panel.agenda_days)
-    ? Timeline.agendaSections(feed.panel, nowMs, { earlierOpen: root.earlierOpen })
+    ? Timeline.agendaSections(feed.panel, nowMs, { earlierOpen: root.earlierOpen, deduplicateAllDay: feed.combine_identical_events === undefined })
     : Model.agendaSections(feed, nowMs, root.setting("maxEvents", 12))
   readonly property var runningEvent: Model.current(events, nowMs)
   readonly property var nextEvent: Model.nextAhead(events, nowMs)
@@ -310,7 +310,7 @@ Panel {
     stdout: StdioCollector {
       onStreamFinished: {
         var parsed = text.length <= 1048576 ? Model.parseFeed(text) : null
-        if (parsed) {
+        if (parsed && parsed.combine_identical_events === undefined) {
           parsed.events = Timeline.uniqueAllDay(parsed.events)
           if (parsed.panel) {
             parsed.panel.events = Timeline.uniqueAllDay(parsed.panel.events)
@@ -916,6 +916,12 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onEntered: { root.cursorActive = true; root.rowCursor = row.flatIndex }
       onClicked: root.activateRow(row.event)
+    }
+
+    CalendarColors {
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      colors: row.event ? row.event.colors || [] : []
     }
 
     RowLayout {

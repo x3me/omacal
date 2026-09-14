@@ -3,6 +3,8 @@
   import { formatDate } from './datefmt';
   import { dateFormat } from './date.svelte';
   import { meetingUrl } from './location';
+  import type { EventCopy } from './api';
+  import type { Calendar } from './calendars';
   import { exportEvent, openConference } from './api';
   import { clockFormat } from './clock.svelte';
   import { formatClock } from './timefmt';
@@ -27,6 +29,9 @@
     ondelete,
     oncopy,
     onduplicate,
+    copies = [],
+    calendars = [],
+    onchoosecopy = null,
   }: {
     detail: EventDetail;
     anchor: Rect;
@@ -83,6 +88,9 @@
     /** Opens an unsaved copy. Read-only sources are fine; null means there
      * is no writable destination calendar available. */
     onduplicate: (() => void) | null;
+    copies?: EventCopy[];
+    calendars?: Calendar[];
+    onchoosecopy?: ((copy: EventCopy) => void) | null;
   } = $props();
 
   const segments = $derived(descriptionSegments(detail.description));
@@ -614,6 +622,22 @@
     </div>
   {/if}
 
+  {#if copies.length > 1 && onchoosecopy}
+    <label class="copy-picker">
+      <span>Calendar copy</span>
+      <select aria-label="Calendar copy" value={detail.id} onchange={(e) => {
+        const copy = copies.find((c) => c.id === Number(e.currentTarget.value));
+        if (copy) onchoosecopy?.(copy);
+      }}>
+        {#each copies as copy (copy.id)}
+          {@const calendar = calendars.find((c) => c.id === copy.calendar_id)}
+          <option value={copy.id}>{calendar?.summary ?? 'Calendar'}{calendar ? ` · ${calendar.account_email}` : ` ${copy.calendar_id}`}</option>
+        {/each}
+      </select>
+      <small>Changes apply only to this calendar’s copy.</small>
+    </label>
+  {/if}
+
   <!-- Edit and Delete require the backend to say this account may write to the calendar the
        event is on (`can_edit`, from the same `access_role` column
        `create_impl`/`update_impl` check server-side). Offering either control
@@ -637,6 +661,10 @@
 </div>
 
 <style>
+  .copy-picker { display: grid; gap: 5px; margin-top: 12px; }
+  .copy-picker span, .copy-picker small { color: var(--muted); font-size: 11px; }
+  .copy-picker select { min-width: 0; width: 100%; font: inherit; color: var(--text);
+    background-color: var(--surface); border: 1px solid var(--hairline); border-radius: 5px; padding: 6px 26px 6px 6px; }
   .scrim { position: fixed; inset: 0; background: none; border: 0; cursor: default; z-index: 40; }
 
   /* `overflow-wrap: anywhere` is on the *panel*, not on the field that

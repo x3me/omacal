@@ -1,5 +1,6 @@
 export interface Event {
   title: string | null; start_ms: number; end_ms: number; all_day: boolean;
+  colors?: string[];
   conference?: string | null; color?: string | null; calendar?: string | null;
 }
 export function progress(event: Event, now: number): number;
@@ -22,4 +23,4 @@ export interface AgendaPanel<T extends Event = Event> {
 export interface AgendaSection<T extends Event = Event> {
   title: string; kind: 'rows' | 'folded'; rows: T[]; more: number; anchor_ms: number; count?: number;
 }
-export function agendaSections<T extends Event>(panel: AgendaPanel<T> | null | undefined, now: number, opts?: { earlierOpen?: boolean }): AgendaSection<T>[];
+export function agendaSections<T extends Event>(panel: AgendaPanel<T> | null | undefined, now: number, opts?: { earlierOpen?: boolean; deduplicateAllDay?: boolean }): AgendaSection<T>[];

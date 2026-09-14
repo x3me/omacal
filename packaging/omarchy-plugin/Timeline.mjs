@@ -85,7 +85,12 @@ export function agendaSections(panel, now, opts) {
   const base = Number(panel.day_start_ms) || 0;
   // Half a day in, so the instant names the right date across a DST edge.
   const anchor = (d) => base + d * DAY_MS + DAY_MS / 2;
-  const list = (d) => uniqueAllDay(days[d] && Array.isArray(days[d].events) ? days[d].events : []);
+  // Modern feeds already apply the user's combination setting, including
+  // keeping identical all-day copies separate when it is off.
+  const list = (d) => {
+    const events = days[d] && Array.isArray(days[d].events) ? days[d].events : [];
+    return opts && opts.deduplicateAllDay === false ? events : uniqueAllDay(events);
+  };
   const dayTitle = (d) => (d === 1 ? 'TOMORROW' : String((days[d] && days[d].date_label) || ''));
   // No object spread in this module: the QML engine loads it too, and its
   // JavaScript rejects a spread in an object literal as a syntax error — one

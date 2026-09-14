@@ -1,5 +1,6 @@
 <!-- ui/src/lib/BigYearRibbon.svelte -->
 <script lang="ts">
+  import CalendarColors from './CalendarColors.svelte';
   import { isWeekendColumn } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
   import type { BigYearPayload, UiEvent } from './api';
@@ -187,6 +188,8 @@
                  left edge were built for exactly this and now carry it. -->
             <button
               class="pill"
+              data-combined-count={ev.copies?.length || undefined}
+              style:color={ev.copies?.length ? "var(--text)" : undefined}
               class:cont={lane.cont_left || lane.cont_right}
               class:cl={lane.cont_left}
               class:cr={lane.cont_right}
@@ -202,7 +205,7 @@
               title={ev.title}
               aria-label={ev.title}
               onclick={(e) => openPill(ev, e)}
-            >{lane.cont_left ? '' : ev.title}</button>
+            >{lane.cont_left ? '' : ev.title}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
           {/each}
           {#if row.overflow.length}
             <!-- A span, not a button: like `MonthRow.bar_overflow`, these
@@ -409,7 +412,7 @@
      `line-height: var(--lane-h)` centres the label without a flex context,
      which would fight `text-overflow: ellipsis`. The pill stretches to the
      track, so its content box is the lane height and one line box fills it. */
-  .pill { appearance: none; -webkit-appearance: none; font: inherit;
+  .pill { position: relative; appearance: none; -webkit-appearance: none; font: inherit;
           text-align: left; cursor: pointer; border: 0;
           font-size: 10.5px; line-height: var(--lane-h);
           border-radius: var(--event-pill-radius, 999px); padding: 0 5px; white-space: nowrap;

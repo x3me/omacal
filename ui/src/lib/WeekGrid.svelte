@@ -16,7 +16,9 @@
     BAND_ROWS, FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
     velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
-  import type { Lane, WeekPayload, UiEvent } from './api';
+  import type { DayColumn, Lane, WeekPayload, UiEvent } from './api';
+  import type { Calendar } from './calendars';
+  import { containsPlacement } from './combined';
   import type { Rect } from './position';
   import EventBlock from './EventBlock.svelte';
   import AllDayBand from './AllDayBand.svelte';
@@ -28,7 +30,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
+  let { week, calendars = [], weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -117,6 +119,7 @@
      *  what Ctrl+V pastes. Not through `relay` — a copy leaves the popover
      *  open, the way every selection survives being copied. */
     oncopy: (occurrence: Occurrence) => void;
+    calendars?: Calendar[];
     onduplicate: ((occurrence: Occurrence, rect: Rect) => void) | null;
     /** A completed drag, handed up rather than written here: the grid decides
      *  *which occurrence* moved and *where to*, and `App` owns every write —
@@ -449,6 +452,7 @@
   let selectedEndMs = $state<number | null>(null);
   let anchor = $state<Rect | null>(null);
   let detail = $state<EventDetail | null>(null);
+  let selectedEvent = $state<UiEvent | null>(null);
 
   function isSelected(event: UiEvent): boolean {
     return selectedId === event.id && selectedStartMs === event.start_ms;
@@ -722,6 +726,12 @@
       startSweep(day, renderedDays.findIndex((d) => d.start_ms === day.start_ms), e, colBox);
       return;
     }
+    if (event.copies && event.copies.length > 1) {
+      // A combined block has no single event to move. Choose a copy in its
+      // details first.
+      draggedNotClicked = false;
+      return;
+    }
     const box = target.getBoundingClientRect();
 
     drag = {
@@ -946,6 +956,8 @@
     // on press rather than here.
     if (draggedNotClicked) return;
 
+    hoveredOccurrence = null;
+    selectedEvent = event;
     selectedId = event.id;
     selectedStartMs = event.start_ms;
     selectedEndMs = event.end_ms;
@@ -1005,6 +1017,7 @@
   }
 
   function closePopover() {
+    selectedEvent = null;
     selectedId = null;
     selectedStartMs = null;
     selectedEndMs = null;
@@ -1102,10 +1115,75 @@
   };
   let sweep = $state<Sweep | null>(null);
   let altHeld = $state(false);
+  let hoveredOccurrence = $state<{ day: number; id: number; startMs: number } | null>(null);
+  // Indices belong to one payload. A drag or sync can change them without a
+  // pointer move, so resolve the hovered occurrence against the current data.
+  const hoveredPlacement = $derived.by(() => {
+    const hover = hoveredOccurrence;
+    if (!hover) return null;
+    const day = renderedDays.find(d => d.start_ms === hover.day);
+    const idx = day?.events.findIndex(e => e.id === hover.id && e.start_ms === hover.startMs) ?? -1;
+    return idx < 0 ? null : { day: hover.day, idx };
+  });
+  function trackEventHover(day: DayColumn, e: PointerEvent) {
+    if (e.buttons) return; // A move/resize keeps the event picked up at the press.
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    const y = (e.clientY - r.top) / r.height;
+    const underTime = day.placed.filter(p => y >= p.top + 1 / r.height && y < p.top + p.height - 1 / r.height);
+    // Use the packed columns, not the expanded DOM boxes: otherwise the first
+    // event to expand owns every subsequent hover over its neighbours.
+    const current = underTime.find(p => hoveredPlacement?.day === day.start_ms && p.idx === hoveredPlacement.idx);
+    const candidate = underTime.find(p => x >= p.column / p.columns && x < (p.column + 1) / p.columns);
+    // Shared copy targets may fill lanes belonging to staggered meetings.
+    // Keep those targets until the pointer leaves this event's time span;
+    // only completely covered meetings need an internal handoff.
+    const keepShared = current && (day.events[current.idx].copies?.length ?? 0) > 1
+      && candidate && !containsPlacement(current, candidate);
+    const p = keepShared ? current : candidate ?? current;
+    const event = p && day.events[p.idx];
+    hoveredOccurrence = event ? { day: day.start_ms, id: event.id, startMs: event.start_ms } : null;
+  }
   // The gesture is chosen at pointer-down; pressing Alt during a move must
   // not advertise creation, and releasing it during a sweep must not end it.
   const createMode = $derived(sweep !== null || (altHeld && drag === null));
+  const hoverContext = $derived.by(() => {
+    const hover = hoveredPlacement;
+    if (!hover || createMode || drag) return null;
+    const day = renderedDays.find(d => d.start_ms === hover.day);
+    const active = day?.placed.find(p => p.idx === hover.idx);
+    if (!day || !active) return null;
+    // Only roll up cards that this expansion completely covers. Staggered
+    // overlaps (and a longer enclosing event) remain reachable above/below
+    // the active card, so leave their labels visible and omit their markers.
+    // Fractions such as 10/24 + 1/24 can slightly exceed 11/24; tolerate that
+    // rounding when two cards share their start or end boundary.
+    const peers = day.placed.filter(p => containsPlacement(active, p));
+    const segments = peers.flatMap(p => {
+      const ev = day.events[p.idx];
+      const colors = ev.copies?.map(copy => copy.color) ?? [ev.color];
+      return colors.map((color, i) => ({ color,
+        left: (p.column + i / colors.length) / p.columns,
+        width: 1 / (p.columns * colors.length) }));
+    });
+    const copyHoverLane = peers.length > 1
+      ? { left: active.column / active.columns, width: 1 / active.columns } : undefined;
+    return { day: day.start_ms, idx: active.idx, peers, segments, copyHoverLane };
+  });
   const trackAlt = (e: KeyboardEvent | PointerEvent) => { altHeld = e.altKey; };
+  function trackPointer(e: PointerEvent) {
+    trackAlt(e);
+    // Swapping the pointer-transparent label for copy panels under a stationary
+    // cursor can skip Chromium's column leave event. The next move outside the
+    // columns must still return that event to its resting appearance.
+    // A handoff may remove the old copy target before this window handler
+    // runs. The dispatch path still names its column; the detached target's
+    // current ancestors do not, and would immediately cancel the new hover.
+    const path = e.composedPath();
+    if (!bodyEl || !path.includes(bodyEl) || !path.some(node => node instanceof Element && node.matches('.col'))) {
+      hoveredOccurrence = null;
+    }
+  }
 
   let viewportWidth = $state(0);
   let viewportHeight = $state(0);
@@ -1432,7 +1510,7 @@
     const baseline = payloadResponse(id, startMs);
     // Not in this week's payload (any more) — nothing to restyle, and
     // nothing to record a baseline against.
-    if (baseline === undefined) return;
+    if (baseline === undefined) { onresponded?.(); return; }
     const next = new Map(responseOverrides);
     next.set(overrideKey(id, startMs), { response, baseline });
     responseOverrides = next;
@@ -1484,8 +1562,8 @@
   }
 </script>
 
-<svelte:window onkeydown={trackAlt} onkeyup={trackAlt} onpointermove={trackAlt}
-  onblur={() => { altHeld = false; }}
+<svelte:window onkeydown={trackAlt} onkeyup={trackAlt} onpointermove={trackPointer}
+  onblur={() => { altHeld = false; hoveredOccurrence = null; }}
   bind:innerWidth={viewportWidth} bind:innerHeight={viewportHeight} />
 
 <div class="grid" style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}" onwheel={wheelPan}>
@@ -1620,7 +1698,9 @@
   {#each renderedDays as day, dayIndex (day.start_ms)}
     {@const isToday = day.start_ms === todayStart}
     {@const ghost = sweepStyle(day)}
-    <div class="hour-crop" style:height={`${visibleHeight}px`}><div class="col" style={columnStyle(day)} class:today={isToday}
+    <div class="hour-crop" style:height={`${visibleHeight}px`}><div class="col" role="group" style={columnStyle(day)} class:today={isToday}
+         onpointermove={(e) => trackEventHover(day, e)}
+         onpointerleave={() => { hoveredOccurrence = null; }}
          class:keyboard={keyboardCursor?.dayStartMs === day.start_ms}
          data-start-ms={day.start_ms}
          data-kbd-selected-day={keyboardCursor?.dayStartMs === day.start_ms ? '' : undefined}>
@@ -1694,11 +1774,35 @@
         ></button>
       {/if}
 
-      {#each day.placed as p}
+      <!-- A drag or sync can reorder the packed array. Keep focus and copy
+           panels with their occurrence, never with its old array position. -->
+      {#each day.placed as p (`${day.events[p.idx].id}:${day.events[p.idx].start_ms}`)}
         <EventBlock
           event={day.events[p.idx]}
           placed={p}
           {createMode}
+          {calendars}
+          onfocuschange={(focused) => {
+            const event = day.events[p.idx];
+            if (focused) {
+              hoveredOccurrence = { day: day.start_ms, id: event.id, startMs: event.start_ms };
+            } else if (hoveredOccurrence?.day === day.start_ms && hoveredOccurrence.id === event.id
+              && hoveredOccurrence.startMs === event.start_ms) {
+              // Removing a copy panel can blur it after hover has already
+              // moved to a neighbor. Only release this event's expansion.
+              hoveredOccurrence = null;
+            }
+          }}
+          onopencopy={(copy, rect, thenEdit = false) => {
+            draggedNotClicked = false;
+            void openPopover({ ...day.events[p.idx], ...copy }, rect, thenEdit);
+          }}
+          hovered={hoveredPlacement?.day === day.start_ms && hoveredPlacement.idx === p.idx}
+          overlapColors={hoverContext?.day === day.start_ms && hoverContext.idx === p.idx
+            && (!day.events[p.idx].copies?.length || hoverContext.peers.length > 1) ? hoverContext.segments : []}
+          copyHoverLane={hoverContext?.day === day.start_ms && hoverContext.idx === p.idx ? hoverContext.copyHoverLane : undefined}
+          obscured={hoverContext?.day === day.start_ms && hoverContext.idx !== p.idx
+            && hoverContext.peers.some(peer => peer.idx === p.idx)}
           onopen={openPopover}
           onedit={(ev, r) => openPopover(ev, r, true)}
           ongrab={(ev, e) => startDrag(ev, day, e)}
@@ -1752,8 +1856,12 @@
        states can disagree. -->
   {@const occurrence = { detail, startMs, endMs: selectedEndMs ?? startMs }}
   {@const rect = anchor}
+  {#key detail.id}
   <EventPopover
     {detail}
+    {calendars}
+    copies={selectedEvent?.copies}
+    onchoosecopy={(copy) => { if (selectedEvent) void openPopover({ ...selectedEvent, ...copy }, rect); }}
     {anchor}
     occurrenceStartMs={startMs}
     occurrenceEndMs={occurrence.endMs}
@@ -1764,6 +1872,7 @@
     oncopy={() => oncopy(occurrence)}
     onduplicate={onduplicate ? () => relay(onduplicate!, occurrence, rect) : null}
   />
+  {/key}
 {/if}
 
 <style>
