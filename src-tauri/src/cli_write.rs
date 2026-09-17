@@ -275,8 +275,8 @@ pub(crate) fn notify_for_reach(
     }
 }
 
-/// The notify rule on a calendar whose provider mails nobody (CalDAV,
-/// `EventDetail::mails_guests` false). There is nobody to notify however
+/// The notify rule on a calendar whose provider mails nobody (anything but
+/// Google: CalDAV, WebCal, local — see `EventDetail::mails_guests`). There is nobody to notify however
 /// many attendees the event has, so the flag is unnecessary, `none` is
 /// accepted as what happens anyway, and `all` is refused with the reason —
 /// the own-copy shape above, for a different reason. Read *instead of*
@@ -286,7 +286,7 @@ pub(crate) fn notify_without_mail(asked: Option<&str>) -> Result<&'static str, S
     match asked {
         None | Some("none") => Ok("none"),
         Some("all") => Err(
-            "OmaCal emails nobody on a CalDAV calendar, so there is nobody to notify; drop --notify"
+            "OmaCal emails nobody on this calendar, so there is nobody to notify; drop --notify"
                 .into(),
         ),
         Some(other) => Err(format!("--notify takes all|none, not \"{other}\"")),
@@ -300,7 +300,7 @@ pub(crate) fn notify_without_mail(asked: Option<&str>) -> Result<&'static str, S
 /// should fall on.
 async fn calendar_mails_guests(pool: &SqlitePool, calendar_id: Option<i64>) -> bool {
     let Some(id) = calendar_id else { return true };
-    !matches!(crate::caldav_write::is_caldav_calendar(pool, id).await, Ok(true))
+    !matches!(crate::caldav_write::calendar_mails_guests(pool, id).await, Ok(false))
 }
 
 /// [`calendar_mails_guests`] for a create: the calendar named, or the one
@@ -1083,7 +1083,7 @@ mod tests {
         assert_eq!(notify_without_mail(None).unwrap(), "none");
         assert_eq!(notify_without_mail(Some("none")).unwrap(), "none");
         let err = notify_without_mail(Some("all")).unwrap_err();
-        assert!(err.contains("nobody to notify") && err.contains("CalDAV"), "{err}");
+        assert!(err.contains("nobody to notify") && err.contains("this calendar"), "{err}");
         assert!(notify_without_mail(Some("everyone")).unwrap_err().contains("all|none"));
     }
 
@@ -1113,6 +1113,21 @@ mod tests {
         assert!(!create_mails_guests(&pool, Some(1)).await, "named");
         assert!(!create_mails_guests(&pool, None).await, "by the default rule");
         assert!(create_mails_guests(&pool, Some(99)).await, "unknown calendar asks");
+
+        // WebCal feeds and on-device calendars are read as silent too — only
+        // Google mails. The `== "google"` rule (not `!= "caldav"`) is what
+        // keeps a new provider from accidentally mailing.
+        for provider in ["webcal", "local"] {
+            sqlx::query("UPDATE accounts SET provider = ?1")
+                .bind(provider)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(
+                !create_mails_guests(&pool, Some(1)).await,
+                "{provider} does not mail"
+            );
+        }
     }
 
     /// §4's notify rule: guests demand an answer, solitude implies none.

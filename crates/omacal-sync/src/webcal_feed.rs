@@ -1,0 +1,467 @@
+//! Read-only WebCal subscriptions: one public `webcal://` / `https://` feed URL
+//! synced into one `reader` calendar.
+//!
+//! The shape deliberately mirrors [`crate::caldav::sync_caldav_calendar`]:
+//! a cheap change probe (conditional GET on the stored ETag / Last-Modified,
+//! kept in `sync_state.sync_token` — the same row CalDAV's ctag rides in),
+//! then a full fetch, `BEGIN IMMEDIATE` plus a `sync_enabled` re-check,
+//! upserts and window-bounded inferred deletions.
+//!
+//! Differences are honest, not hidden. No ctag, REPORT or per-resource etag
+//! exists here, so the whole file is parsed at once (`omacal_caldav::parse`
+//! once, then `events_in`) and the window filter is client-side. No
+//! credentials travel, so redirects may cross hosts (feeds commonly
+//! redirect); cleartext `http://` outside the user's own network is still
+//! refused, exactly like CalDAV.
+//!
+//! Tasks (VTODO) are out of scope: subscribed calendars are events-only
+//! (`supports_tasks = 0`).
+
+use sqlx::SqlitePool;
+use url::Url;
+
+use crate::SyncOutcome;
+
+/// Upper bound for one feed fetch — the same 32 MiB `import.rs` allows for a
+/// file import. A public feed bigger than that is not a calendar subscription
+/// but a denial-of-service with a URL.
+pub const MAX_FEED_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WebcalFeedError {
+    #[error("the server answered {0}")]
+    Http(reqwest::StatusCode),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Normalizes a user-typed feed address: trims, rewrites `webcal://` (and
+/// `webcals://`) to `https://`, and validates the scheme/host.
+///
+/// The returned string is what is stored (`accounts.server_url` and the
+/// calendar's `google_id`) and what is fetched — one spelling, so
+/// re-subscribing the same feed lands on the same rows.
+pub fn normalize_feed_url(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("A calendar URL is required");
+    }
+    let https = if let Some(rest) = trimmed.strip_prefix("webcals://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("webcal://") {
+        format!("https://{rest}")
+    } else {
+        trimmed.to_string()
+    };
+    let url = Url::parse(&https)?;
+    omacal_caldav::https_or_private(&url)?;
+    Ok(url.to_string())
+}
+
+/// A display name when the user did not give one: the feed's host, which is
+/// what distinguishes one subscription from another in the account list.
+pub fn default_name_for(feed_url: &str) -> String {
+    Url::parse(feed_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "Subscribed calendar".to_string())
+}
+
+/// FNV-1a over the body: stable across processes (unlike `DefaultHasher`,
+/// whose SipHash keys are random per run), dependency-free, and good enough
+/// for a change probe — collisions only skip a sync, never corrupt one.
+fn content_hash(body: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in body.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("hash:{h:016x}")
+}
+
+fn cursor_for(etag: Option<&str>, last_modified: Option<&str>, body: &str) -> String {
+    etag.or(last_modified)
+        .map(str::to_string)
+        .unwrap_or_else(|| content_hash(body))
+}
+
+pub struct FetchedFeed {
+    pub body: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+fn feed_client() -> Result<reqwest::Client, WebcalFeedError> {
+    // Shared builder from `omacal-caldav`: no credentials travel, so feeds
+    // may redirect cross-host; the cleartext rule stays identical.
+    omacal_caldav::anonymous_feed_client()
+        .map_err(WebcalFeedError::Other)
+}
+
+/// GETs the feed, sending the cached cursor as conditional headers.
+/// `Ok(None)` is "not modified" (HTTP 304): nothing changed, sync nothing.
+pub async fn fetch_feed(
+    feed_url: &str,
+    cached_token: Option<&str>,
+) -> Result<Option<FetchedFeed>, WebcalFeedError> {
+    let url = Url::parse(feed_url).map_err(anyhow::Error::from)?;
+    omacal_caldav::https_or_private(&url).map_err(WebcalFeedError::Other)?;
+    let mut req = feed_client()?
+        .get(url)
+        .header("Accept", "text/calendar");
+    // A `hash:` cursor is content-derived, not server-issued: sending it as
+    // a validator would be noise, so only ETag / Last-Modified travel.
+    if let Some(t) = cached_token.filter(|t| !t.starts_with("hash:")) {
+        req = req.header("If-None-Match", t).header("If-Modified-Since", t);
+    }
+    let resp = req.send().await.map_err(anyhow::Error::from)?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(WebcalFeedError::Http(status));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_FEED_BYTES as u64 {
+            return Err(WebcalFeedError::Other(anyhow::anyhow!(
+                "the feed is larger than {MAX_FEED_BYTES} bytes"
+            )));
+        }
+    }
+    let etag = resp
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let last_modified = resp
+        .headers()
+        .get("Last-Modified")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = resp.bytes().await.map_err(anyhow::Error::from)?;
+    if bytes.len() > MAX_FEED_BYTES {
+        return Err(WebcalFeedError::Other(anyhow::anyhow!(
+            "the feed is larger than {MAX_FEED_BYTES} bytes"
+        )));
+    }
+    Ok(Some(FetchedFeed {
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+        etag,
+        last_modified,
+    }))
+}
+
+/// Syncs one subscribed feed into its calendar: conditional GET, full parse,
+/// then the same transactional upsert + window-bounded inferred-deletion as
+/// the CalDAV path. `feed_url` is the calendar row's `google_id`.
+pub async fn sync_webcal_calendar(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    feed_url: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+) -> Result<SyncOutcome, WebcalFeedError> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = ?1")
+            .bind(calendar_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(anyhow::Error::from)?
+            .flatten();
+
+    let Some(fetched) = fetch_feed(feed_url, stored.as_deref()).await? else {
+        // HTTP 304: nothing changed, but the window moved — record it so the
+        // next change probe compares against a fresh window, like the CalDAV
+        // path which always writes the window on success.
+        refresh_window(pool, calendar_id, window_start_ms, window_end_ms).await?;
+        return Ok(SyncOutcome::default());
+    };
+    let cursor = cursor_for(fetched.etag.as_deref(), fetched.last_modified.as_deref(), &fetched.body);
+    // Content-identical but validator-less (the server issues neither ETag
+    // nor Last-Modified): skip the write churn, but still record the window.
+    if stored.as_deref() == Some(cursor.as_str()) {
+        refresh_window(pool, calendar_id, window_start_ms, window_end_ms).await?;
+        return Ok(SyncOutcome::default());
+    }
+
+    let applied = apply_feed_body(
+        pool,
+        calendar_id,
+        &fetched.body,
+        &cursor,
+        window_start_ms,
+        window_end_ms,
+    )
+    .await
+    .map_err(WebcalFeedError::Other)?;
+    Ok(applied)
+}
+
+/// Records a fresh window without touching the cursor: a 304 (or a
+/// content-identical body) means the rows are current, but the window the
+/// next probe compares against has still moved.
+async fn refresh_window(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    window_start_ms: i64,
+    window_end_ms: i64,
+) -> Result<(), WebcalFeedError> {
+    sqlx::query(
+        "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+         VALUES (?1, (SELECT sync_token FROM sync_state WHERE calendar_id = ?1), ?2, ?3)
+         ON CONFLICT (calendar_id) DO UPDATE SET
+             window_start = excluded.window_start,
+             window_end = excluded.window_end",
+    )
+    .bind(calendar_id)
+    .bind(window_start_ms)
+    .bind(window_end_ms)
+    .execute(pool)
+    .await
+    .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+/// Parses one feed body and reconciles it with the store. Split from
+/// [`sync_webcal_calendar`] so tests drive the whole write path without HTTP.
+pub async fn apply_feed_body(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    body: &str,
+    cursor: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+) -> anyhow::Result<SyncOutcome> {
+    let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
+        .bind(calendar_id)
+        .fetch_one(pool)
+        .await?;
+
+    let root = omacal_caldav::parse(body).ok_or_else(|| anyhow::anyhow!("the URL did not return a calendar"))?;
+    // No self mailbox exists on a subscription: every attendee match would be
+    // a false RSVP strip, so nobody is marked.
+    let mut rows = Vec::new();
+    for ev in omacal_caldav::events_in(&root) {
+        let Some(stored) = crate::caldav::caldav_to_stored(&ev, calendar_id, &cal_tz, None, "") else {
+            tracing::warn!("VEVENT with unusable times; skipping");
+            continue;
+        };
+        // Client-side window: the whole file was fetched, but the store only
+        // keeps what the window would have returned — plus every recurring
+        // master, whose occurrences may fall inside it.
+        let in_window = stored.start_utc < window_end_ms
+            && (stored.end_utc > window_start_ms || stored.recurrence.is_some());
+        if in_window {
+            rows.push(stored);
+        }
+    }
+    let seen: Vec<String> = rows.iter().map(|r| r.google_id.clone()).collect();
+
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let enabled: Option<i64> = sqlx::query_scalar("SELECT sync_enabled FROM calendars WHERE id = ?1")
+        .bind(calendar_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if enabled != Some(1) {
+        tx.rollback().await?;
+        return Ok(SyncOutcome::default());
+    }
+
+    let mut outcome = SyncOutcome::default();
+    for row in &rows {
+        omacal_store::upsert_event(&mut *tx, row).await?;
+        outcome.upserted += 1;
+    }
+
+    // Inferred deletions, bounded to what this fetch covered — the CalDAV
+    // predicate verbatim, so a finished series outside the window is left
+    // alone rather than wrongly reaped.
+    let placeholders: Vec<String> = (0..seen.len()).map(|i| format!("?{}", i + 4)).collect();
+    let sql = format!(
+        "DELETE FROM events WHERE calendar_id = ?1
+           AND start_utc < ?2 AND (end_utc > ?3 OR recurrence IS NOT NULL)
+           {}",
+        if seen.is_empty() {
+            String::new()
+        } else {
+            format!("AND google_id NOT IN ({})", placeholders.join(", "))
+        }
+    );
+    let mut q = sqlx::query(&sql).bind(calendar_id).bind(window_end_ms).bind(window_start_ms);
+    for id in &seen {
+        q = q.bind(id);
+    }
+    outcome.deleted += q.execute(&mut *tx).await?.rows_affected() as usize;
+
+    sqlx::query(
+        "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (calendar_id) DO UPDATE SET
+             sync_token = excluded.sync_token,
+             window_start = excluded.window_start,
+             window_end = excluded.window_end",
+    )
+    .bind(calendar_id)
+    .bind(cursor)
+    .bind(window_start_ms)
+    .bind(window_end_ms)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const FEED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n\
+        BEGIN:VEVENT\r\nUID:one\r\nDTSTART:20260817T090000Z\r\nDTEND:20260817T100000Z\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n\
+        BEGIN:VEVENT\r\nUID:two\r\nDTSTART:20260818T090000Z\r\nDTEND:20260818T100000Z\r\nSUMMARY:Retro\r\nEND:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+
+    async fn seeded_pool() -> SqlitePool {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider, server_url) VALUES ('webcal:x','x',0,'webcal','x')")
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, supports_events, supports_tasks)
+             VALUES (1, 'x', 'Feed', 'UTC', 'reader', 1, 0)",
+        ).execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[test]
+    fn webcal_addresses_become_https_and_empty_is_refused() {
+        assert_eq!(
+            normalize_feed_url("webcal://example.com/cal.ics").unwrap(),
+            "https://example.com/cal.ics"
+        );
+        assert_eq!(
+            normalize_feed_url("webcals://example.com/c").unwrap(),
+            "https://example.com/c"
+        );
+        assert!(normalize_feed_url("  ").is_err());
+        assert!(normalize_feed_url("https://example.com/c").is_ok());
+    }
+
+    #[test]
+    fn plain_http_follows_the_caldav_rule() {
+        assert_eq!(
+            normalize_feed_url("http://localhost:5232/x").unwrap(),
+            "http://localhost:5232/x"
+        );
+        let err = normalize_feed_url("http://cal.example.com/x").unwrap_err().to_string();
+        assert_eq!(err, omacal_caldav::NOT_PRIVATE_HTTP);
+    }
+
+    #[test]
+    fn the_content_hash_is_stable_and_sensitive() {
+        assert_eq!(content_hash("a"), content_hash("a"));
+        assert_ne!(content_hash("a"), content_hash("b"));
+    }
+
+    #[tokio::test]
+    async fn a_feed_sync_stores_its_events_and_records_the_etag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FEED).insert_header("ETag", "\"v1\""))
+            .mount(&server).await;
+        let pool = seeded_pool().await;
+        let url = format!("{}/feed.ics", server.uri());
+        // Point the seeded calendar at the mock feed.
+        sqlx::query("UPDATE calendars SET google_id = ?1 WHERE id = 1").bind(&url)
+            .execute(&pool).await.unwrap();
+
+        let out = sync_webcal_calendar(&pool, 1, &url, 0, 9_999_999_999_999).await.unwrap();
+        assert_eq!(out.upserted, 2);
+        let tok: Option<String> = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(tok.as_deref(), Some("\"v1\""));
+    }
+
+    #[tokio::test]
+    async fn a_304_answer_syncs_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .and(header("If-None-Match", "\"v1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server).await;
+        let pool = seeded_pool().await;
+        let url = format!("{}/feed.ics", server.uri());
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, '\"v1\"', 0, 0)")
+            .execute(&pool).await.unwrap();
+
+        let out = sync_webcal_calendar(&pool, 1, &url, 100, 200).await.unwrap();
+        assert_eq!(out, SyncOutcome::default());
+        // The rows are current, but the window the next probe compares against
+        // has still moved — the CalDAV path always writes it on success.
+        let (ws, we): (i64, i64) =
+            sqlx::query_as("SELECT window_start, window_end FROM sync_state WHERE calendar_id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((ws, we), (100, 200));
+    }
+
+    #[tokio::test]
+    async fn a_validator_less_refetch_with_identical_content_skips_writes_but_refreshes_the_window() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
+            .mount(&server).await;
+        let pool = seeded_pool().await;
+        let url = format!("{}/feed.ics", server.uri());
+        sqlx::query("UPDATE calendars SET google_id = ?1 WHERE id = 1").bind(&url)
+            .execute(&pool).await.unwrap();
+        let cursor = cursor_for(None, None, FEED);
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, ?1, 0, 0)")
+            .bind(&cursor)
+            .execute(&pool).await.unwrap();
+
+        let out = sync_webcal_calendar(&pool, 1, &url, 100, 9_999_999_999_999).await.unwrap();
+        assert_eq!(out, SyncOutcome::default(), "no write churn on identical content");
+        let (tok, ws): (Option<String>, i64) =
+            sqlx::query_as("SELECT sync_token, window_start FROM sync_state WHERE calendar_id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tok.as_deref(), Some(cursor.as_str()));
+        assert_eq!(ws, 100, "window still moves");
+    }
+
+    #[tokio::test]
+    async fn an_event_missing_from_the_refetch_is_deleted_in_window_only() {
+        let pool = seeded_pool().await;
+        // In-window ghost (must go), pre-window relic (must stay).
+        for (gid, start, end) in [("ghost", 3_000_000, 3_100_000), ("relic", 100, 200)] {
+            sqlx::query(
+                "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, status, updated_at)
+                 VALUES (1, ?1, ?2, ?3, 'UTC', 'UTC', 'confirmed', 0)",
+            ).bind(gid).bind(start).bind(end).execute(&pool).await.unwrap();
+        }
+        let one = FEED.replace("UID:two", "UID:kept")
+            .replace("20260818", "20260819");
+        // Feed holds one event overlapping the window; ghost is absent.
+        let out = apply_feed_body(&pool, 1, &one, "hash:x", 1_000_000, 9_999_999_999_999)
+            .await.unwrap();
+        assert_eq!(out.deleted, 1);
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT google_id FROM events WHERE calendar_id = 1 ORDER BY google_id")
+                .fetch_all(&pool).await.unwrap();
+        assert!(left.contains(&"relic".to_string()), "pre-window rows are never reaped");
+        assert!(!left.contains(&"ghost".to_string()));
+    }
+
+    #[tokio::test]
+    async fn events_outside_the_window_are_not_stored() {
+        let pool = seeded_pool().await;
+        // Both feed events are Aug 2026; sync a 2020 window.
+        let out = apply_feed_body(&pool, 1, FEED, "hash:y", 1_500_000_000_000, 1_600_000_000_000)
+            .await.unwrap();
+        assert_eq!(out.upserted, 0);
+    }
+}

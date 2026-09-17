@@ -3249,8 +3249,10 @@ dependencies = [
  "reqwest 0.12.28",
  "serde_json",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
 ]
 

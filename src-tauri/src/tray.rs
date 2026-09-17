@@ -84,7 +84,8 @@ pub(crate) fn instance_action(argv: &[String]) -> TrayAction {
 /// A `file://` URL is accepted because that is how some desktops spell a
 /// path they hand to `%f`'s neighbours; anything else with a scheme is
 /// refused, `webcal://` included — subscribing to a URL that keeps changing
-/// is not importing a file, and OmaCal does not do it (#76).
+/// is not importing a file. Subscriptions live in Settings → Accounts
+/// ("Subscribe via URL"); this entry point only ever imports a file.
 fn calendar_file(arg: &str) -> Option<String> {
     let path = arg.strip_prefix("file://").unwrap_or(arg);
     if path.contains("://") {
@@ -962,8 +963,9 @@ mod tests {
         assert_eq!(action("file:///tmp/x.ics"), TrayAction::OpenFile("/tmp/x.ics".into()));
 
         // **`webcal://` is not an import.** Subscribing follows a URL that
-        // keeps changing, which OmaCal does not do, and we told #76 we would
-        // not claim the scheme rather than claim it and do the wrong thing.
+        // keeps changing; that lives in Settings → Accounts ("Subscribe via
+        // URL"), and claiming the scheme here would import a snapshot of it
+        // instead (#76).
         assert_eq!(action("webcal://example.com/f.ics"), TrayAction::Open);
         assert_eq!(action("https://example.com/f.ics"), TrayAction::Open);
 

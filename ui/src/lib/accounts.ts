@@ -4,8 +4,13 @@ import { invoke } from '@tauri-apps/api/core';
 export type Account = {
   id: number;
   email: string;
-  provider: string; // 'google' | 'caldav'
+  provider: string; // 'google' | 'caldav' | 'webcal'
 };
+
+/** Subscribes to a public read-only WebCal feed (`webcal://` or `https://`).
+ *  Resolves to the calendar id the feed syncs into. */
+export const subscribeWebcal = (url: string, name?: string) =>
+  invoke<number>('subscribe_webcal', { url, name: name ?? null });
 
 export const listAccounts = () => invoke<Account[]>('list_accounts');
 

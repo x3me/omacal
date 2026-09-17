@@ -106,7 +106,11 @@ pub const NOT_PRIVATE_HTTP: &str = "CalDAV needs an https:// address — plain h
 /// plain http on 5232, every other client on the box connects to it, and
 /// refusing until the user fronts it with TLS is a wall rather than a
 /// security control — the credential never leaves their own network.
-fn is_private_host(host: &Host<&str>) -> bool {
+///
+/// Shared with WebCal feeds (`omacal-sync::webcal_feed`): feeds carry no
+/// credentials but the same cleartext rule applies, so both refuse the same
+/// literal (`NOT_PRIVATE_HTTP`).
+pub fn is_private_host(host: &Host<&str>) -> bool {
     match host {
         Host::Ipv4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
         // `is_unique_local` and `is_unicast_link_local` are still unstable, so
@@ -127,7 +131,7 @@ fn is_private_host(host: &Host<&str>) -> bool {
     }
 }
 
-fn https_or_private(url: &Url) -> anyhow::Result<()> {
+pub fn https_or_private(url: &Url) -> anyhow::Result<()> {
     if url.scheme() == "https" {
         return Ok(());
     }
@@ -138,6 +142,20 @@ fn https_or_private(url: &Url) -> anyhow::Result<()> {
     // (`http://user:password@host/`), and this string is allow-listed for
     // display in `errors::user_facing` — see `NOT_PRIVATE_HTTP` there.
     anyhow::bail!(NOT_PRIVATE_HTTP);
+}
+
+/// An unauthenticated HTTP client for public feed fetches (WebCal).
+///
+/// Separate from [`CalDavClient`]'s credentialed client on purpose: feeds
+/// carry no credentials, so redirects may cross hosts (feeds commonly
+/// redirect through CDNs); the CalDAV client follows same-host only.
+/// The cleartext rule is identical — see [`https_or_private`].
+pub fn anonymous_feed_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(anyhow::Error::from)
 }
 
 /// Whether `candidate` may receive the credentials given to `original`:

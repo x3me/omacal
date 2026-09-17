@@ -567,7 +567,7 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
             ev.guests_can_modify,
         )
         .as_str(),
-        mails_guests: provider != "caldav",
+        mails_guests: provider == "google",
         response: ev.self_response.clone(),
         conference: ev.conference_uri.clone().or_else(|| {
             crate::upcoming::conference_join_url(ev.location.as_deref(), ev.description.as_deref())

@@ -63,10 +63,12 @@ async fn sign_out_impl(state: &AppState, account_id: i64) -> anyhow::Result<()> 
         return Ok(()); // Already gone — which is what signing out wanted.
     };
 
-    // The keyring key this account's secret lives under.
+    // The keyring key this account's secret lives under. Subscribed feeds
+    // hold no secret at all — there is nothing to delete.
     let keyring_key = match provider.as_str() {
-        "caldav" => format!("caldav:{email}"),
-        _ => email.clone(),
+        "caldav" => Some(format!("caldav:{email}")),
+        "google" => Some(email.clone()),
+        _ => None,
     };
 
     if provider == "google" {
@@ -86,10 +88,12 @@ async fn sign_out_impl(state: &AppState, account_id: i64) -> anyhow::Result<()> 
         }
     }
 
-    if let Ok(entry) = keyring::Entry::new(crate::KEYRING_SERVICE, &keyring_key) {
-        if let Err(e) = entry.delete_credential() {
-            // A missing entry is fine — the goal is its absence.
-            tracing::debug!(account = %email, %e, "keyring entry not deleted");
+    if let Some(keyring_key) = keyring_key {
+        if let Ok(entry) = keyring::Entry::new(crate::KEYRING_SERVICE, &keyring_key) {
+            if let Err(e) = entry.delete_credential() {
+                // A missing entry is fine — the goal is its absence.
+                tracing::debug!(account = %email, %e, "keyring entry not deleted");
+            }
         }
     }
 

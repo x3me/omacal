@@ -37,9 +37,8 @@ pub struct CalendarRow {
     /// (`can_edit`, applied server-side against this same column via
     /// `calendar_for_write`); this field is what stops the UI walking into it.
     pub access_role: String,
-    /// The owning account's provider (`google` | `caldav`) — what the UI
-    /// gates provider-specific affordances on (event editing is
-    /// Google-only until the CalDAV write phase lands).
+    /// The owning account's provider (`google` | `caldav` | `webcal` | `local`)
+    /// — what the UI gates provider-specific affordances on.
     pub provider: String,
 }
 
@@ -125,6 +124,12 @@ pub async fn calendar_for_write(
 /// other list. `sync_enabled = 0` says the same thing again, for a human
 /// reading the row.
 pub const LOCAL_PROVIDER: &str = "local";
+/// Provider value for a read-only WebCal subscription (public `webcal://` /
+/// `https://…ics` feed). One account row per feed URL; the feed URL itself
+/// rides in `accounts.server_url` and in the calendar's `google_id` (the
+/// "provider identifier" column), so no schema change was needed — `provider`
+/// has no CHECK constraint. Always `access_role = 'reader'`, events-only.
+pub const WEBCAL_PROVIDER: &str = "webcal";
 const LOCAL_ACCOUNT_SUB: &str = "local:device";
 const LOCAL_TASKS_ID: &str = "local:tasks";
 
@@ -269,6 +274,70 @@ pub async fn is_local_calendar(pool: &SqlitePool, calendar_id: i64) -> anyhow::R
     .fetch_optional(pool)
     .await?;
     Ok(provider.as_deref() == Some(LOCAL_PROVIDER))
+}
+
+/// Creates (or re-opens) a read-only WebCal subscription: one `webcal` account row
+/// per normalized feed URL holding one `reader` calendar.
+///
+/// Idempotent on the normalized URL: re-subscribing the same feed returns the
+/// existing calendar rather than duplicating it. The provider's fields
+/// (`summary`, `timezone`) update; the user's (`selected`, `sync_enabled`,
+/// colour/label overrides) are never touched — the same contract the CalDAV
+/// and Google upserts keep.
+///
+/// `feed_url` must already be normalized (`webcal://` → `https://`, trimmed);
+/// `account_sub` is `webcal:<feed_url>`, mirroring `caldav:<email>`, so the same
+/// address subscribed twice cannot collide on one row.
+pub async fn ensure_webcal_subscription(
+    pool: &SqlitePool,
+    feed_url: &str,
+    name: &str,
+    timezone: &str,
+    now_ms: i64,
+) -> anyhow::Result<(i64, i64)> {
+    let sub = format!("webcal:{feed_url}");
+    let mut tx = pool.begin().await?;
+    let account_id: i64 = sqlx::query_scalar(
+        "INSERT INTO accounts (google_sub, email, display_name, created_at, provider, server_url)
+         VALUES (?1, ?2, ?2, ?3, 'webcal', ?4)
+         ON CONFLICT (google_sub) DO UPDATE SET
+            email = excluded.email, display_name = excluded.display_name,
+            server_url = excluded.server_url
+         RETURNING id",
+    )
+    .bind(&sub)
+    .bind(name)
+    .bind(now_ms)
+    .bind(feed_url)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO calendars
+            (account_id, google_id, summary, timezone, access_role, selected, is_primary,
+             sync_enabled, supports_events, supports_tasks)
+         VALUES (?1, ?2, ?3, ?4, 'reader', 1, 0, 1, 1, 0)
+         ON CONFLICT (account_id, google_id) DO UPDATE SET
+            summary = excluded.summary,
+            timezone = excluded.timezone,
+            access_role = 'reader',
+            supports_events = 1,
+            supports_tasks = 0",
+    )
+    .bind(account_id)
+    .bind(feed_url)
+    .bind(name)
+    .bind(timezone)
+    .execute(&mut *tx)
+    .await?;
+    let calendar_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM calendars WHERE account_id = ?1 AND google_id = ?2",
+    )
+    .bind(account_id)
+    .bind(feed_url)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((account_id, calendar_id))
 }
 
 pub async fn set_selected(pool: &SqlitePool, id: i64, on: bool) -> anyhow::Result<()> {
@@ -560,6 +629,52 @@ mod tests {
         assert_eq!(cals.len(), 2);
         assert!(cals.iter().all(|c| c.account_email == "me@x.com"));
         assert!(cals.iter().any(|c| c.is_primary));
+    }
+
+    /// Re-subscribing the same feed must not duplicate rows: the normalized
+    /// URL is the identity. Provider fields update; the user's own
+    /// (`selected`, `sync_enabled`, overrides) are never touched — the same
+    /// contract the CalDAV and Google upserts keep.
+    #[tokio::test]
+    async fn webcal_resubscribe_is_idempotent_and_keeps_user_fields() {
+        let pool = connect_memory().await.unwrap();
+        let url = "https://example.com/feed.ics";
+        let (a1, c1) = ensure_webcal_subscription(&pool, url, "Feed", "UTC", 0)
+            .await
+            .unwrap();
+        set_selected(&pool, c1, false).await.unwrap();
+        set_sync_enabled(&pool, c1, false).await.unwrap();
+        set_label_override(&pool, c1, Some("Mine")).await.unwrap();
+
+        let (a2, c2) = ensure_webcal_subscription(&pool, url, "Renamed", "Pacific/Auckland", 1)
+            .await
+            .unwrap();
+        assert_eq!((a1, c1), (a2, c2), "same URL, same rows");
+        let row: (String, String, String, i64, i64, Option<String>) = sqlx::query_as(
+            "SELECT summary, timezone, access_role, selected, sync_enabled, label_override
+             FROM calendars WHERE id = ?1",
+        )
+        .bind(c1)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "Renamed", "provider field updates");
+        assert_eq!(row.1, "Pacific/Auckland", "provider field updates");
+        assert_eq!(row.2, "reader", "feeds stay read-only");
+        assert_eq!((row.3, row.4, row.5.as_deref()), (0, 0, Some("Mine")), "user fields untouched");
+        let (email, display, provider): (String, String, String) =
+            sqlx::query_as("SELECT email, display_name, provider FROM accounts WHERE id = ?1")
+                .bind(a1)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((email.as_str(), display.as_str(), provider.as_str()), ("Renamed", "Renamed", "webcal"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM calendars WHERE google_id = ?1")
+            .bind(url)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "no duplicate calendar row");
     }
 
     #[tokio::test]

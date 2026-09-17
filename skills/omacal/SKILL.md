@@ -1,13 +1,13 @@
 ---
 name: omacal
-description: The user's real calendar (Google, iCloud, CalDAV) through the omacal CLI — today's agenda, events in a date range, title search, the calendar list, and (v0.7+) writes: create (one-off or repeating), reschedule, answer and delete events. Use whenever the user asks what is on their calendar, when they are free or busy, or asks to add, move, cancel or answer a meeting from the terminal.
+description: The user's real calendar (Google, iCloud, CalDAV, WebCal subscriptions) through the omacal CLI — today's agenda, events in a date range, title search, the calendar list, and (v0.7+) writes: create (one-off or repeating), reschedule, answer and delete events. Use whenever the user asks what is on their calendar, when they are free or busy, or asks to add, move, cancel or answer a meeting from the terminal.
 ---
 
 # omacal calendar
 
 omacal is the desktop calendar app; its CLI reads the same local database
 the app syncs, so answers reflect every connected account (Google, iCloud,
-CalDAV) with no network round trip and no extra auth. Writes are executed
+CalDAV, WebCal subscriptions) with no network round trip and no extra auth. Writes are executed
 by the **running app** over a local socket, behind the same guards its own
 form has — the CLI itself never writes the database.
 
@@ -56,9 +56,10 @@ or `shared` (a guest, but the organizer lets guests change it for
 everyone), plus `guestsCanModify`. **Read `reach` before promising the
 user that a reschedule will move the meeting for the other people** — on
 `own-copy` it will not; tell them to ask the organizer instead.
-`mailsGuests` (v3.7.2+) is false on a CalDAV calendar: OmaCal emails
-nobody there, so there is no notify question to ask the user, and `reach`
-is Google's model and says nothing reliable about who else sees a change.
+`mailsGuests` (v3.7.2+) is false on anything but a Google calendar (CalDAV,
+WebCal, local): OmaCal emails nobody there, so there is no notify question to ask the user, and `reach`
+is Google's model and says nothing reliable about who else sees a change. WebCal feeds are read-only
+subscriptions (Settings → Accounts → "Add WebCal account"); they never take writes, RSVPs, or tasks.
 
 ## Writing (requires the app to be running; omacal v0.7+)
 
@@ -95,14 +96,14 @@ omacal events respond 41 yes --json          # yes | maybe | no
   guests get emailed about the change is the user's call, never yours.
   Ask the user rather than defaulting. **Two exceptions, both refused
   with the reason (exit 2) if you pass `--notify all`:** `reach` =
-  `own-copy` (`events show`), where an update moves the user's own copy
-  alone and nobody can be notified; and **`mailsGuests` = false (CalDAV)**,
-  where OmaCal emails nobody at all. Neither needs `--notify`.
-- `delete` takes no `--notify`. On Google it tells the guests, or for an
-  own-copy event it removes the event from the user's calendar only and
-  Google tells the organizer they declined. On CalDAV OmaCal emails nobody.
-- `--guest a@b` repeats for multiple guests on create. Creating with
-  guests also requires `--notify`, except on a CalDAV calendar.
+   `own-copy` (`events show`), where an update moves the user's own copy
+   alone and nobody can be notified; and **`mailsGuests` = false (anything but Google)**,
+   where OmaCal emails nobody at all. Neither needs `--notify`.
+ - `delete` takes no `--notify`. On Google it tells the guests, or for an
+   own-copy event it removes the event from the user's calendar only and
+   Google tells the organizer they declined. Off Google OmaCal emails nobody.
+ - `--guest a@b` repeats for multiple guests on create. Creating with
+   guests also requires `--notify`, except off Google.
 - **`--repeat daily|weekdays|weekly|monthly|yearly` makes one series instead
   of many events.** Reach for it whenever the user describes a routine —
   "every Tuesday", "each weekday" — because a series is edited and deleted

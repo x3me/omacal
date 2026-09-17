@@ -279,7 +279,7 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
     );
     // Before the literal below moves `organizer_email` into the detail.
     let is_organizer = owns_event(event.organizer_email.as_deref(), &account_email, &cal_google_id);
-    let mails_guests = !crate::caldav_write::is_caldav_calendar(&state.pool, event.calendar_id).await?;
+    let mails_guests = crate::caldav_write::calendar_mails_guests(&state.pool, event.calendar_id).await?;
     Ok(EventDetail {
         id: event.id,
         calendar_id: event.calendar_id,

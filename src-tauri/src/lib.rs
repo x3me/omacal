@@ -20,6 +20,7 @@ mod geocode;
 /// that reads or writes `ui/tests/` is compiled into the shipped app.
 #[cfg(test)]
 mod golden;
+pub(crate) mod webcal_subscription;
 mod icu_tz;
 mod import;
 mod invites;
@@ -1072,6 +1073,13 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
         dead.extend(d);
     }
 
+    for (account_id, _, _, _, _) in all.iter().filter(|(_, _, p, _, _)| p == "webcal") {
+        let (t, f) =
+            webcal_subscription::sync_account(pool, *account_id, window_start, window_end).await;
+        total += t;
+        failed.extend(f);
+    }
+
     for (account_id, email, _, server_url, username) in
         all.iter().filter(|(_, _, p, _, _)| p == "caldav")
     {
@@ -1773,6 +1781,7 @@ pub fn run() {
             settings::list_timezones,
             settings::restart_app,
             caldav_account::connect_caldav,
+            webcal_subscription::subscribe_webcal,
             accounts::list_accounts,
             accounts::sign_out,
             tasks::list_tasks,
