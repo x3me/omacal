@@ -1,5 +1,6 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
+  import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import { setVisibleHoursState } from "./lib/visiblehours.svelte";
   import { formatDate } from './lib/datefmt';
   import { dateFormat } from './lib/date.svelte';
@@ -183,6 +184,23 @@
   let status = $state<AppStatus | null>(null);
   let calendars = $state<Calendar[]>([]);
   let busy = $state(false);
+  let syncing = $state(false);
+  let syncInFlight: Promise<unknown> | null = null;
+  // A payload may supersede another reload, or arrive after a failed one.
+  // Only retire replies covered by a sync completed before that fetch began.
+  let responsesSyncedThrough = 0;
+  // Manual sync and RSVP reconciliation share a request. Calendar controls
+  // stay usable while a reply's background sync is in flight.
+  function syncCalendar() {
+    if (syncInFlight) return syncInFlight;
+    syncing = true;
+    const checkpoint = responseCheckpoint();
+    syncInFlight = syncNow().then(result => {
+      responsesSyncedThrough = Math.max(responsesSyncedThrough, checkpoint);
+      return result;
+    }).finally(() => { syncing = false; syncInFlight = null; });
+    return syncInFlight;
+  }
   let signingIn = $state(false);
   let error = $state<string | null>(null);
   // Opened right after every sign-in (Task 7) — see `handleSignIn` — so a
@@ -963,6 +981,7 @@
 
   async function loadWeek(kind: 'day' | 'week' | 'range', target: number, pad: number, days?: WeekViewDays) {
     const req = ++weekReq;
+    const responseVersion = responsesSyncedThrough;
     try {
       const w = kind === 'day'
         ? await getDay(target, pad)
@@ -972,6 +991,7 @@
       if (req !== weekReq) return; // superseded while we were awaiting
       week = w;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== weekReq) return;
       error = String(e);
@@ -980,11 +1000,13 @@
 
   async function loadMonth(year: number, monthNum: number) {
     const req = ++monthReq;
+    const responseVersion = responsesSyncedThrough;
     try {
       const m = await getMonth(year, monthNum);
       if (req !== monthReq) return;
       month = m;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== monthReq) return;
       error = String(e);
@@ -993,11 +1015,13 @@
 
   async function loadYear(y: number) {
     const req = ++yearReq;
+    const responseVersion = responsesSyncedThrough;
     try {
       const p = await getYear(y);
       if (req !== yearReq) return;
       year = p;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== yearReq) return;
       error = String(e);
@@ -1006,11 +1030,13 @@
 
   async function loadBigYear(y: number) {
     const req = ++bigYearReq;
+    const responseVersion = responsesSyncedThrough;
     try {
       const p = await getBigYear(y);
       if (req !== bigYearReq) return;
       bigYear = p;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== bigYearReq) return;
       error = String(e);
@@ -1141,9 +1167,10 @@
   }
 
   async function handleSync() {
+    if (busy || syncing) return;
     busy = true; error = null;
     try {
-      await syncNow();
+      await syncCalendar();
       await refreshStatus();
       await reload();
     } catch (e) { error = String(e); }
@@ -1662,8 +1689,45 @@
     pendingDelete = { occurrence, anchor: rect };
   }
 
+  async function refreshAfterDismissal() {
+    await refreshInvites();
+    await reload();
+  }
+
+  let responseRefreshRunning = false;
+  let responseRefreshRequested = false;
+  async function refreshAfterResponse() {
+    responseRefreshRequested = true;
+    if (responseRefreshRunning) return;
+    responseRefreshRunning = true;
+    try {
+      while (responseRefreshRequested) {
+        await responsesIdle();
+        responseRefreshRequested = false;
+        try {
+          // A sync already in flight may predate these writes. Wait for it,
+          // then start the sync that can actually reconcile this batch.
+          if (syncInFlight) await syncInFlight.catch(() => {});
+          await reload();
+          await refreshInvites();
+          await syncCalendar();
+          await refreshStatus();
+          await reload();
+          await refreshInvites();
+        } catch (e) {
+          error = `The response was saved, but OmaCal could not refresh: ${e}`;
+          // A later reply may have requested another pass during the failed
+          // one. Catch per iteration so that request is never discarded.
+        }
+      }
+    } finally {
+      responseRefreshRunning = false;
+    }
+  }
+
   /**
-   * Where every successful write ends.
+   * Reconcile successful edits, creates and deletes. RSVPs use the batched
+   * background path above.
    *
    * A *sync*, not just a re-read, and that is the whole point of the function.
    * Two of the write paths deliberately leave the local store alone: a `'this'`
@@ -1681,10 +1745,7 @@
    */
   async function refreshAfterWrite() {
     await reload();
-    // The invitation badge is a function of self_response, and an RSVP from
-    // the popover is a write that changes it — without this, answering an
-    // invitation on its block left the tray claiming it for up to a sync
-    // interval (noticed live, 2026-08-17, minutes after the tray shipped).
+    // Edits and deletes can also change which invitations need attention.
     await refreshInvites();
     busy = true;
     try {
@@ -2120,7 +2181,9 @@
     {invites}
     {declines}
     {changes}
-    oninvitesanswered={() => { void refreshInvites(); void reload(); }}
+    {syncing}
+    oninvitesanswered={refreshAfterResponse}
+    oninvitesdismissed={refreshAfterDismissal}
     onpick={pick}
     bind:open={pickerOpen}
   />
@@ -2198,7 +2261,7 @@
                   onduplicate={createCalendarId === null ? null : duplicateOccurrence}
           onmove={moveOccurrence}
           ondraftmove={(span) => formEl?.applySpan(span)}
-          onresponded={refreshAfterWrite} />
+          onresponded={refreshAfterResponse} />
       {/if}
     {/if}
     </div>
@@ -2265,7 +2328,7 @@
     occurrenceStartMs={startMs}
     occurrenceEndMs={occurrence.endMs}
     onclose={closeGridEvent}
-    onresponded={refreshAfterWrite}
+    onresponded={refreshAfterResponse}
     onedit={() => openEdit(occurrence, rect)}
     ondelete={() => askDelete(occurrence, rect)}
     oncopy={() => copyOccurrence(occurrence)}

@@ -391,6 +391,23 @@ test.describe('WeekGrid', () => {
 test.describe('WeekGrid popover flow', () => {
   const show = (f: string) => `/tests/harness/index.html?c=WeekGrid&f=${f}`;
 
+  test('a queued RSVP restyles immediately, survives reopening, and rolls back after closing', async ({ page }) => {
+    await page.goto(show('popover'));
+    await page.evaluate(() => window.__harness.holdNextEventCall('respond_to_event', 42));
+    const block = page.getByRole('button', { name: 'Standup' });
+    await block.click();
+    await page.getByRole('button', { name: 'Yes', exact: true }).click();
+    await page.getByRole('button', { name: 'This one' }).click();
+    await expect(block).toHaveClass(/accepted/);
+    await page.locator('.scrim').click();
+    await block.click();
+    await expect(page.getByRole('button', { name: 'Yes', exact: true })).toHaveClass(/chosen/);
+    await expect(page.getByRole('button', { name: 'Yes', exact: true })).toBeDisabled();
+    await page.locator('.scrim').click();
+    await page.evaluate(() => window.__harness.rejectEventCall('respond_to_event', 42, 'Could not save response.'));
+    await expect(block).toHaveClass(/needsAction/);
+  });
+
   test("responding sends the clicked block's own start, not the series DTSTART", async ({ page }) => {
     await page.goto(show('popover'));
     await page.getByRole('button', { name: 'Standup' }).click();
@@ -5482,6 +5499,42 @@ test.describe('Header invitation tray', () => {
    *  live, 2026-08-17) — so the header itself must carry the debt: a badge
    *  while invitations await an answer, a list with the answer buttons
    *  behind it, and nothing at all at inbox-zero. */
+
+  test('rapid replies hide immediately, save in order, and continue after a failure', async ({ page }) => {
+    await page.goto(show('Header', 'queued-invites'));
+    await page.evaluate(() => {
+      window.__harness.holdNextEventCall('respond_to_event', 901);
+      window.__harness.holdNextEventCall('respond_to_event', 902);
+      window.__harness.holdNextEventCall('respond_to_event', 903);
+    });
+    await page.getByRole('button', { name: '3 pending invitations' }).click();
+    for (const title of ['Invitation 1', 'Invitation 2', 'Invitation 3']) {
+      const row = page.getByTestId('invite-row').filter({ hasText: title });
+      await row.getByRole('button', { name: 'Yes', exact: true }).click();
+      await expect(row).toHaveCount(0);
+    }
+    const sent = () => page.evaluate(() => window.__harness.calls
+      .filter(c => c.cmd === 'respond_to_event').map(c => (c.args as { id: number }).id));
+    expect(await sent()).toEqual([901]);
+    await expect(page.getByRole('status')).toContainText('Saving 3 responses');
+    await page.evaluate(detail => window.__harness.releaseEventCall('respond_to_event', 901, detail), POPOVER_DETAILS[42]);
+    await expect.poll(sent).toEqual([901, 902]);
+    await page.evaluate(() => window.__harness.rejectEventCall('respond_to_event', 902, 'Network unavailable.'));
+    await expect.poll(sent).toEqual([901, 902, 903]);
+    await expect(page.getByRole('alert')).toContainText('Invitation 2');
+    await expect(page.getByRole('group', { name: 'Pending invitations' })).toHaveCount(0);
+    await page.getByRole('button', { name: '1 pending invitation' }).click();
+    await expect(page.getByTestId('invite-row')).toHaveCount(1);
+    await expect(page.getByTestId('invite-row')).toContainText('Invitation 2');
+    await expect(page.getByTestId('invite-row')).toContainText('Network unavailable.');
+    await page.evaluate(detail => window.__harness.releaseEventCall('respond_to_event', 903, detail), POPOVER_DETAILS[42]);
+    await expect(page.getByRole('status')).toHaveCount(0);
+    // A retry is explicit, not an automatic repeat that might notify guests twice.
+    await page.getByTestId('invite-row').getByRole('button', { name: 'Yes', exact: true }).click();
+    await expect.poll(sent).toEqual([901, 902, 903, 902]);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByTestId('invite-row')).toHaveCount(0);
+  });
 
   test('inbox-zero renders no badge at all', async ({ page }) => {
     await page.goto(show('Header', 'connected'));

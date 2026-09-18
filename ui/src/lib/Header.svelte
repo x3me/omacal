@@ -6,6 +6,7 @@
   import { listable } from './filmstrip';
   import CalendarPopover from './CalendarPopover.svelte';
   import InviteTray from './InviteTray.svelte';
+  import { pendingResponseCount, unshownResponseFailures, dismissResponseFailure } from './responses.svelte';
   import SettingsModal from './SettingsModal.svelte';
   import ViewSwitcher, { type View } from './ViewSwitcher.svelte';
   import type { ChangeNotice, DeclineNotice, PendingInvite } from './invites';
@@ -14,12 +15,12 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, error, calendars, view, onpick,
+    busy, syncing = false, error, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange, ontasks,
     onWhatsNew, onRestart, onUpdate,
-    invites = [], declines = [], changes = [], oninvitesanswered = () => {},
+    invites = [], declines = [], changes = [], oninvitesanswered = () => {}, oninvitesdismissed = () => {},
     settingsOpen = $bindable(false),
     open = $bindable(false),
   }: {
@@ -42,6 +43,8 @@
      *  named the wrong year the moment either had stepped away from it. */
     yearShown?: number;
     busy: boolean;
+    /** A background sync changes the status light, not the calendar controls. */
+    syncing?: boolean;
     signingIn?: boolean;
     onCancelSignIn?: () => void;
     error: string | null;
@@ -82,9 +85,11 @@
     /** Meetings the user attends that moved or were cancelled — the tray's
      *  Rescheduled/Cancelled sections, same lifecycle. */
     changes?: ChangeNotice[];
-    /** An invitation was answered from the tray. `App` refetches the list
-     *  and reloads the grid — the tray never mutates what it was given. */
+    /** A tray RSVP saved. App batches replies into a background sync and
+     *  reload — the tray never mutates what it was given. */
     oninvitesanswered?: () => void;
+    /** A local notice dismissal needs a refetch, not a provider sync. */
+    oninvitesdismissed?: () => void;
     /** Opens the latest release's page — the update notice's one action.
      *  Passed in like every other invoke, so this component stays free of
      *  Tauri imports. */
@@ -204,7 +209,7 @@
   const light = $derived(
     syncLight(
       {
-        connected, busy, error, reauth: reauth.length > 0,
+        connected, busy: busy || syncing, error, reauth: reauth.length > 0,
         lastSyncMs: status?.last_sync_ms ?? null,
       },
       now,
@@ -336,7 +341,7 @@
     <!-- Before the sync light: the one header element that asks for an
          action, so it sits where the eye already checks state. Renders
          nothing at inbox-zero — see InviteTray. -->
-    <InviteTray {invites} {declines} {changes} onanswered={oninvitesanswered} />
+    <InviteTray {invites} {declines} {changes} onanswered={oninvitesanswered} ondismissed={oninvitesdismissed} />
 
     <!-- **Spec §2: a light, not a sentence.** `is this stale?` is a question
          answered by glancing, so the state stays in the header while the words
@@ -354,6 +359,26 @@
       aria-label={light.label}
       title={light.label}
     ></span>
+
+    <!-- A stable slot prevents saving/failure feedback from shifting an
+         open popover's anchor. Errors float below the header rather than
+         stacking above the calendar. A row or popover owns its own error. -->
+    <div class="response-feedback">
+      {#if pendingResponseCount() > 0}
+        <span class="response-status" role="status">Saving {pendingResponseCount()}
+          {pendingResponseCount() === 1 ? 'response' : 'responses'}…</span>
+      {/if}
+      {#if unshownResponseFailures().length}
+        <div class="response-errors">
+          {#each unshownResponseFailures() as failure (failure.id)}
+            <p role="alert">{failure.message}
+              <button type="button" aria-label="Dismiss response error"
+                      onclick={() => dismissResponseFailure(failure.id)}>×</button>
+            </p>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     {#if !connected && !status?.demo}
       <!-- Stays in the header rather than moving behind the hamburger. The
@@ -406,7 +431,7 @@
                  Add Google account: sign_in refuses server-side in demo mode
                  (demo_sync_guard) regardless of whether an account is already
                  connected. -->
-            <button onclick={() => fromMenu(onSync)} disabled={busy}>Sync now</button>
+            <button onclick={() => fromMenu(onSync)} disabled={busy || syncing}>Sync now</button>
             <button onclick={() => fromMenu(onSignIn)} disabled={busy}>Add Google account</button>
           {/if}
           <button onclick={openTasks}>Tasks…</button>
@@ -535,7 +560,7 @@
      and it is the first strip anyone reaches for to move a window. Padding
      rather than margin, deliberately: a margin is outside the element and
      would be dead in exactly the same way. */
-  header { display: flex; align-items: center; justify-content: space-between;
+  header { position: relative; display: flex; align-items: center; justify-content: space-between;
            gap: 12px; padding-top: 14px; margin-bottom: 12px; flex-wrap: wrap; }
   /* Room for macOS's close/minimise/zoom buttons, which `titleBarStyle:
      "Overlay"` draws *over* this webview rather than in a strip above it.
@@ -618,6 +643,13 @@
     color: var(--text); font-size: 12.5px; margin: 0 0 12px; }
   .sign-in-status button { font: inherit; color: var(--text); background: var(--surface);
     border: 1px solid var(--hairline); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .response-feedback { width: 132px; min-height: 20px; display: flex; align-items: center; }
+  .response-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .response-errors { position: absolute; right: 0; top: 100%; z-index: 110;
+    width: min(360px, 85vw); max-height: 50vh; overflow-y: auto; padding: 8px; border: 1px solid var(--hairline);
+    border-radius: 6px; background: var(--surface); box-shadow: 0 4px 16px #0004; }
+  .response-errors p { overflow-wrap: anywhere; margin: 0; padding: 4px; color: var(--error); font-size: 12px; }
+  .response-errors button { float: right; }
   .err { color: var(--error); font-size: 12.5px; line-height: 1.45; margin: 0 0 12px;
          padding: 7px 10px; border-radius: 6px;
          background: color-mix(in srgb, var(--error) 9%, transparent);

@@ -12,6 +12,7 @@
 import type { WeekPayload, MonthPayload, YearPayload, BigYearPayload } from '../../src/lib/api';
 import type { AppStatus } from '../../src/lib/status';
 import type { Calendar } from '../../src/lib/calendars';
+import type { PendingInvite, DeclineNotice, ChangeNotice } from '../../src/lib/invites';
 import type { EventDetail } from '../../src/lib/eventdetail';
 import type { TimeFormat } from '../../src/lib/timefmt';
 import type { WeekStartDay } from '../../src/lib/weekstart';
@@ -112,6 +113,14 @@ export type Harness = {
   /** Answer the parked menu-bar write and let its `.then` chain run. */
   releaseMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format' | 'set_menubar_sections'): Promise<void>;
   holdNextSettings(): void;
+  /** Park the next full sync to observe the UI during reconciliation. */
+  holdNextSync(): void;
+  /** Complete the parked sync and let its follow-up refresh run. */
+  releaseSync(): Promise<void>;
+  /** Fail the parked sync while another reply asks for a refresh. */
+  rejectSync(message: string): Promise<void>;
+  /** Replace server snapshots for reply/reload handoff tests. */
+  setResponseData(data: ResponseData): void;
   /** Releases the parked `get_settings` call, answering with the settings as
    *  the stub now holds them. */
   releaseSettings(): Promise<void>;
@@ -180,6 +189,10 @@ let holdSearchOnce = false;
 /** A held `get_settings`, and the flag that arms one. Module level, like the
  *  parks beside it, because the harness object that releases them is. */
 let holdSettingsOnce = false;
+let holdSyncOnce = false;
+let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = null;
+type ResponseData = {week?: WeekPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
+let responseData: ResponseData = {};
 let parkedSettings: (() => void) | null = null;
 let holdMenubarOnce: string | null = null;
 const parkedMenubar = new Map<string, () => void>();
@@ -230,7 +243,7 @@ const harness: Harness = {
     return parked.size;
   },
   async release(weekStartMs) {
-    parked.get(weekStartMs)?.resolve(labelledWeek(weekStartMs));
+    parked.get(weekStartMs)?.resolve(structuredClone(responseData.week ?? labelledWeek(weekStartMs)));
     parked.delete(weekStartMs);
     // Let the resolution — and anything it schedules — actually run, so a
     // spec asserting "the stale response did not land" is asserting about a
@@ -296,6 +309,18 @@ const harness: Harness = {
   holdNextSettings() {
     holdSettingsOnce = true;
   },
+  holdNextSync() { holdSyncOnce = true; },
+  async releaseSync() {
+    parkedSync?.resolve();
+    parkedSync = null;
+    await new Promise(r => setTimeout(r, 50));
+  },
+  async rejectSync(message) {
+    parkedSync?.reject(message);
+    parkedSync = null;
+    await new Promise(r => setTimeout(r, 50));
+  },
+  setResponseData(data) { responseData = {...responseData, ...data}; },
   async releaseSettings() {
     parkedSettings?.();
     parkedSettings = null;
@@ -466,6 +491,7 @@ function getWeek(scenario: string, weekStartMs: number, dayCount = 7): Promise<W
   // week is asked for — same shortcut, and the same reasoning, as `getMonth`
   // below: its specs pin literal instants, and none of them needs the payload
   // to match the week it requested.
+  if (responseData.week) return Promise.resolve(structuredClone(responseData.week));
   if (scenario === 'writable') return Promise.resolve(appWritableWeek());
   if (scenario === 'keyboard-navigation') {
     return Promise.resolve(keyboardWeek(weekStartMs));
@@ -1179,14 +1205,18 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_calendar_sync':
         return calendarResult(cmd, CALENDAR_SYNC_REMOVED);
       case 'sync_now':
+        if (holdSyncOnce) {
+          holdSyncOnce = false;
+          return new Promise<void>((resolve, reject) => { parkedSync = {resolve, reject}; });
+        }
         return 0;
       // The header's invitation tray. Empty by default so every App spec that
       // predates it keeps describing a header without a badge; Header specs
       // that want rows mount the component with fixture props instead.
       case 'pending_invites':
-        return [];
+        return structuredClone(responseData.invites ?? []);
       case 'declined_guests':
-        return [];
+        return structuredClone(responseData.declines ?? []);
       // Recorded in `calls` like everything else; the row's disappearance is
       // the component's own optimistic hide, so nothing needs answering.
       case 'dismiss_decline_notice':
@@ -1194,7 +1224,7 @@ export function installTauriStub(scenario: string): Harness {
       case 'dismiss_all_decline_notices':
         return 0;
       case 'changed_meetings':
-        return [];
+        return structuredClone(responseData.changes ?? []);
       // The guest field's autocomplete corpus. A small fixed cast, present in
       // every scenario: the addresses are chosen to collide with nothing any
       // other spec types, so the dropdown only ever appears when a spec asks

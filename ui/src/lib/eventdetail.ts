@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { queueResponse } from './responses.svelte';
 
 export type Attendee = {
   email: string;
@@ -239,6 +240,10 @@ export type WhenInput =
 export const refreshEvent = (id: number) => invoke<EventDetail>('refresh_event', { id });
 
 /**
+ * Queue replies made in this window in order, sharing identical pending
+ * requests so a double click cannot mail guests twice. `title` names the
+ * event in a failure notice if its popover has already closed.
+ *
  * `occurrenceStartMs` is the `start_ms` of the block that was actually
  * clicked — the `UiEvent` from the grid, never `detail.start_ms`.
  *
@@ -253,10 +258,11 @@ export const refreshEvent = (id: number) => invoke<EventDetail>('refresh_event',
  */
 export const respondToEvent = (
   id: number,
-  response: string,
+  response: 'accepted' | 'tentative' | 'declined',
   scope: 'this' | 'all',
   occurrenceStartMs: number,
-) => invoke<EventDetail>('respond_to_event', { id, response, scope, occurrenceStartMs });
+  title?: string,
+) => queueResponse({ id, response, scope, occurrenceStartMs }, title);
 
 /**
  * `sendUpdates` is Google's own vocabulary — `'all'` or `'none'` — and is
