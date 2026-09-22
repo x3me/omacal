@@ -23,16 +23,11 @@ for (const fixture of ['populated', 'single-day-overlap']) {
       await expect.poll(async () => (await active.boundingBox())!.width).toBeGreaterThan(col.width * .9);
       await expect.poll(async () => (await inactive.boundingBox())!.width).toBeLessThan(col.width * .6);
       await expect(page.locator('.tip .tt')).toHaveText(title);
-      await expect(active.locator('.calendar-colors > span')).toHaveCount(2);
+      // Two meetings that merely overlap: no strip. It names the copies a
+      // combined block stands for, and nothing here has been combined.
+      await expect(active.locator('.calendar-colors')).toHaveCount(0);
       await expect(inactive.locator('b')).toHaveCSS('visibility', 'hidden');
       await expect(active.locator('b').first()).toHaveCSS('visibility', 'visible');
-      const markers = await active.locator('.calendar-colors > span').evaluateAll(els => els.map(el => {
-        const r = el.getBoundingClientRect();
-        return { x: r.x, width: r.width, height: r.height, color: getComputedStyle(el).backgroundColor };
-      }));
-      expect(markers[0].height).toBe(3);
-      expect(markers[1].x).toBeCloseTo(col.x + col.width / 2 + 1, 0);
-      expect(markers[0].color).not.toBe(markers[1].color);
       expect(await page.evaluate(({x,y}) => document.elementFromPoint(x,y)?.closest('.ev')?.textContent, {x,y})).toContain(title);
     }
     await page.mouse.move(0, 0);
@@ -81,7 +76,7 @@ test('staggered overlaps keep exposed labels without hover markers', async ({ pa
 for (const [kind, start, end] of [
   ['nested', 10.5, 11.5], ['shared start', 10, 11], ['shared end', 11, 12],
 ] as const) {
-  test(`hover markers identify a covered event, not an exposed enclosing event (${kind})`, async ({ page }) => {
+  test(`a covered label gives way to the card over it and comes back (${kind})`, async ({ page }) => {
     await page.goto('/tests/harness/index.html?c=WeekGrid&f=single-day-overlap');
     await page.evaluate(({ start, end }) => {
       const w = structuredClone((window as any).__fixtureProps.week);
@@ -105,7 +100,7 @@ for (const [kind, start, end] of [
     const second = (await short.boundingBox())!;
     const y = second.y + second.height / 2;
     await page.mouse.move(first.x + first.width / 2, y);
-    await expect(long.locator('.calendar-colors > span')).toHaveCount(2);
+    await expect(long.locator('.calendar-colors')).toHaveCount(0);
     await expect(short.locator('b')).toHaveCSS('visibility', 'hidden');
     await page.mouse.move(second.x + second.width / 2, y);
     await expect.poll(async () => (await short.boundingBox())!.width).toBeGreaterThan(second.width * 1.8);
@@ -115,7 +110,7 @@ for (const [kind, start, end] of [
   });
 }
 
-test('a mixed overlap marks only the contained calendars', async ({ page }) => {
+test('a mixed overlap blanks only the contained label', async ({ page }) => {
   await page.goto('/tests/harness/index.html?c=WeekGrid&f=single-day-overlap');
   await page.evaluate(() => {
     const w = structuredClone((window as any).__fixtureProps.week);
@@ -138,8 +133,7 @@ test('a mixed overlap marks only the contained calendars', async ({ page }) => {
   await long.scrollIntoViewIfNeeded();
   const r = (await long.boundingBox())!;
   await page.mouse.move(r.x + r.width / 2, r.y + r.height * .625);
-  await expect(long.locator('.calendar-colors > span')).toHaveCount(2);
-  await expect(long.locator('.calendar-colors > span').nth(1)).toHaveCSS('background-color', 'rgb(0, 170, 136)');
+  await expect(long.locator('.calendar-colors')).toHaveCount(0);
   await expect(page.locator('.ev').filter({ hasText: 'Contained' }).locator('b')).toHaveCSS('visibility', 'hidden');
   await expect(page.locator('.ev').filter({ hasText: 'Staggered' }).locator('b')).toHaveCSS('visibility', 'visible');
 });
@@ -158,10 +152,10 @@ test('hover uses the narrower event lanes when a timed task shares their hour', 
     await page.mouse.move(col.x + col.width * fraction, y, { steps: 4 });
     await expect(page.locator('.tip .tt')).toHaveText(title);
     await expect.poll(async () => (await active.boundingBox())!.width).toBeGreaterThan(col.width * .9);
-    const markers = active.locator('.calendar-colors > span');
-    await expect(markers).toHaveCount(2);
-    const second = (await markers.nth(1).boundingBox())!;
-    expect(Math.abs(second.x - (col.x + col.width / 3))).toBeLessThan(3);
-    expect(second.width / col.width).toBeCloseTo(1 / 3, 2);
+    // The lane the hover resolved against is the packed one — a third of the
+    // column, the task holding the other third. Read it off the inactive
+    // card, which keeps its packed geometry while its neighbour expands.
+    const other = active === left ? right : left;
+    expect((await other.boundingBox())!.width / col.width).toBeLessThan(.45);
   }
 });

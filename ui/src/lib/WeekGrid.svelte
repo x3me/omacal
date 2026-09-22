@@ -1475,6 +1475,22 @@
   // The gesture is chosen at pointer-down; pressing Alt during a move must
   // not advertise creation, and releasing it during a sweep must not end it.
   const createMode = $derived(sweep !== null || (altHeld && drag === null));
+  /** Whether the event a hover is resting on is a **combined** one — several
+   *  calendars' copies of the same meeting drawn as one block.
+   *
+   *  The colour strip along a card's bottom edge, and the blanking of the
+   *  labels underneath it, belong to that case and only that case: the strip
+   *  names the copies the single block stands for. Merely *overlapping*
+   *  meetings got the same treatment until 2026-09-22, which drew a full-width
+   *  line under any card that happened to cover a neighbour — reported as a
+   *  stray line by someone who had never turned combining on, and fairly:
+   *  nothing had been merged, so the strip stood for nothing. An overlapped
+   *  neighbour is still reachable the way it always was, by moving off the
+   *  card that covers it.
+   */
+  const combinedAt = (day: DayColumn, idx: number) =>
+    (day.events[idx]?.copies?.length ?? 0) > 1;
+
   const hoverContext = $derived.by(() => {
     const hover = hoveredPlacement;
     if (!hover || createMode || drag) return null;
@@ -2173,7 +2189,8 @@
           }}
           hovered={hoveredPlacement?.day === day.start_ms && hoveredPlacement.idx === p.idx}
           overlapColors={hoverContext?.day === day.start_ms && hoverContext.idx === p.idx
-            && (!day.events[p.idx].copies?.length || hoverContext.peers.length > 1) ? hoverContext.segments : []}
+            && combinedAt(day, hoverContext.idx) && hoverContext.peers.length > 1
+            ? hoverContext.segments : []}
           copyHoverLane={hoverContext?.day === day.start_ms && hoverContext.idx === p.idx ? hoverContext.copyHoverLane : undefined}
           obscured={hoverContext?.day === day.start_ms && hoverContext.idx !== p.idx
             && hoverContext.peers.some(peer => peer.idx === p.idx)}

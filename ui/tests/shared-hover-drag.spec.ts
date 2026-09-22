@@ -107,7 +107,8 @@ test('dragging into a shared overlap does not transfer focus or leave empty copy
     await expect(page.locator('.copy-panels')).toHaveCount(0);
     await expect(event.locator(':scope > b')).toBeVisible();
     await expect(event.locator('.tip .tt')).toBeVisible();
-    await expect(event.locator('.calendar-colors > span')).toHaveCount(4);
+    // Independent events: nothing is merged, so the strip stands for nothing.
+    await expect(event.locator('.calendar-colors')).toHaveCount(0);
   }
 });
 
@@ -150,7 +151,7 @@ for (const destination of ['outside', 'neighbor'] as const) {
     if (destination === 'neighbor') {
       await expect(peer).toHaveClass(/hovered/);
       await expect(peer.locator(':scope > b')).toBeVisible();
-      await expect(peer.locator('.calendar-colors > span')).toHaveCount(4);
+      await expect(peer.locator('.calendar-colors')).toHaveCount(0);
     }
     await expect(page.getByRole('dialog')).toHaveCount(0);
     expect(await page.evaluate(() => window.__harness.calls.filter(c => c.cmd === 'update_event'))).toEqual([]);
