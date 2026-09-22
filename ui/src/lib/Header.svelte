@@ -645,7 +645,18 @@
     color: var(--text); font-size: 12.5px; margin: 0 0 12px; }
   .sign-in-status button { font: inherit; color: var(--text); background: var(--surface);
     border: 1px solid var(--hairline); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
-  .response-feedback { position: absolute; right: 0; top: 100%; z-index: 110;
+  /* **Below every overlay, above the grid.** 42 sits over the tallest event
+     block (27, or 50 mid-drag) and over the popover and the event form (41),
+     so a failure about one event is still readable beside another's card —
+     but under the calendar picker (44), Quick Add and Search (50) and
+     Settings (60). It was 110, which covered all of them: the card is
+     right-aligned while a modal is centred, so on a narrow window — or at
+     150–200% interface scale, which is the same thing in CSS pixels — it
+     landed on Settings' tab row and made Notifications and About
+     unclickable until it was dismissed. Errors are sticky, so nothing is
+     lost by letting a modal own the screen; the card is there again when it
+     closes. */
+  .response-feedback { position: absolute; right: 0; top: 100%; z-index: 42;
     display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; }
   .response-status { color: var(--muted); font-size: 11px; white-space: nowrap;
     padding: 4px 8px; background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; }

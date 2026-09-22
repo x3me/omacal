@@ -303,3 +303,41 @@ test('idle RSVP feedback leaves no gap beside the light and fits a narrow header
   const menu = (await page.getByRole('button', {name: 'Menu', exact: true}).boundingBox())!;
   expect(Math.abs(title.y + title.height / 2 - menu.y - menu.height / 2)).toBeLessThan(3);
 });
+
+// A sticky failure outlives the surface that raised it, so it is still on
+// screen when the user opens something else. The card is right-aligned and a
+// modal is centred, so they only meet on a narrow window — or at a high
+// interface scale, which is the same viewport in CSS pixels.
+test('a sticky failure stays under a modal instead of covering its controls', async ({page}) => {
+  await page.setViewportSize({width: 640, height: 520});
+  await open(page);
+  await block(page, 'Standup').first().click();
+  await page.evaluate(id => window.__harness.holdNextEventCall('respond_to_event', id), series);
+  await page.getByRole('button', {name: 'Yes', exact: true}).click();
+  const all = page.getByRole('button', {name: 'All of them'});
+  if (await all.count()) await all.click();
+  await page.evaluate(id => window.__harness.rejectEventCall('respond_to_event', id, 'Reply failed.'), series);
+  await page.keyboard.press('Escape');
+  const alert = page.locator('header [role="alert"]');
+  await expect(alert).toContainText('Reply failed.');
+
+  await page.getByRole('button', {name: 'Menu', exact: true}).click();
+  await page.getByRole('button', {name: 'Settings…'}).click();
+  const modal = page.getByRole('dialog', {name: 'Settings'});
+  await expect(modal).toBeVisible();
+
+  // They do overlap at this size — the point is which one the pointer finds.
+  const card = (await alert.boundingBox())!;
+  const box = (await modal.boundingBox())!;
+  expect(card.x).toBeLessThan(box.x + box.width);
+  expect(card.y).toBeLessThan(box.y + box.height);
+  const topmost = await page.evaluate(({x, y}) => {
+    const el = document.elementFromPoint(x, y);
+    return el?.closest('[role="alert"]') ? 'alert' : el?.closest('[role="dialog"]') ? 'dialog' : 'other';
+  }, {x: card.x + card.width / 2, y: card.y + 4});
+  expect(topmost).not.toBe('alert');
+  // Every Settings tab stays reachable.
+  for (const tab of ['General', 'Appearance', 'Notifications']) {
+    await modal.getByRole('tab', {name: tab}).click();
+  }
+});
