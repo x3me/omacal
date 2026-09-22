@@ -3,7 +3,7 @@ import type {
   BigYearPayload, RibbonRow,
 } from '../src/lib/api';
 import type { AppStatus } from '../src/lib/status';
-import type { DayWeather, WeatherReport } from '../src/lib/weather';
+import { dateKey, type DayWeather, type WeatherReport } from '../src/lib/weather';
 import type { Task } from '../src/lib/tasks';
 import type { Calendar } from '../src/lib/calendars';
 import type { Attendee, EventDetail } from '../src/lib/eventdetail';
@@ -157,7 +157,7 @@ const populatedWeek = (): WeekPayload => {
   const th = MON + 3 * 24 * H;
   w.days[3] = day(3, [
     ev({ title: 'Ops review', location: 'Meet', start_ms: th + 10 * H, end_ms: th + 11 * H }),
-    ev({ title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
+    ev({ id: 7301, title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
          start_ms: th + 10 * H, end_ms: th + 11 * H }),
   ], [placed(10 / 24, 1 / 24, 0, 2, 0), placed(10 / 24, 1 / 24, 1, 2, 1)]);
   // All-day band: one span inside the week, one arriving from the previous week.
@@ -191,7 +191,7 @@ const singleDayOverlapWeek = (): WeekPayload => {
   const w = singleDayWeek();
   w.days[0] = day(0, [
     ev({ title: 'Ops review', location: 'Meet', start_ms: MON + 10 * H, end_ms: MON + 11 * H }),
-    ev({ title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
+    ev({ id: 7301, title: 'Investors', location: 'Zoom', response: 'needsAction', color: '#f472b6',
          start_ms: MON + 10 * H, end_ms: MON + 11 * H }),
   ], [placed(10 / 24, 1 / 24, 0, 2, 0), placed(10 / 24, 1 / 24, 1, 2, 1)]);
   return w;
@@ -2211,6 +2211,13 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     'popover-all-day': { week: popoverAllDayWeek() },
     'single-day': { week: singleDayWeek() },
     'single-day-overlap': { week: singleDayOverlapWeek() },
+    'overlap-with-task': {
+      week: singleDayOverlapWeek(),
+      tasks: { row: new Map(), timed: new Map([[dateKey(MON), [{
+        id: 7901, summary: 'Call the bank', color: '#5b8def', completed: false,
+        overdue: false, canWrite: true, dueMs: MON + 10.5 * H,
+      }]]]) },
+    },
     // Read as a list rather than a grid, but registered **here** so
     // `fixtures.spec.ts`'s sweep holds it to every invariant `assemble_days`
     // guarantees. A list fixture that no assembler could have produced would

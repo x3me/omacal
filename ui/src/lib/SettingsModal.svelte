@@ -26,7 +26,7 @@
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
     setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeatherLocation, setWeekStart,
     setWeekStartsToday, setWeekViewDays, setVisibleHours, setInterfaceScale,
-    setTaskNotificationsEnabled,
+    setTaskNotificationsEnabled, setCombineIdenticalEvents,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
   } from './settings';
@@ -46,6 +46,10 @@
     try { settings = await setInterfaceScale(percent); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
     finally { scalePreview = null; }
+  }
+  async function changeCombineIdenticalEvents(on: boolean) {
+    try { settings = await setCombineIdenticalEvents(on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; }
   }
   let {
     accounts,
@@ -1308,6 +1312,12 @@
 
       <section class="appearance-section" aria-labelledby="event-style-heading">
         <h2 id="event-style-heading">Event styling</h2>
+        <label class="check">
+          <input type="checkbox" checked={settings?.combineIdenticalEvents ?? false} disabled={!settings}
+            onchange={(e) => changeCombineIdenticalEvents(e.currentTarget.checked)} />
+          Combine identical events
+        </label>
+        <p class="hint">Show matching events once, with a bottom color segment for each calendar. Hover to choose a copy, or select it in the event details.</p>
         <!-- Offered only where the window can be seen through, like the
              canvas slider above (2026-09-12, reported from macOS as "not
              doing anything"). The fade goes toward `transparent`, and on

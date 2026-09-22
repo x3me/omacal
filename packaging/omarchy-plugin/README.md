@@ -125,3 +125,5 @@ request is involved. Observation is bounded to 256 windows/events and 1,024
 characters per input field; oversized or ambiguous input stays neutral.
 
 **Settings → Appearance → Visible hours** limits the timed grids in Day, Week, and this popup. Start and end use the display clock; the default shows the full day. Events outside the range remain in the agenda and search.
+Combined calendar copies use one title and a bottom color segment for each calendar.
+These segments identify calendar membership; they do not indicate RSVP status.
