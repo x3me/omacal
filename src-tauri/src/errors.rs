@@ -233,6 +233,16 @@ const SAFE_EXACT: &[&str] = &[
     crate::tasks::TASK_NOT_MOVED,
     crate::tasks::TASK_ON_BOTH_LISTS,
     crate::tasks::TASK_CHANGED_ON_SERVER,
+    // src-tauri/src/zoom.rs — fixed, secret-free refusals from the Zoom OAuth
+    // and create path. Endpoint status/error detail is logged separately and
+    // never interpolated into these strings; each reaches `connect_zoom` or an
+    // event command through a bare `?` and exact `user_facing` match.
+    crate::zoom::NOT_CONFIGURED,
+    crate::zoom::RECONNECT,
+    crate::zoom::AUTH_FAILED,
+    crate::zoom::CREATE_FAILED,
+    crate::zoom::ALL_DAY_UNSUPPORTED,
+    crate::zoom::TOO_LONG,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -524,6 +534,12 @@ mod tests {
             // The interface scale's range, a fixed literal raised before the
             // write.
             crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
+            crate::zoom::NOT_CONFIGURED,
+            crate::zoom::RECONNECT,
+            crate::zoom::AUTH_FAILED,
+            crate::zoom::CREATE_FAILED,
+            crate::zoom::ALL_DAY_UNSUPPORTED,
+            crate::zoom::TOO_LONG,
         ];
         for expected in EXPECTED {
             assert!(
