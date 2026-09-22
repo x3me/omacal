@@ -14,6 +14,7 @@ import WeatherPopover from '../../src/lib/WeatherPopover.svelte';
 import ImportPanel from '../../src/lib/ImportPanel.svelte';
 import EventForm from '../../src/lib/EventForm.svelte';
 import DeleteConfirm from '../../src/lib/DeleteConfirm.svelte';
+import * as responses from '../../src/lib/responses.svelte';
 import * as eventform from '../../src/lib/eventform';
 import * as drag from '../../src/lib/drag';
 import * as taskdates from '../../src/lib/taskdates';
@@ -33,6 +34,8 @@ import { VIEW_BOX_CSS } from './viewbox';
 // and reach the module through here. Assigned before the branching below, so a
 // spec can ask for a URL that mounts nothing at all.
 (window as any).__eventform = eventform;
+// The window-owned reply queue, exercised through the same exports as App.
+(window as any).__responses = responses;
 
 // The drag geometry, reachable from `drag.spec.ts` for the same reason: every
 // answer it gives depends on the browser's zone, and `timezoneId` reaches the
@@ -157,6 +160,7 @@ if (name === 'App') {
         ...props,
         oncalendarchange: () => { (window as any).__calendarChanges += 1; },
         oninvitesanswered: () => { (window as any).__inviteAnswers += 1; },
+        oninvitesdismissed: () => { (window as any).__inviteAnswers += 1; },
       };
     }
     // EventBlock is absolutely positioned; give it a sized relative parent.
@@ -196,7 +200,10 @@ if (name === 'App') {
       // interacted with. `mount()`'s props are read reactively when given
       // as a getter, so this is enough to make that live from outside.
       let week = $state(props.week);
-      (window as any).__setWeek = (w: unknown) => { week = w; };
+      (window as any).__setWeek = (w: unknown) => {
+        // Simulate App publishing a successful post-sync payload.
+        week = w; responses.reconcileResponses(responses.responseCheckpoint());
+      };
       // `oncreate`/`onedit`/`ondelete` are callback props, not Tauri commands
       // — the grid decides *which occurrence* a write is about and hands that
       // up, rather than writing anything itself. Captured on the window the

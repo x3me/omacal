@@ -2490,6 +2490,16 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       ...header({ accounts: [], last_sync_ms: null, demo: true, overlay_titlebar: false }),
       error: 'Sync failed.' as string | null,
     },
+    /** Three answerable invitations to hold and drain in order. */
+    'queued-invites': {
+      ...header({ accounts: ['me@x.com'], last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false }),
+      invites: [901, 902, 903].map((id, i) => ({
+        id, title: `Invitation ${i + 1}`,
+        start_ms: MON + (34 + i) * H, end_ms: MON + (35 + i) * H,
+        is_all_day: false, start_date: null, end_date: null,
+        organizer_email: 'ana@example.com', color: '#5b8def', can_respond: true,
+      })),
+    },
     /** Two unanswered invitations: one answerable Google invite (buttons)
      *  and one CalDAV all-day span (no buttons — no RSVP write exists).
      *  Timed instants deliberately inside the fixture week so the "when"

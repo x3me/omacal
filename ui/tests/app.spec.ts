@@ -996,6 +996,22 @@ test.describe('App', () => {
   };
 
   const block = (page: Page, title: string) => page.locator('.ev').filter({ hasText: title });
+
+  test('RSVP refresh reports syncing without making calendar controls busy', async ({ page }) => {
+    await writable(page);
+    await page.evaluate(() => window.__harness.holdNextSync());
+    await block(page, 'Standup').click();
+    await page.getByRole('button', { name: 'Yes', exact: true }).click();
+    await page.getByRole('button', { name: 'All of them', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__harness.calls
+      .filter(c => c.cmd === 'sync_now').length)).toBe(1);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await expect(page.getByRole('img', { name: 'Syncing now' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Today', exact: true })).toBeEnabled();
+    await page.evaluate(() => window.__harness.releaseSync());
+  });
   /** An `AllDayBand` chip. A different element and a different component from
    *  `block` above — `commands::assemble_week` puts every `is_all_day` event in
    *  the band and never in a day column, so this is the *only* way to reach an
@@ -6187,6 +6203,9 @@ test.describe('tasks on the grid', () => {
   test('dragging a task at an hour moves its due time', async ({ page }) => {
     await openWeek(page, 'timed-task');
     const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    // Wait for the task to be actionable before measuring: the initial
+    // grid scroll can still move it after the meeting first becomes visible.
+    await title.hover();
     const from = (await title.boundingBox())!;
     const x = from.x + from.width / 2;
     const y = from.y + from.height / 2;
@@ -6206,6 +6225,7 @@ test.describe('tasks on the grid', () => {
   test('escape during a drag at an hour writes nothing', async ({ page }) => {
     await openWeek(page, 'timed-task');
     const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    await title.hover();
     const from = (await title.boundingBox())!;
     const x = from.x + from.width / 2;
     const y = from.y + from.height / 2;
@@ -6213,6 +6233,7 @@ test.describe('tasks on the grid', () => {
     await page.mouse.move(x, y);
     await page.mouse.down();
     await page.mouse.move(x, y + 70, { steps: 8 });
+    await expect(page.locator('.tpin.dragging')).toHaveCount(1);
     await page.keyboard.press('Escape');
     await page.mouse.up();
 

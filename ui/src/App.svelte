@@ -1,5 +1,6 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
+  import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import { setVisibleHoursState } from "./lib/visiblehours.svelte";
   import type { EventCopy } from './lib/api';
   import { formatDate } from './lib/datefmt';
@@ -185,6 +186,21 @@
   let status = $state<AppStatus | null>(null);
   let calendars = $state<Calendar[]>([]);
   let busy = $state(false);
+  let syncing = $state(false);
+  let syncInFlight: Promise<unknown> | null = null;
+  // A read-only request can join an existing sync. A completed write needs
+  // a pass that starts after it, even when the older pass fails. Concurrent
+  // writers waiting for that pass share it rather than starting sync_all twice.
+  async function syncCalendar(afterWrite = false): Promise<unknown> {
+    if (syncInFlight) {
+      if (!afterWrite) return syncInFlight;
+      await syncInFlight.catch(() => {});
+      return syncCalendar();
+    }
+    syncing = true;
+    syncInFlight = syncNow().finally(() => { syncing = false; syncInFlight = null; });
+    return syncInFlight;
+  }
   let signingIn = $state(false);
   let error = $state<string | null>(null);
   // Opened right after every sign-in (Task 7) — see `handleSignIn` — so a
@@ -978,6 +994,8 @@
 
   async function loadWeek(kind: 'day' | 'week' | 'range', target: number, pad: number, days?: WeekViewDays) {
     const req = ++weekReq;
+    // Snapshot once: queue changes must not drive the view's fetch effect.
+    const responseVersion = untrack(responseCheckpoint);
     try {
       const w = kind === 'day'
         ? await getDay(target, pad)
@@ -987,6 +1005,7 @@
       if (req !== weekReq) return; // superseded while we were awaiting
       week = w;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== weekReq) return;
       error = String(e);
@@ -995,11 +1014,13 @@
 
   async function loadMonth(year: number, monthNum: number) {
     const req = ++monthReq;
+    const responseVersion = untrack(responseCheckpoint);
     try {
       const m = await getMonth(year, monthNum);
       if (req !== monthReq) return;
       month = m;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== monthReq) return;
       error = String(e);
@@ -1008,11 +1029,13 @@
 
   async function loadYear(y: number) {
     const req = ++yearReq;
+    const responseVersion = untrack(responseCheckpoint);
     try {
       const p = await getYear(y);
       if (req !== yearReq) return;
       year = p;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== yearReq) return;
       error = String(e);
@@ -1021,11 +1044,13 @@
 
   async function loadBigYear(y: number) {
     const req = ++bigYearReq;
+    const responseVersion = untrack(responseCheckpoint);
     try {
       const p = await getBigYear(y);
       if (req !== bigYearReq) return;
       bigYear = p;
       error = null;
+      reconcileResponses(responseVersion);
     } catch (e) {
       if (req !== bigYearReq) return;
       error = String(e);
@@ -1144,7 +1169,9 @@
       // syncing. Every account imports switched on by default, holidays and
       // room calendars included; this is where the user first gets a say.
       pickerOpen = true;
-      await handleSync();
+      await syncCalendar(true);
+      await refreshStatus();
+      await reload();
     }
     catch (e) { if (String(e) !== 'Sign-in cancelled.') error = String(e); }
     finally { signingIn = false; busy = false; }
@@ -1156,9 +1183,10 @@
   }
 
   async function handleSync() {
+    if (busy || syncing) return;
     busy = true; error = null;
     try {
-      await syncNow();
+      await syncCalendar();
       await refreshStatus();
       await reload();
     } catch (e) { error = String(e); }
@@ -1680,8 +1708,41 @@
     pendingDelete = { occurrence, anchor: rect };
   }
 
+  async function refreshAfterDismissal() {
+    await refreshInvites();
+    await reload();
+  }
+
+  let responseRefreshRunning = false;
+  let responseRefreshRequested = false;
+  async function refreshAfterResponse() {
+    responseRefreshRequested = true;
+    if (responseRefreshRunning) return;
+    responseRefreshRunning = true;
+    try {
+      while (responseRefreshRequested) {
+        await responsesIdle();
+        responseRefreshRequested = false;
+        try {
+          await refreshInvites();
+          await syncCalendar(true);
+          await refreshStatus();
+          await reload();
+          await refreshInvites();
+        } catch (e) {
+          error = `The response was saved, but OmaCal could not refresh: ${e}`;
+          // A later reply may have requested another pass during the failed
+          // one. Catch per iteration so that request is never discarded.
+        }
+      }
+    } finally {
+      responseRefreshRunning = false;
+    }
+  }
+
   /**
-   * Where every successful write ends.
+   * Reconcile successful edits, creates and deletes. RSVPs use the batched
+   * background path above.
    *
    * A *sync*, not just a re-read, and that is the whole point of the function.
    * Two of the write paths deliberately leave the local store alone: a `'this'`
@@ -1699,14 +1760,11 @@
    */
   async function refreshAfterWrite() {
     await reload();
-    // The invitation badge is a function of self_response, and an RSVP from
-    // the popover is a write that changes it — without this, answering an
-    // invitation on its block left the tray claiming it for up to a sync
-    // interval (noticed live, 2026-08-17, minutes after the tray shipped).
+    // Edits and deletes can also change which invitations need attention.
     await refreshInvites();
     busy = true;
     try {
-      await syncNow();
+      await syncCalendar(true);
       await refreshStatus();
       await reload();
     } catch (e) {
@@ -2143,7 +2201,9 @@
     {invites}
     {declines}
     {changes}
-    oninvitesanswered={() => { void refreshInvites(); void reload(); }}
+    {syncing}
+    oninvitesanswered={refreshAfterResponse}
+    oninvitesdismissed={refreshAfterDismissal}
     onpick={pick}
     bind:open={pickerOpen}
   />
@@ -2221,7 +2281,7 @@
                   onduplicate={createCalendarId === null ? null : duplicateOccurrence}
           onmove={moveOccurrence}
           ondraftmove={(span) => formEl?.applySpan(span)}
-          onresponded={refreshAfterWrite} />
+          onresponded={refreshAfterResponse} />
       {/if}
     {/if}
     </div>
@@ -2292,7 +2352,7 @@
     occurrenceStartMs={startMs}
     occurrenceEndMs={occurrence.endMs}
     onclose={closeGridEvent}
-    onresponded={refreshAfterWrite}
+    onresponded={refreshAfterResponse}
     onedit={() => openEdit(occurrence, rect)}
     ondelete={() => askDelete(occurrence, rect)}
     oncopy={() => copyOccurrence(occurrence)}

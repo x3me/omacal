@@ -1,5 +1,6 @@
 <!-- ui/src/lib/WeekGrid.svelte -->
 <script lang="ts">
+  import { pendingResponse } from './responses.svelte';
   import { visibleHours } from "./visiblehours.svelte";
   import { clockFormat } from './clock.svelte';
   import { gutterWidth, secondZone } from './secondzone.svelte';
@@ -661,8 +662,9 @@
     week.days.map((d) => ({
       ...d,
       events: d.events.map((e) => {
-        const override = responseOverrides.get(overrideKey(e.id, e.start_ms));
-        return override ? { ...e, response: override.response } : e;
+        const response = pendingResponse(e.id, e.start_ms)
+          ?? responseOverrides.get(overrideKey(e.id, e.start_ms))?.response;
+        return response ? { ...e, response } : e;
       }),
     })),
   );
