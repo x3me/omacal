@@ -51,6 +51,23 @@ pub(crate) async fn is_caldav_calendar(
     Ok(provider == "caldav")
 }
 
+/// Whether anyone hears about a write on this calendar: only Google mails.
+/// CalDAV has no guest management and subscribed feeds are read-only, so both
+/// read as silent — the same answer the form's notify question is gated on.
+pub(crate) async fn calendar_mails_guests(
+    pool: &sqlx::SqlitePool,
+    calendar_id: i64,
+) -> anyhow::Result<bool> {
+    let provider: String = sqlx::query_scalar(
+        "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id
+         WHERE c.id = ?1",
+    )
+    .bind(calendar_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(provider == "google")
+}
+
 /// The master row of whatever the user is looking at: the row itself, unless
 /// it is an exception, in which case the series master it belongs to — the
 /// component that owns the resource.

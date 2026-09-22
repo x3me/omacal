@@ -15,7 +15,7 @@
   import TimezoneSelect from './TimezoneSelect.svelte';
   import { calendarColor, offerableCalendarId, writableCalendars, type Calendar } from './calendars';
   import { connectCaldav } from './tasks';
-  import { listAccounts, signOut, type Account } from './accounts';
+  import { listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
     getSettings, listTimezones, minutesOf, msOfMinutes, setAppearancePreferences,
     setDefaultCalendar, setDefaultView, setDefaultViewFollowsLast, DEFAULT_VIEW_OPTIONS,
@@ -660,7 +660,9 @@
         text:
           row.provider === 'caldav'
             ? `${row.email} signed out and its local data removed. To revoke the password itself, visit your provider (for iCloud: account.apple.com).`
-            : `${row.email} signed out, its access revoked, and its local data removed.`,
+            : row.provider === 'webcal'
+              ? `${row.email} unsubscribed and its local data removed. The feed itself is untouched.`
+              : `${row.email} signed out, its access revoked, and its local data removed.`,
         kind: 'info',
       };
     } catch (e) {
@@ -682,6 +684,7 @@
 
   function openCaldavForm(kind: 'icloud' | 'caldav') {
     note = null;
+    webcalForm = false;
     caldavForm = kind;
     caldavUrl = '';
     caldavEmail = '';
@@ -712,6 +715,41 @@
       note = { text: String(e), kind: 'error' };
     } finally {
       caldavBusy = false;
+    }
+  }
+
+  // The subscribed-feed form's own little state: a public WebCal URL plus an
+  // optional display name. Separate busy flag like the CalDAV form's — the
+  // Google `busy` belongs to the OAuth flow.
+  let webcalForm = $state(false);
+  let webcalUrl = $state('');
+  let webcalName = $state('');
+  let webcalBusy = $state(false);
+
+  function openWebcalForm() {
+    note = null;
+    caldavForm = null;
+    webcalUrl = '';
+    webcalName = '';
+    webcalForm = true;
+  }
+
+  async function submitWebcal() {
+    if (!webcalForm || webcalBusy) return;
+    note = null;
+    webcalBusy = true;
+    try {
+      await subscribeWebcal(webcalUrl, webcalName.trim() ? webcalName : undefined);
+      webcalForm = false;
+      webcalUrl = '';
+      webcalName = '';
+      accountRows = await listAccounts().catch(() => accountRows);
+      oncalendarchange?.();
+      note = { text: 'Subscribed. The feed syncs with everything else — pick which to show under Calendars.', kind: 'info' };
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+    } finally {
+      webcalBusy = false;
     }
   }
 
@@ -1662,7 +1700,7 @@
         {#each accountRows ?? accounts.map((email, i) => ({ id: -1 - i, email, provider: 'google' })) as row (row.id)}
           <li class="account-row">
             <span class="acct-email">{row.email}</span>
-            <span class="acct-prov">{row.provider === 'caldav' ? 'CalDAV' : 'Google'}</span>
+            <span class="acct-prov">{row.provider === 'caldav' ? 'CalDAV' : row.provider === 'webcal' ? 'WebCal' : 'Google'}</span>
             {#if row.id >= 0}
               {#if confirmingSignOut === row.id}
                 <button
@@ -1686,8 +1724,9 @@
       {/if}
       <div class="provider-row">
         <button type="button" onclick={onSignIn} disabled={busy}>Add Google account</button>
-        <button type="button" onclick={() => openCaldavForm('icloud')} disabled={busy || caldavBusy}>Add iCloud account</button>
-        <button type="button" onclick={() => openCaldavForm('caldav')} disabled={busy || caldavBusy}>Add CalDAV account</button>
+        <button type="button" onclick={() => openCaldavForm('icloud')} disabled={busy || caldavBusy || webcalBusy}>Add iCloud account</button>
+        <button type="button" onclick={() => openCaldavForm('caldav')} disabled={busy || caldavBusy || webcalBusy}>Add CalDAV account</button>
+        <button type="button" onclick={openWebcalForm} disabled={busy || caldavBusy || webcalBusy}>Add WebCal account</button>
         {#if signingIn}
           <button type="button" onclick={onCancelSignIn}>Cancel sign-in</button>
         {/if}
@@ -1697,7 +1736,8 @@
         Signing out removes the account's local data (its calendars, events
         and tasks re-sync if you connect again). For Google, the app's access
         is revoked too; for iCloud and CalDAV, the password stays valid until
-        you revoke it at your provider.
+        you revoke it at your provider. Removing a subscription only deletes
+        its local copy — the feed itself is untouched.
       </p>
 
       <!-- CalDAV: the auth story with no OAuth in it. One form serves both —
@@ -1769,6 +1809,56 @@
                 {caldavBusy ? 'Connecting…' : 'Connect'}
               </button>
               <button type="button" onclick={() => (caldavForm = null)} disabled={caldavBusy}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        {/if}
+      </div>
+
+      <!-- Read-only WebCal subscription: a public feed URL, no credentials.
+           Read-only by construction — the calendar lands as `reader`, so
+           every write path refuses it the way subscribed holiday calendars
+           are refused. -->
+      <div class="caldav" class:empty={!webcalForm} role="group" aria-label="Subscribe to a calendar URL">
+        {#if webcalForm}
+          <form
+            class="caldav-form"
+            onsubmit={(e) => {
+              e.preventDefault();
+              void submitWebcal();
+            }}
+          >
+            <input
+              type="text"
+              placeholder="webcal://example.com/calendar.ics"
+              aria-label="Calendar URL"
+              bind:value={webcalUrl}
+              disabled={webcalBusy}
+            />
+            <input
+              type="text"
+              placeholder="Name (optional)"
+              aria-label="Name"
+              bind:value={webcalName}
+              disabled={webcalBusy}
+            />
+            {#if /^\s*http:\/\//i.test(webcalUrl)}
+              <p class="hint">
+                Plain http is accepted only for a server on this machine or
+                your own network — a feed reachable from the internet needs
+                https.
+              </p>
+            {/if}
+            <p class="hint">
+              Read-only: the feed syncs with everything else and cannot be
+              edited from OmaCal.
+            </p>
+            <div class="provider-row">
+              <button type="submit" disabled={webcalBusy}>
+                {webcalBusy ? 'Subscribing…' : 'Subscribe'}
+              </button>
+              <button type="button" onclick={() => (webcalForm = false)} disabled={webcalBusy}>
                 Cancel
               </button>
             </div>

@@ -1,5 +1,6 @@
 pub mod caldav;
 pub mod convert;
+pub mod webcal_feed;
 pub use convert::{
     from_google_attendee, from_google_reminder, from_google_reminders, is_tombstone,
     to_cancelled_exception, to_stored,

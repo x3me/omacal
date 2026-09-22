@@ -229,9 +229,9 @@ fn to_pending(c: &InviteCandidate, demo: bool) -> PendingInvite {
         end_date,
         organizer_email: c.organizer_email.clone(),
         color: c.color_hex.clone(),
-        // The popover's own gate, provider included — a CalDAV invitation
-        // lists (it is real, and unanswered) but carries no buttons, since
-        // no RSVP write exists for it.
+        // The popover's own gate, provider included — only Google carries
+        // buttons; CalDAV, WebCal and local invitations list (real and
+        // unanswered) but carry none, since no RSVP write exists for them.
         can_respond: c.provider == "google"
             && crate::events::can_respond(demo, &c.access_role, &c.attendees),
     }

@@ -709,6 +709,10 @@ pub struct TaskListVm {
 /// One query, two callers: the window's command and the socket's "no list
 /// was named" default, so the CLI can never land a task somewhere the
 /// window would not offer.
+///
+/// WebCal feeds are events-only (`supports_tasks = 0`) and `reader`, so the
+/// provider list needs no `webcal` entry — the two guards below already
+/// exclude them. Google has no task lists at all.
 pub(crate) async fn writable_task_lists(
     pool: &sqlx::SqlitePool,
 ) -> anyhow::Result<Vec<TaskListVm>> {

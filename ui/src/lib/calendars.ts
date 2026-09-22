@@ -25,9 +25,10 @@ export type Calendar = {
    *  `reader`, `freeBusyReader`. Only the first two can be written to — see
    *  `writableCalendars` below, the one place that decides it. */
   access_role: string;
-  /** The owning account's provider: `google` | `caldav`. Both write events
-   *  now; the difference is vocabulary — CalDAV has no guest management and
-   *  no notify question, which `EventForm` gates on this field. */
+  /** The owning account's provider: `google` | `caldav` | `webcal` | `local`.
+   *  Only Google mails guests (CalDAV has no guest management and no notify
+   *  question; WebCal and local never mail) — `EventForm` gates on this field,
+   *  and WebCal/local calendars are `reader`-gated out of writes entirely. */
   provider: string;
 };
 
@@ -104,7 +105,14 @@ export function byAccount(cals: Calendar[]): Array<{ id: number; label: string; 
         groups.set(c.account_id, { id: c.account_id, label: 'On this device', calendars: [c] });
         continue;
       }
-      const provider = c.provider === 'google' ? 'Google' : c.provider === 'caldav' ? 'CalDAV' : c.provider;
+      const provider =
+        c.provider === 'google'
+          ? 'Google'
+          : c.provider === 'caldav'
+            ? 'CalDAV'
+            : c.provider === 'webcal'
+              ? 'WebCal'
+              : c.provider;
       groups.set(c.account_id, { id: c.account_id,
         label: `${provider} · ${c.account_email}`, calendars: [c] });
     }

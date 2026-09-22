@@ -19,6 +19,7 @@ pub mod vcard;
 
 pub use client::{
     CalDavClient, CalDavError, DiscoveredAddressBook, DiscoveredCalendar, Resource, NOT_PRIVATE_HTTP,
+    anonymous_feed_client, https_or_private, is_private_host,
 };
 pub use vcard::{parse_cards, Contact};
 pub use ics::{

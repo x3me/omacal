@@ -28,8 +28,8 @@ pub struct InviteCandidate {
     /// still unanswered when the calendar is shown again gets announced then
     /// rather than never.
     pub calendar_selected: bool,
-    /// The owning account's provider — `google` | `caldav`. Whether an RSVP
-    /// can be sent at all depends on it.
+    /// The owning account's provider — `google` | `caldav` | `webcal` | `local`.
+    /// Only Google can send an RSVP; every other provider lists buttonless.
     pub provider: String,
     pub access_role: String,
     pub attendees: Vec<Attendee>,
