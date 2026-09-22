@@ -35,6 +35,15 @@ pub enum WebcalFeedError {
     Other(#[from] anyhow::Error),
 }
 
+/// Typed nothing. Allow-listed in `errors.rs` beside `NOT_PRIVATE_HTTP`,
+/// for the same reason: it names what to do, and an opaque stand-in would
+/// send the user looking for a fault instead of reading a decision.
+pub const FEED_URL_REQUIRED: &str = "A calendar URL is required";
+
+/// Typed something that is not an address at all.
+pub const NOT_A_FEED_URL: &str =
+    "That is not a calendar address. It should look like https://example.com/calendar.ics";
+
 /// Normalizes a user-typed feed address: trims, rewrites `webcal://` (and
 /// `webcals://`) to `https://`, and validates the scheme/host.
 ///
@@ -44,7 +53,7 @@ pub enum WebcalFeedError {
 pub fn normalize_feed_url(raw: &str) -> anyhow::Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("A calendar URL is required");
+        anyhow::bail!(FEED_URL_REQUIRED);
     }
     let https = if let Some(rest) = trimmed.strip_prefix("webcals://") {
         format!("https://{rest}")
@@ -53,7 +62,12 @@ pub fn normalize_feed_url(raw: &str) -> anyhow::Result<String> {
     } else {
         trimmed.to_string()
     };
-    let url = Url::parse(&https)?;
+    // **A fixed sentence, not the parser's.** `url::ParseError` says things
+    // like "relative URL without a base", which names nothing the user can
+    // act on — and every variant of it would have to be allow-listed one by
+    // one to reach them at all, or it reads as "Sync failed. See the
+    // application log", naming an operation they did not ask for.
+    let url = Url::parse(&https).map_err(|_| anyhow::anyhow!(NOT_A_FEED_URL))?;
     omacal_caldav::https_or_private(&url)?;
     Ok(url.to_string())
 }
@@ -79,10 +93,33 @@ fn content_hash(body: &str) -> String {
     format!("hash:{h:016x}")
 }
 
+/// The stored change probe, **tagged with which validator it is**.
+///
+/// An ETag and a `Last-Modified` date go back to the server in different
+/// headers, and an untagged cursor cannot say which it is. Sending one as
+/// both put an HTTP date in `If-None-Match`, where it is not a valid
+/// entity-tag: RFC 9110 has a recipient ignore `If-Modified-Since` whenever
+/// `If-None-Match` is present, so the server read the malformed tag, matched
+/// nothing, and answered 200 with the whole file every time. A feed that
+/// offers only `Last-Modified` therefore never produced a 304 — the branch
+/// existed and could not fire.
 fn cursor_for(etag: Option<&str>, last_modified: Option<&str>, body: &str) -> String {
-    etag.or(last_modified)
-        .map(str::to_string)
-        .unwrap_or_else(|| content_hash(body))
+    match (etag, last_modified) {
+        (Some(etag), _) => format!("etag:{etag}"),
+        (None, Some(lm)) => format!("lm:{lm}"),
+        (None, None) => content_hash(body),
+    }
+}
+
+/// The conditional header a stored cursor travels in, or `None` for a
+/// `hash:` cursor — content-derived, never server-issued, so there is
+/// nothing to validate against.
+fn conditional_header(cursor: &str) -> Option<(&'static str, &str)> {
+    if let Some(etag) = cursor.strip_prefix("etag:") {
+        Some(("If-None-Match", etag))
+    } else {
+        cursor.strip_prefix("lm:").map(|lm| ("If-Modified-Since", lm))
+    }
 }
 
 pub struct FetchedFeed {
@@ -109,10 +146,9 @@ pub async fn fetch_feed(
     let mut req = feed_client()?
         .get(url)
         .header("Accept", "text/calendar");
-    // A `hash:` cursor is content-derived, not server-issued: sending it as
-    // a validator would be noise, so only ETag / Last-Modified travel.
-    if let Some(t) = cached_token.filter(|t| !t.starts_with("hash:")) {
-        req = req.header("If-None-Match", t).header("If-Modified-Since", t);
+    // One cursor, one header — see `cursor_for` for what sending both cost.
+    if let Some((name, value)) = cached_token.and_then(conditional_header) {
+        req = req.header(name, value);
     }
     let resp = req.send().await.map_err(anyhow::Error::from)?;
     let status = resp.status();
@@ -380,7 +416,7 @@ mod tests {
         assert_eq!(out.upserted, 2);
         let tok: Option<String> = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
-        assert_eq!(tok.as_deref(), Some("\"v1\""));
+        assert_eq!(tok.as_deref(), Some("etag:\"v1\""), "stored tagged, so the refetch knows which header to use");
     }
 
     #[tokio::test]
@@ -392,7 +428,7 @@ mod tests {
             .mount(&server).await;
         let pool = seeded_pool().await;
         let url = format!("{}/feed.ics", server.uri());
-        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, '\"v1\"', 0, 0)")
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, 'etag:\"v1\"', 0, 0)")
             .execute(&pool).await.unwrap();
 
         let out = sync_webcal_calendar(&pool, 1, &url, 100, 200).await.unwrap();
@@ -405,6 +441,59 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((ws, we), (100, 200));
+    }
+
+    /// The mirror of the test above for a feed that offers `Last-Modified`
+    /// and no `ETag`. The date must travel in `If-Modified-Since` and
+    /// nowhere else: as an `If-None-Match` it is not a valid entity-tag, the
+    /// server matches nothing, and the whole file comes back on every sync.
+    #[tokio::test]
+    async fn a_last_modified_feed_sends_the_date_as_if_modified_since_and_gets_its_304() {
+        const LM: &str = "Wed, 17 Sep 2026 07:00:00 GMT";
+        let server = MockServer::start().await;
+        // Matched on the path alone: an HTTP date is comma-bearing, which
+        // wiremock's header matcher reads as a value list. What the request
+        // carried is asserted below, off the recording.
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server).await;
+        let pool = seeded_pool().await;
+        let url = format!("{}/feed.ics", server.uri());
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, ?1, 0, 0)")
+            .bind(format!("lm:{LM}"))
+            .execute(&pool).await.unwrap();
+
+        let out = sync_webcal_calendar(&pool, 1, &url, 100, 200).await.unwrap();
+        assert_eq!(out, SyncOutcome::default(), "304 writes nothing");
+
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].headers.get("If-Modified-Since").map(|v| v.to_str().unwrap()),
+            Some(LM),
+            "the date is a modification time, and travels as one",
+        );
+        assert!(
+            sent[0].headers.get("If-None-Match").is_none(),
+            "a date is not an entity-tag: as one it matches nothing and the feed refetches in full",
+        );
+
+        let (ws, we): (i64, i64) =
+            sqlx::query_as("SELECT window_start, window_end FROM sync_state WHERE calendar_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!((ws, we), (100, 200), "the window still moves");
+    }
+
+    /// Which header a cursor travels in, and that a content hash travels in
+    /// none — the rule `fetch_feed` reads.
+    #[test]
+    fn a_cursor_names_its_own_validator() {
+        assert_eq!(cursor_for(Some("\"v1\""), Some("ignored"), ""), "etag:\"v1\"");
+        assert_eq!(cursor_for(None, Some("a date"), ""), "lm:a date");
+        assert!(cursor_for(None, None, "body").starts_with("hash:"));
+        assert_eq!(conditional_header("etag:\"v1\""), Some(("If-None-Match", "\"v1\"")));
+        assert_eq!(conditional_header("lm:a date"), Some(("If-Modified-Since", "a date")));
+        assert_eq!(conditional_header("hash:0123"), None);
     }
 
     #[tokio::test]

@@ -202,6 +202,22 @@ const SAFE_EXACT: &[&str] = &[
     // down for a knowable, fixable reason, and "Sync failed, see the log"
     // sends the user looking for a fault instead of reading a decision.
     omacal_caldav::NOT_PRIVATE_HTTP,
+    // crates/omacal-sync/src/webcal_feed.rs — `normalize_feed_url`'s two
+    // refusals of a typed feed address, both raised before any fetch or
+    // write, and reaching the user through `subscribe_webcal`'s
+    // `.map_err(user_facing)` with no `.context(..)` on the way. Neither
+    // interpolates the address, for `NOT_PRIVATE_HTTP`'s reason and more
+    // sharply: a feed URL is frequently the credential itself, since a
+    // private "secret address in iCal format" grants read access to the
+    // whole calendar to anyone holding it.
+    //
+    // Allow-listed because mistyping the address is the likeliest thing that
+    // happens in this feature, and OPAQUE for it is worse than unhelpful:
+    // "Sync failed. See the application log for details." names an operation
+    // the user did not ask for — they were subscribing, not syncing — and
+    // sends them to a log to read about a typo.
+    omacal_sync::webcal_feed::FEED_URL_REQUIRED,
+    omacal_sync::webcal_feed::NOT_A_FEED_URL,
     // src-tauri/src/events.rs — `move_target`'s two refusals, both raised with
     // `bail!` on a fixed literal before any write happens, and reaching the
     // user through `update_event`'s own `.map_err(user_facing)` with no
@@ -502,6 +518,13 @@ mod tests {
             // not repeated back — it can carry a password in its userinfo),
             // and `connect_caldav`'s `.map_err(user_facing)` adds no context.
             omacal_caldav::NOT_PRIVATE_HTTP,
+            // Checked against the same rule: two fixed literals refusing a
+            // typed feed address before any fetch, interpolating nothing —
+            // the address is withheld deliberately, a feed URL being
+            // frequently the credential itself — and `subscribe_webcal`
+            // adds no context on the way.
+            omacal_sync::webcal_feed::FEED_URL_REQUIRED,
+            omacal_sync::webcal_feed::NOT_A_FEED_URL,
             // Checked against the doc-comment rule: three fixed literals, no
             // interpolation, each raised with `bail!` and propagated by a bare
             // `?` to `update_event_body`'s `.map_err(user_facing)`.
@@ -567,6 +590,26 @@ mod tests {
             .expect("a public http address must be refused");
         assert_eq!(user_facing(&raised), omacal_caldav::NOT_PRIVATE_HTTP);
         assert_ne!(user_facing(&raised), OPAQUE);
+    }
+
+    /// The same rule for a typed feed address (#142/#143). Mistyping it is
+    /// the likeliest thing that happens when subscribing, and the opaque
+    /// sentence names *syncing* — an operation the user did not start.
+    #[test]
+    fn a_refused_feed_address_tells_the_user_why() {
+        for raw in ["", "   ", "not a url", "htp:/missing-slash"] {
+            let raised = omacal_sync::webcal_feed::normalize_feed_url(raw)
+                .err()
+                .unwrap_or_else(|| panic!("{raw:?} must be refused"));
+            let shown = user_facing(&raised);
+            assert_ne!(shown, OPAQUE, "{raw:?} read as a fault report");
+            assert!(!shown.contains("Sync failed"), "{raw:?} named the wrong operation: {shown}");
+        }
+        // The address itself never comes back: a feed URL is often the
+        // credential, and the refusal is read in a window the user may share.
+        let raised = omacal_sync::webcal_feed::normalize_feed_url("not a url/secret-token")
+            .expect_err("refused");
+        assert!(!user_facing(&raised).contains("secret-token"));
     }
 
     /// [`every_message_the_app_relies_on_showing_is_still_allowlisted`]'s rule,
