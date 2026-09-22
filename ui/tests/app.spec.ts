@@ -6242,6 +6242,39 @@ test.describe('tasks on the grid', () => {
     await expect(page.locator('.tpin.dragging')).toHaveCount(0);
   });
 
+  /** The lift that reveals a squeezed title must not move the control the
+   *  pointer is reaching for. A pin sharing its hour with a meeting sits in a
+   *  half lane; lifting on the pin moved its left edge to the column's, which
+   *  carried the checkbox 86px out from under the cursor and slid the title —
+   *  the drag handle — into its place, so a tick became a drag. Keyed off the
+   *  title instead, hovering the checkbox changes no geometry at all. */
+  test('reaching for a task pin\'s checkbox does not move it', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    const pin = page.locator('.tpin').first();
+    const box = page.getByTestId('week-body').getByRole('checkbox', { name: /^Complete/ });
+    const before = (await box.boundingBox())!;
+
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
+    await page.waitForTimeout(150);
+    const after = (await box.boundingBox())!;
+    expect(after.x).toBeCloseTo(before.x, 0);
+
+    // And the point the pointer went to is still the checkbox, not the title.
+    const hit = await page.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null;
+      return el?.tagName === 'INPUT' ? 'checkbox' : el?.className?.toString().includes('tt') ? 'title' : 'other';
+    }, { x: before.x + before.width / 2, y: before.y + before.height / 2 });
+    expect(hit).toBe('checkbox');
+
+    // The lift itself still works — it just answers to the title now.
+    const pinAt = (await pin.boundingBox())!;
+    const title = page.locator('.tpin .tt').first();
+    const t = (await title.boundingBox())!;
+    await page.mouse.move(t.x + t.width - 4, t.y + t.height / 2);
+    await page.waitForTimeout(150);
+    expect((await pin.boundingBox())!.width).toBeGreaterThan(pinAt.width);
+  });
+
   test('the checkbox on a task at an hour completes it', async ({ page }) => {
     await openWeek(page, 'timed-task');
     await page.getByTestId('week-body')

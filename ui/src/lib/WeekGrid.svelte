@@ -2440,7 +2440,16 @@
   /* `EventBlock`'s hover lift, for its reason: a task squeezed into half a
      column beside a meeting reads "Call the …" until it is pointed at.
      `!important` against the inline geometry, as there. */
-  .tpin:hover:not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important;
+  /* **Hovering the title lifts it, not hovering the pin.** The lift moves the
+     pin's left edge to the column's, which moved the checkbox out from under
+     the pointer reaching for it — 86px on a right-lane pin — and slid the
+     title into the space it left. The title is the drag handle, so a tick
+     became a drag; CI caught it as `<button class="tt"> intercepts pointer
+     events` and it reproduces every time. Keyed off `.tt` the geometry cannot
+     move while the checkbox is the target, and reading a squeezed title still
+     works: the pin grows leftward and keeps its right edge, so the point
+     being hovered stays inside the title. */
+  .tpin:has(.tt:hover):not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important;
                                   z-index: 20 !important; box-shadow: 0 4px 14px rgba(0, 0, 0, .5); }
   .tpin.dragging { z-index: 50 !important; opacity: .85; outline: 1px solid var(--accent); }
   .tpin.create-mode { pointer-events: none; }
