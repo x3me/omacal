@@ -43,9 +43,7 @@
   import {
     dayCursor, eventAtCursor, moveDay, moveEvent, type KeyboardCursor,
   } from './lib/keyboardnav';
-  import {
-    getSettings, setHourHeight, setLastView, setListMode, setTasksWidth, type AppSettings, type WeekViewDays,
-  } from './lib/settings';
+  import { setSetting, getSettings, type AppSettings, type WeekViewDays } from './lib/settings';
   import { TASKS_WIDTH_DEFAULT } from './lib/taskwidth';
   import { HOUR_PX_DEFAULT, hourPxStepped } from './lib/zoom';
   import { padFor, sliceWeek, visibleIndex, windowHeld } from './lib/weekwindow';
@@ -532,7 +530,7 @@
     clearTimeout(tasksWidthTimer);
     tasksWidthTimer = setTimeout(() => {
       persistedTasksWidth = px;
-      setTasksWidth(px).catch((err) => {
+      setSetting('tasksWidth', px).catch((err) => {
         // The panel keeps the width on screen either way; only the next
         // launch is affected.
         error = `Tasks width not saved · ${String(err)}`;
@@ -549,7 +547,7 @@
       persistedHourPx = px;
       // Whole pixels on the wire — the row is an integer, and so is what
       // the grid draws (`zoom.ts` says why the state itself is not).
-      setHourHeight(Math.round(px)).catch((err) => {
+      setSetting('hourHeight', Math.round(px)).catch((err) => {
         // The zoom on screen stands either way; only the next launch is
         // affected, and that is worth a line.
         error = `Hour height not saved · ${String(err)}`;
@@ -797,7 +795,7 @@
    * key that works the instant the window is listening. Press it while the read
    * is still in flight and the answer — which describes the world *before* the
    * keystroke — lands afterwards and puts the calendar back, having also
-   * silently disagreed with the row `set_list_mode` has by then written. Small
+   * silently disagreed with the row `listMode` has by then written. Small
    * window, wrong outcome, and no way for the user to tell it from the key not
    * working.
    */
@@ -897,7 +895,7 @@
     listModeChoices += 1;
     listMode = !listMode;
     try {
-      await setListMode(listMode);
+      await setSetting('listMode', listMode);
     } catch (e) {
       error = `The list setting could not be saved: ${e}`;
     }
@@ -1228,7 +1226,7 @@
     view = v;
     // Recorded on every switch, not only under "Last view" mode, so turning
     // that mode on later opens on a real memory rather than a blank one.
-    void setLastView(v);
+    void setSetting('lastView', v);
   }
 
   // `H`/`L` — and the header's own `‹`/`›`, which are the same motion by

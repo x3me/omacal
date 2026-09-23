@@ -1014,7 +1014,7 @@ mod tests {
         // And the setting turned off is the end of it — `[]` stored must not
         // read back as the shipped default.
         let pool = seeded("UTC", "[]").await;
-        crate::settings::set_fallback_reminders_impl(&pool, vec![]).await.unwrap();
+        crate::settings::store(&pool, &crate::settings::Setting::FallbackReminderMinutes(vec![])).await.unwrap();
         let follows = Reminders { use_default: true, overrides: Vec::new() };
         omacal_store::upsert_event(&pool, &event("e2", T0900Z, T0900Z + HOUR, follows))
             .await.unwrap();

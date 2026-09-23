@@ -92,6 +92,18 @@ const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
 const DISPLAY_TZ_KEY: &str = "display_timezone";
 const SECOND_TZ_KEY: &str = "second_timezone";
+pub(crate) const MENUBAR_DATE_FORMAT_KEY: &str = "menubar_date_format";
+pub(crate) const MENUBAR_DATE_CUSTOM_KEY: &str = "menubar_date_custom";
+pub(crate) const MENUBAR_LABEL_FORMAT_KEY: &str = "menubar_label_format";
+pub(crate) const MENUBAR_DAY_VIEW_KEY: &str = "menubar_day_view";
+pub(crate) const MENUBAR_LABEL_KEY: &str = "menubar_label";
+pub(crate) const MENUBAR_JOIN_MINUTES_KEY: &str = "menubar_join_minutes";
+pub(crate) const MENUBAR_EARLIER_KEY: &str = "menubar_earlier";
+pub(crate) const MENUBAR_TOMORROW_KEY: &str = "menubar_tomorrow";
+pub(crate) const MENUBAR_DAYS_AHEAD_KEY: &str = "menubar_days_ahead";
+pub(crate) const DATE_FORMAT_KEY: &str = "date_format";
+pub(crate) const VISIBLE_HOURS_KEY: &str = "visible_hours";
+pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -120,7 +132,7 @@ pub(crate) fn write_tz_sidecar(dir: &std::path::Path, tz: Option<&str>) -> std::
 ///
 /// An enum rather than the `String` the table actually holds, so the only two
 /// values that exist are the two the app can draw. That is what lets
-/// [`set_time_format`] take this type directly and skip a refusal path
+/// [`Setting::TimeFormat`] take this type directly and skip a refusal path
 /// entirely: a third value cannot be sent, so there is no user-facing error
 /// to name, pin with a test and allowlist in `errors.rs` for a case the
 /// select element makes unreachable.
@@ -146,7 +158,7 @@ impl TimeFormat {
 /// Which of the five view-switcher slots OmaCal opens on.
 ///
 /// An enum for [`TimeFormat`]'s reason: the set is closed and mirrors the
-/// switcher's own five buttons exactly, so [`set_default_view`] needs no
+/// switcher's own five buttons exactly, so [`Setting::DefaultView`] needs no
 /// refusal path — a sixth value cannot be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefaultView {
@@ -210,7 +222,7 @@ impl DateFormat {
 
 /// Whether a temperature is drawn as `22°` or `72°` — Celsius or Fahrenheit.
 ///
-/// [`TimeFormat`]'s reason, twice over: the set is closed, so [`set_temperature_unit`]
+/// [`TimeFormat`]'s reason, twice over: the set is closed, so [`Setting::TemperatureUnit`]
 /// needs no refusal path, and `weather::DayWeather` carries unrounded Celsius
 /// so this side can round once, in whichever unit this names, rather than
 /// rounding at fetch and converting a rounded number.
@@ -365,7 +377,7 @@ impl StartOnLogin {
 /// Three, not seven, and they are Google Calendar's own three — this is a
 /// Google Calendar client, and a week starting on a Wednesday is a preference
 /// no calendar this one syncs with can express. An enum for the same reason
-/// [`TimeFormat`] is one: the set is closed, so [`set_week_start`] needs no
+/// [`TimeFormat`] is one: the set is closed, so [`Setting::WeekStart`] needs no
 /// refusal path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeekStart {
@@ -814,16 +826,16 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
         show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
-        menubar_day_view: read(pool, "menubar_day_view").await.as_deref() == Some("1"),
-        menubar_label: read(pool, "menubar_label").await.as_deref() != Some("0"),
-        menubar_join_minutes: read(pool, "menubar_join_minutes").await
+        menubar_day_view: read(pool, MENUBAR_DAY_VIEW_KEY).await.as_deref() == Some("1"),
+        menubar_label: read(pool, MENUBAR_LABEL_KEY).await.as_deref() != Some("0"),
+        menubar_join_minutes: read(pool, MENUBAR_JOIN_MINUTES_KEY).await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 60).unwrap_or(5),
-        menubar_earlier: match read(pool, "menubar_earlier").await.as_deref() {
+        menubar_earlier: match read(pool, MENUBAR_EARLIER_KEY).await.as_deref() {
             Some("off") => MenubarEarlier::Off,
             _ => MenubarEarlier::Folded,
         },
-        menubar_tomorrow: read(pool, "menubar_tomorrow").await.as_deref() != Some("0"),
-        menubar_days_ahead: read(pool, "menubar_days_ahead").await
+        menubar_tomorrow: read(pool, MENUBAR_TOMORROW_KEY).await.as_deref() != Some("0"),
+        menubar_days_ahead: read(pool, MENUBAR_DAYS_AHEAD_KEY).await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 6).unwrap_or(0),
         // **Clamped, not discarded.** A number outside the range is still an
         // answer to "how tall do you like your hours" — when the floor rose
@@ -897,10 +909,10 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // takes and for the same reason: absent, garbage, and a value written
         // by some future version all land on the format the app has always
         // drawn, rather than on the one nobody asked for.
-        menubar_date_format: match read(pool, "menubar_date_format").await { Some(v) => v, None => if read(pool, SHOW_DATE_KEY).await.is_some() { "custom".into() } else { "general".into() } },
-        menubar_label_format: read(pool, "menubar_label_format").await.unwrap_or_else(|| DEFAULT_MENU_LABEL.into()),
-        menubar_date_custom: read(pool, "menubar_date_custom").await.unwrap_or_else(|| "%-d".into()),
-        date_format: read(pool, "date_format").await.and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok()).unwrap_or(DateFormat::Locale),
+        menubar_date_format: match read(pool, MENUBAR_DATE_FORMAT_KEY).await { Some(v) => v, None => if read(pool, SHOW_DATE_KEY).await.is_some() { "custom".into() } else { "general".into() } },
+        menubar_label_format: read(pool, MENUBAR_LABEL_FORMAT_KEY).await.unwrap_or_else(|| DEFAULT_MENU_LABEL.into()),
+        menubar_date_custom: read(pool, MENUBAR_DATE_CUSTOM_KEY).await.unwrap_or_else(|| "%-d".into()),
+        date_format: read(pool, DATE_FORMAT_KEY).await.and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok()).unwrap_or(DateFormat::Locale),
         desktop: if cfg!(target_os = "macos") { "macos" } else if crate::theme::omarchy_theme_dir().is_some() { "omarchy" } else { "linux" }.into(),
         time_format: read(pool, TIME_FORMAT_KEY)
             .await
@@ -991,8 +1003,8 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
 
 /// What the user is told when a sync interval below the floor is refused.
 ///
-/// A named constant for the same reason the other two are: it is pinned by a
-/// test and allowlisted in `errors.rs`, and the two must not drift.
+/// Named, like the three below, so the refusal and the test pinning it read
+/// one string. Shown as [`SetError::Refused`], so no allowlist entry is needed.
 pub const INTERVAL_TOO_SHORT: &str =
     "OmaCal will not sync more often than once a minute — Google's quota is finite and a \
      desktop app has no business polling faster than that";
@@ -1009,33 +1021,6 @@ pub const TRANSPARENCY_OUT_OF_RANGE: &str =
 #[tauri::command]
 pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(read_settings(&state.pool).await)
-}
-
-/// Stores a new sync interval, **refusing anything below the floor**.
-///
-/// Refused rather than clamped, and that is the whole of the decision. A value
-/// accepted and then quietly changed is worse than one that is turned down: the
-/// user types 10 seconds, the form says nothing, and the app polls every minute
-/// while they believe otherwise. `sync_loop::interval_ms` still clamps on the
-/// way *out*, because a row edited by hand with `sqlite3` — the only way to set
-/// this until now, documented in both platform guides — never passed through
-/// here at all.
-#[tauri::command]
-pub async fn set_sync_interval(
-    state: tauri::State<'_, AppState>,
-    ms: i64,
-) -> Result<AppSettings, String> {
-    set_sync_interval_impl(&state.pool, ms)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
-}
-
-async fn set_sync_interval_impl(pool: &SqlitePool, ms: i64) -> anyhow::Result<AppSettings> {
-    if ms < crate::sync_loop::MIN_INTERVAL_MS {
-        anyhow::bail!(INTERVAL_TOO_SHORT);
-    }
-    write(pool, SYNC_INTERVAL_KEY, &ms.to_string()).await?;
-    Ok(read_settings(pool).await)
 }
 
 /// Every zone the picker may offer, straight from jiff's copy of the IANA
@@ -1089,29 +1074,6 @@ pub async fn set_display_timezone(
         crate::restart::hard_restart();
     });
     Ok(())
-}
-
-/// Stores the second time zone — the convenience clock beside the real one —
-/// or clears it with `None`/blank. Validated against the same authority the
-/// display zone is, and for the same reason: a zone jiff does not know is a
-/// name the webview's own converter will not know either, and storing it
-/// would draw a gutter of blanks. **No restart**, unlike its neighbour: see
-/// [`AppSettings::second_timezone`] — nothing process-level captures this
-/// zone, so the reply alone is enough for the UI to start drawing it.
-#[tauri::command]
-pub async fn set_second_timezone(
-    state: tauri::State<'_, AppState>,
-    tz: Option<String>,
-) -> Result<AppSettings, String> {
-    // The refusal carries the name, so it is built here and returned
-    // directly — `errors::user_facing` allowlists exact strings and would
-    // withhold a message with a zone name in it (see `set_display_timezone`,
-    // which routes its own refusal the same way).
-    let tz = validate_second_timezone(tz)?;
-    write(&state.pool, SECOND_TZ_KEY, tz.as_deref().unwrap_or(""))
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
 }
 
 /// Blank and `None` collapse to off; a non-blank name must be one jiff knows.
@@ -1218,129 +1180,9 @@ pub(crate) async fn start_on_login(pool: &SqlitePool) -> StartOnLogin {
     }
 }
 
-/// Stores the weather preference — and on a turn-on, fetches now rather
-/// than at the loop's next three-hour tick: a toggle that answers with an
-/// unchanged header for an hour reads as broken, exactly like a tray icon
-/// that only appears at next launch would.
-#[tauri::command]
-pub async fn set_weather_enabled(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, WEATHER_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    if on {
-        crate::weather::refresh_soon(app, state.pool.clone(), state.demo, true);
-    }
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores whether Photon may be queried from the Location field. History
-/// suggestions ignore this — they are a local SELECT.
-#[tauri::command]
-pub async fn set_photon_places(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, PHOTON_PLACES_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-#[tauri::command]
-pub async fn set_notifications_enabled(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, NOTIFICATIONS_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// The task half of the switch above (#137), stored separately so either can
-/// be off while the other speaks.
-#[tauri::command]
-pub async fn set_task_notifications_enabled(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, TASK_NOTIFICATIONS_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the tray-icon preference and applies it to the running tray in the
-/// same breath — a visibility toggle that only took effect next launch would
-/// read as broken every single time.
-#[tauri::command]
-pub async fn set_tray_icon(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, TRAY_ICON_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    crate::tray::set_visible(&app, on);
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the palette choice and repaints on the spot.
-///
-/// Both halves are the point. The webview is repainted by the same
-/// `theme-changed` event the Omarchy watcher emits, so there is one repaint
-/// path rather than two; and GTK's dark hint follows, because WebKitGTK draws
-/// its `<select>` popups from the GTK theme rather than the page — a light app
-/// with black dropdowns is the bug that hint exists for. Through the main
-/// thread, since GTK settings must not be touched from a command's thread.
-#[tauri::command]
-pub async fn set_appearance(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    appearance: crate::theme::Appearance,
-) -> Result<AppSettings, String> {
-    write(&state.pool, APPEARANCE_KEY, appearance.as_str())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-
-    let palette = crate::theme::resolve(
-        crate::theme::omarchy_theme_dir().as_deref(),
-        appearance,
-    );
-    let dark = palette.is_dark;
-    let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
-    use tauri::Emitter;
-    let _ = app.emit("theme-changed", palette);
-
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the window-frame choice and applies it in the same breath, for
-/// `set_tray_icon`'s reason: a control whose effect waits for the next
-/// launch cannot be told from one that does nothing. The frame is the
-/// compositor's or GTK's to draw, and both take the change live.
-#[tauri::command]
-pub async fn set_window_frame(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    frame: WindowFrame,
-) -> Result<AppSettings, String> {
-    write(&state.pool, WINDOW_FRAME_KEY, frame.as_str())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    apply_window_frame(&app, frame);
-    Ok(read_settings(&state.pool).await)
-}
-
 /// The OS half of [`decorated`]: sets the main window's decorations from a
 /// choice and the desktop it is on. Called by `setup` before the window is
-/// shown, and again from [`set_window_frame`]. A no-op on macOS, where the
+/// shown, and again from [`Setting::WindowFrame`]. A no-op on macOS, where the
 /// overlay title bar is the frame and `read_settings` reports no choice —
 /// `cfg!` so the Linux-only CI still compiles the macOS arm.
 pub(crate) fn apply_window_frame(app: &tauri::AppHandle, frame: WindowFrame) {
@@ -1351,122 +1193,6 @@ pub(crate) fn apply_window_frame(app: &tauri::AppHandle, frame: WindowFrame) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_decorations(decorated(frame, on_hyprland()));
     }
-}
-
-/// Stores the close-behaviour preference and updates the flag the window
-/// handler reads, in the same breath and for `set_tray_icon`'s reason: a
-/// setting that only took effect at the next launch would read as broken.
-///
-/// The database row is the source of truth; [`AppState::quit_on_close`] is a
-/// mirror of it, because `WindowEvent::CloseRequested` is a synchronous
-/// handler that has to answer before the window is gone and cannot await a
-/// query. Seeded from the row at startup, so a crash between the two writes
-/// heals on the next launch.
-#[tauri::command]
-pub async fn set_quit_on_close(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, QUIT_ON_CLOSE_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    state.quit_on_close.store(on, std::sync::atomic::Ordering::Relaxed);
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the start-on-login choice and registers or unregisters the launch
-/// entry in the same breath, for `set_tray_icon`'s reason: a control whose
-/// effect waits for the next launch cannot be told from one that does
-/// nothing, and *this* control's whole job is undoing something the app did
-/// without being asked.
-///
-/// Nothing is refused: `StartOnLogin` has three variants and the select
-/// offers all three, so there is no fourth value to turn down — the note on
-/// [`set_time_format`] in full.
-///
-/// **Only the entry's existence is applied now**; whether that entry opens a
-/// window is read at the next launch, because a session already running
-/// cannot un-open its own window retroactively. That is not a gap: the whole
-/// preference is about what the *next* login does.
-#[tauri::command]
-pub async fn set_start_on_login(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    mode: StartOnLogin,
-) -> Result<AppSettings, String> {
-    write(&state.pool, AUTOSTART_KEY, mode.as_str())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    crate::tray::apply_autostart(&app, state.demo, mode.registers());
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the fallback reminder rows, through the same bounds the event
-/// form's rows are held to — `write::validate_reminders`, so the two cannot
-/// drift apart — and refused with the limit named, never clamped (spec §3).
-/// `[]` is accepted and meaningful: it is the feature turned off.
-#[tauri::command]
-pub async fn set_fallback_reminders(
-    state: tauri::State<'_, AppState>,
-    minutes: Vec<i64>,
-) -> Result<AppSettings, String> {
-    set_fallback_reminders_impl(&state.pool, minutes)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
-}
-
-pub(crate) async fn set_fallback_reminders_impl(
-    pool: &SqlitePool,
-    minutes: Vec<i64>,
-) -> anyhow::Result<AppSettings> {
-    let as_input = crate::write::RemindersInput {
-        use_default: false,
-        overrides: minutes
-            .iter()
-            .map(|&m| crate::write::ReminderInput { method: "popup".into(), minutes: m })
-            .collect(),
-    };
-    crate::write::validate_reminders(&as_input).map_err(|m| anyhow::anyhow!(m))?;
-    write(pool, FALLBACK_KEY, &serde_json::to_string(&minutes)?).await?;
-    Ok(read_settings(pool).await)
-}
-
-/// Stores the default calendar for new events. `None` clears the choice —
-/// written as an empty value rather than a deleted row, so `write`'s upsert
-/// is the only statement this module ever makes about the table.
-#[tauri::command]
-pub async fn set_default_calendar(
-    state: tauri::State<'_, AppState>,
-    id: Option<i64>,
-) -> Result<AppSettings, String> {
-    write(&state.pool, DEFAULT_CALENDAR_KEY, &id.map(|v| v.to_string()).unwrap_or_default())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the length used when a new event names a start but no explicit end.
-/// Zero is refused rather than repaired: a saved preference must be the value
-/// the user entered, and a zero-length event cannot be created.
-#[tauri::command]
-pub async fn set_default_event_duration(
-    state: tauri::State<'_, AppState>,
-    minutes: u32,
-) -> Result<AppSettings, String> {
-    set_default_event_duration_impl(&state.pool, minutes)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
-}
-
-async fn set_default_event_duration_impl(
-    pool: &SqlitePool,
-    minutes: u32,
-) -> anyhow::Result<AppSettings> {
-    if minutes == 0 {
-        anyhow::bail!(EVENT_DURATION_TOO_SHORT);
-    }
-    write(pool, DEFAULT_EVENT_DURATION_KEY, &minutes.to_string()).await?;
-    Ok(read_settings(pool).await)
 }
 
 /// The stored interface scale, or 100 for none, a garbled row, or one outside
@@ -1480,7 +1206,7 @@ pub(crate) async fn interface_scale(pool: &SqlitePool) -> u32 {
 }
 
 /// Sizes the main window's content: at launch, from the stored setting, and
-/// again from [`set_interface_scale`], so a change shows at once rather than
+/// again from [`Setting::InterfaceScalePercent`], so a change shows at once rather than
 /// at the next start. The webview's zoom, not a CSS transform: layout, hit
 /// testing and every pointer coordinate the grid reads stay in one unit.
 pub(crate) fn apply_interface_scale(app: &tauri::AppHandle, percent: u32) {
@@ -1490,125 +1216,6 @@ pub(crate) fn apply_interface_scale(app: &tauri::AppHandle, percent: u32) {
             tracing::warn!(%e, percent, "could not apply the interface scale");
         }
     }
-}
-
-/// Stores the interface scale and applies it. Outside the range is refused
-/// rather than clamped, `set_default_event_duration`'s rule: the stored value
-/// is the one the user chose.
-#[tauri::command]
-pub async fn set_interface_scale(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    percent: u32,
-) -> Result<AppSettings, String> {
-    let settings = set_interface_scale_impl(&state.pool, percent)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    apply_interface_scale(&app, settings.interface_scale_percent);
-    Ok(settings)
-}
-
-async fn set_interface_scale_impl(pool: &SqlitePool, percent: u32) -> anyhow::Result<AppSettings> {
-    if !(INTERFACE_SCALE_MIN..=INTERFACE_SCALE_MAX).contains(&percent) {
-        anyhow::bail!(INTERFACE_SCALE_OUT_OF_RANGE);
-    }
-    write(pool, INTERFACE_SCALE_KEY, &percent.to_string()).await?;
-    Ok(read_settings(pool).await)
-}
-
-/// Stores appearance choices as one decision. The sliders and
-/// the corner picker share one preview, so a crash or database failure must
-/// not leave half of that preview persisted for the next launch.
-#[tauri::command]
-pub async fn set_appearance_preferences(
-    state: tauri::State<'_, AppState>,
-    background_transparency: f64,
-    event_transparency: f64,
-    event_corner_style: EventCornerStyle,
-    inactive_background_transparency: Option<f64>,
-) -> Result<AppSettings, String> {
-    set_appearance_preferences_impl(
-        &state.pool,
-        background_transparency,
-        event_transparency,
-        event_corner_style,
-        inactive_background_transparency,
-    )
-    .await
-    .map_err(|e| crate::errors::user_facing(&e))
-}
-
-async fn set_appearance_preferences_impl(
-    pool: &SqlitePool,
-    background_transparency: f64,
-    event_transparency: f64,
-    event_corner_style: EventCornerStyle,
-    inactive_background_transparency: Option<f64>,
-) -> anyhow::Result<AppSettings> {
-    let inactive = inactive_background_transparency.unwrap_or(background_transparency);
-    if !background_transparency.is_finite() || !(0.0..=50.0).contains(&background_transparency)
-        || !inactive.is_finite() || !(0.0..=50.0).contains(&inactive) || !event_transparency.is_finite() || !(0.0..=25.0).contains(&event_transparency) {
-        anyhow::bail!(TRANSPARENCY_OUT_OF_RANGE);
-    }
-
-    let values = [
-        (BACKGROUND_TRANSPARENCY_KEY, surface_percentage(background_transparency, 50.0).to_string()),
-        (INACTIVE_BACKGROUND_TRANSPARENCY_KEY, surface_percentage(inactive, 50.0).to_string()),
-        (EVENT_TRANSPARENCY_KEY, surface_percentage(event_transparency, 25.0).to_string()),
-        (EVENT_CORNER_STYLE_KEY, event_corner_style.as_str().to_string()),
-        (
-            APPEARANCE_TRANSPARENCY_SEMANTICS_KEY,
-            ABSOLUTE_TRANSPARENCY_SEMANTICS.to_string(),
-        ),
-    ];
-    let mut tx = pool.begin().await?;
-    for (key, value) in values {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(read_settings(pool).await)
-}
-
-/// Stores the filmstrip toggle. Nothing is refused and nothing is clamped —
-/// unlike the sync interval, there is no value of a boolean the app has to
-/// protect Google's quota from.
-#[tauri::command]
-pub async fn set_list_mode(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, LIST_MODE_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores whether today's date is shown. Nothing to refuse, as with the
-/// other booleans; the tray is redressed on the spot and the widget's feed
-/// rewritten, so the choice shows on both surfaces without waiting for
-/// either one's tick.
-#[tauri::command]
-pub async fn set_show_date(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    if read(&state.pool, "menubar_date_format").await.is_none() {
-        let selected = read_settings(&state.pool).await.menubar_date_format;
-        write(&state.pool, "menubar_date_format", &selected).await.map_err(|e| e.to_string())?;
-    }
-    write(&state.pool, SHOW_DATE_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
 }
 
 pub(crate) const DEFAULT_MENU_LABEL: &str = "{title} @ {time}  {countdown}";
@@ -1629,14 +1236,6 @@ pub(crate) fn format_menu_label(template: &str, values: &[(&str, &str)]) -> Resu
     }
     out.push_str(rest);
     Ok(out.chars().take(256).collect())
-}
-
-#[tauri::command]
-pub async fn set_menubar_label_format(app: tauri::AppHandle, state: tauri::State<'_, AppState>, template: String) -> Result<AppSettings, String> {
-    format_menu_label(&template, &[("title", ""), ("time", ""), ("end_time", ""), ("countdown", ""), ("calendar", "")])?;
-    write(&state.pool, "menubar_label_format", &template).await.map_err(|e| e.to_string())?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
 }
 
 /// Custom text is formatted by Jiff, with a bounded writer so padding cannot
@@ -1668,26 +1267,6 @@ pub(crate) fn menu_date(settings: &AppSettings, date: jiff::civil::Date) -> Stri
         value => serde_json::from_value::<DateFormat>(serde_json::Value::String(value.into()))
             .unwrap_or(settings.date_format).display(date),
     }
-}
-
-async fn store_menu_date(pool: &SqlitePool, format: &str, custom: &str) -> Result<(), String> {
-    if !matches!(format, "general" | "custom") && serde_json::from_value::<DateFormat>(serde_json::Value::String(format.into())).is_err() {
-        return Err("Choose a menu-bar date format.".into());
-    }
-    custom_menu_date(custom, jiff::civil::date(2026, 9, 7))?;
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    for (key, value) in [("menubar_date_format", format), ("menubar_date_custom", custom)] {
-        sqlx::query("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-            .bind(key).bind(value).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    }
-    tx.commit().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_menubar_date_format(app: tauri::AppHandle, state: tauri::State<'_, AppState>, format: String, custom: String) -> Result<AppSettings, String> {
-    store_menu_date(&state.pool, &format, &custom).await?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
 }
 
 #[tauri::command]
@@ -1735,264 +1314,201 @@ pub(crate) async fn refresh_menu_surfaces(app: &tauri::AppHandle, state: &AppSta
     }
 }
 
-/// Shared preferences for the Omarchy widget and macOS menu bar popup.
-#[tauri::command]
-pub async fn set_menubar_preferences(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    day_view: bool,
-    label: bool,
-    join_minutes: u32,
-) -> Result<AppSettings, String> {
-    store_menubar_preferences(&state.pool, day_view, label, join_minutes).await?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// The popup's own switch must not write label/Join settings from an old feed.
-#[tauri::command]
-pub async fn set_menubar_day_view(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    day_view: bool,
-) -> Result<AppSettings, String> {
-    store_menubar_day_view(&state.pool, day_view).await?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-async fn store_menubar_day_view(pool: &SqlitePool, day_view: bool) -> Result<(), String> {
-    write(pool, "menubar_day_view", if day_view { "1" } else { "0" }).await.map_err(|e| e.to_string())
-}
-
-/// The agenda popups' three section choices, stored atomically like the
-/// label and Join window above and refused — not clamped — outside their
-/// ranges, because each is a picked value rather than a gesture's endpoint.
-#[tauri::command]
-pub async fn set_menubar_sections(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    earlier: String,
-    tomorrow: bool,
-    days_ahead: u32,
-) -> Result<AppSettings, String> {
-    store_menubar_sections(&state.pool, &earlier, tomorrow, days_ahead).await?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-async fn store_menubar_sections(pool: &SqlitePool, earlier: &str, tomorrow: bool, days_ahead: u32) -> Result<(), String> {
-    if !matches!(earlier, "folded" | "off") { return Err("Earlier today is either folded or off.".into()); }
-    if days_ahead > 6 { return Err("Show up to six further days.".into()); }
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    for (key, value) in [
-        ("menubar_earlier", earlier.to_string()),
-        ("menubar_tomorrow", if tomorrow { "1".into() } else { "0".into() }),
-        ("menubar_days_ahead", days_ahead.to_string()),
-    ] {
-        sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(key).bind(value).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    }
-    tx.commit().await.map_err(|e| e.to_string())
-}
-
-async fn store_menubar_preferences(pool: &SqlitePool, day_view: bool, label: bool, join_minutes: u32) -> Result<(), String> {
-    if join_minutes > 60 { return Err("Choose a Join window from 0 to 60 minutes.".into()); }
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    for (key, value) in [
-        ("menubar_day_view", if day_view { "1".into() } else { "0".into() }),
-        ("menubar_label", if label { "1".into() } else { "0".into() }),
-        ("menubar_join_minutes", join_minutes.to_string()),
-    ] {
-        sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(key).bind(value).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    }
-    tx.commit().await.map_err(|e| e.to_string())
-}
-
-/// Stores the hour height, clamped rather than refused: the value comes off
-/// a gesture, and the honest answer to "a little past the end" is the end,
-/// not an error surfacing under somebody's fingers mid-pinch.
-#[tauri::command]
-pub async fn set_hour_height(
-    state: tauri::State<'_, AppState>,
-    px: i64,
-) -> Result<AppSettings, String> {
-    let px = px.clamp(HOUR_HEIGHT_MIN, HOUR_HEIGHT_MAX);
-    write(&state.pool, HOUR_HEIGHT_KEY, &px.to_string())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the tasks sidebar's width, clamped for [`set_hour_height`]'s
-/// reason: the value comes off a drag, and the honest answer to "a little
-/// past the end" is the end.
-#[tauri::command]
-pub async fn set_tasks_width(
-    state: tauri::State<'_, AppState>,
-    px: i64,
-) -> Result<AppSettings, String> {
-    let px = px.clamp(TASKS_WIDTH_MIN, TASKS_WIDTH_MAX);
-    write(&state.pool, TASKS_WIDTH_KEY, &px.to_string())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-#[tauri::command]
-pub async fn set_date_format(app: tauri::AppHandle, state: tauri::State<'_, AppState>, format: DateFormat) -> Result<AppSettings, String> {
-    write(&state.pool, "date_format", format.as_str()).await.map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the clock format. Like [`set_list_mode`] nothing is refused, and
-/// here the *type* is the reason rather than the triviality of a boolean:
-/// [`TimeFormat`] has no third variant for a caller to send.
-#[tauri::command]
-pub async fn set_time_format(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    format: TimeFormat,
-) -> Result<AppSettings, String> {
-    write(&state.pool, TIME_FORMAT_KEY, format.as_str())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the temperature unit. Like [`set_time_format`] nothing is refused
-/// and the cache needs no refetch: `weather::DayWeather` carries unrounded
-/// Celsius regardless of this setting, so a toggle changes only how the
-/// headers round what is already cached.
-#[tauri::command]
-pub async fn set_temperature_unit(
-    state: tauri::State<'_, AppState>,
-    unit: TemperatureUnit,
-) -> Result<AppSettings, String> {
-    write(&state.pool, TEMPERATURE_UNIT_KEY, unit.as_str())
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the day a calendar-aligned week begins on and leaves rolling mode.
-/// Nothing to refuse: [`WeekStart`] has three variants and the select offers
-/// all three. The two writes are one user choice; the helper keeps that shape
-/// reachable from tests without constructing a Tauri `State`.
-#[tauri::command]
-pub async fn set_week_start(
-    state: tauri::State<'_, AppState>,
-    start: WeekStart,
-) -> Result<AppSettings, String> {
-    set_week_start_impl(&state.pool, start)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
-}
-
-async fn set_week_start_impl(pool: &SqlitePool, start: WeekStart) -> anyhow::Result<AppSettings> {
-    let mut tx = pool.begin().await?;
-    for (key, value) in [(WEEK_START_KEY, start.as_str()), (WEEK_STARTS_TODAY_KEY, "0")] {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(read_settings(pool).await)
-}
-
-/// Turns the rolling Week view on or off. Turning it on preserves the concrete
-/// `week_start` used by Month, Year and Big Year, and by Week when this is later
-/// turned off again.
-#[tauri::command]
-pub async fn set_week_starts_today(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, WEEK_STARTS_TODAY_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the number of columns in a rolling Week view. The browser offers
-/// only these values, and this guard keeps a hand-written invoke from asking
-/// the backend to allocate an arbitrary number of day columns.
-#[tauri::command]
-pub async fn set_week_view_days(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    days: u8,
-) -> Result<AppSettings, String> {
-    let result = set_week_view_days_impl(&state.pool, days)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(result)
-}
-
-async fn set_week_view_days_impl(pool: &SqlitePool, days: u8) -> anyhow::Result<AppSettings> {
-    if !matches!(days, 3 | 5 | 7) {
-        anyhow::bail!("the rolling week can show 3, 5, or 7 days");
-    }
-    write(pool, WEEK_VIEW_DAYS_KEY, &days.to_string()).await?;
-    Ok(read_settings(pool).await)
-}
-
 async fn visible_hours(pool: &SqlitePool) -> (u8, u8) {
-    read(pool, "visible_hours").await.and_then(|value| {
+    read(pool, VISIBLE_HOURS_KEY).await.and_then(|value| {
         let (start, end) = value.split_once(',')?;
         let (start, end) = (start.parse::<u8>().ok()?, end.parse::<u8>().ok()?);
         (start < end && end <= 24).then_some((start, end))
     }).unwrap_or((0, 24))
 }
 
-#[tauri::command]
-pub async fn set_visible_hours(app: tauri::AppHandle, state: tauri::State<'_, AppState>, start: u8, end: u8) -> Result<AppSettings, String> {
-    if start >= end || end > 24 { return Err("Start time must be before end time.".into()); }
-    write(&state.pool, "visible_hours", &format!("{start},{end}")).await.map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
-}
-
 /// Display grouping is opt-in and never changes the stored calendar events.
 pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
-    read(pool, "combine_identical_events").await.as_deref() == Some("1")
+    read(pool, COMBINE_IDENTICAL_EVENTS_KEY).await.as_deref() == Some("1")
 }
 
-#[tauri::command]
-pub async fn set_combine_identical_events(
-    app: tauri::AppHandle, state: tauri::State<'_, AppState>, on: bool,
-) -> Result<AppSettings, String> {
-    write(&state.pool, "combine_identical_events", if on { "1" } else { "0" })
-        .await.map_err(|e| crate::errors::user_facing(&e))?;
-    refresh_menu_surfaces(&app, &state).await;
-    Ok(read_settings(&state.pool).await)
+/// One stored choice, as the settings form sends it: `{ key, value }`, with
+/// the key spelled as the [`AppSettings`] field it lands in wherever there is
+/// one. The four that store several fields as one decision carry an object.
+///
+/// **One command, one match.** Before this every key was its own command, its
+/// own TypeScript wrapper and its own harness case: thirty-five of each, and
+/// a new setting cost all three plus a registration. The reasons each key is
+/// shaped as it is live on its variant; what storing it involves is in
+/// [`store`], and what else it changes in the running app is in [`apply`].
+///
+/// Refused rather than clamped throughout, except where a value comes off a
+/// gesture ([`Setting::HourHeight`], [`Setting::TasksWidth`]): a value
+/// accepted and then quietly changed is worse than one turned down.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "key", content = "value", rename_all = "camelCase")]
+pub enum Setting {
+    /// Refused below the floor. `sync_loop::interval_ms` still clamps on the
+    /// way *out*, because a row edited by hand never passed through here.
+    SyncIntervalMs(i64),
+    /// The convenience clock beside the real one; `None`/blank turns it off.
+    /// Validated against jiff, as the display zone is. **No restart**, unlike
+    /// the display zone (which keeps its own command for that reason):
+    /// nothing process-level captures this zone.
+    SecondTimezone(Option<String>),
+    /// On a turn-on, fetches now rather than at the loop's next three-hour
+    /// tick: a toggle that answers with an unchanged header reads as broken.
+    WeatherEnabled(bool),
+    /// Whether Photon may be queried from the Location field. History
+    /// suggestions ignore this — they are a local SELECT.
+    PhotonPlaces(bool),
+    NotificationsEnabled(bool),
+    /// The task half of the switch above (#137), stored separately so either
+    /// can be off while the other speaks.
+    TaskNotificationsEnabled(bool),
+    /// Applied to the running tray in the same breath — a visibility toggle
+    /// that only took effect next launch would read as broken every time.
+    TrayIcon(bool),
+    /// Repaints on the spot through the same `theme-changed` event the
+    /// Omarchy watcher emits, and moves GTK's dark hint with it: WebKitGTK
+    /// draws `<select>` popups from the GTK theme, not the page.
+    Appearance(crate::theme::Appearance),
+    /// Applied live; the frame is the compositor's or GTK's to draw.
+    WindowFrame(WindowFrame),
+    /// Also stored in [`AppState::quit_on_close`], a mirror of the row:
+    /// `CloseRequested` is synchronous and cannot await a query. Seeded from
+    /// the row at startup, so a crash between the two writes heals.
+    QuitOnClose(bool),
+    /// Registers or unregisters the launch entry now. Whether that entry
+    /// opens a window is read at the next launch — the whole preference is
+    /// about what the *next* login does.
+    StartOnLogin(StartOnLogin),
+    /// Held to the event form's own bounds (`write::validate_reminders`), so
+    /// the two cannot drift. `[]` is the feature turned off.
+    FallbackReminderMinutes(Vec<i64>),
+    /// `None` clears the choice — written as an empty value rather than a
+    /// deleted row, so `write`'s upsert is the only statement made about the
+    /// table.
+    DefaultCalendarId(Option<i64>),
+    /// Zero is refused: a zero-length event cannot be created.
+    DefaultEventDurationMinutes(u32),
+    /// Applied to the window at once (#138), through the webview's zoom.
+    InterfaceScalePercent(u32),
+    /// The sliders and the corner picker share one preview, so they are one
+    /// write: a failure must not leave half a preview for the next launch.
+    #[serde(rename_all = "camelCase")]
+    AppearancePreferences {
+        background_transparency: f64,
+        event_transparency: f64,
+        event_corner_style: EventCornerStyle,
+        /// Absent means "the same as the active background".
+        inactive_background_transparency: Option<f64>,
+    },
+    ListMode(bool),
+    /// The tray is redressed and the widget's feed rewritten on the spot.
+    ShowDate(bool),
+    /// Refused unless every placeholder is one `format_menu_label` knows.
+    MenubarLabelFormat(String),
+    /// The format and its custom pattern are one choice, stored together.
+    MenubarDateFormat { format: String, custom: String },
+    /// The widget's and popup's shared choices, stored as one.
+    #[serde(rename_all = "camelCase")]
+    MenubarPreferences { day_view: bool, label: bool, join_minutes: u32 },
+    /// The popup's own switch, alone, so it cannot write label/Join settings
+    /// from an old feed.
+    MenubarDayView(bool),
+    /// The agenda popups' three section choices, stored as one and refused
+    /// outside their ranges — picked values, not a gesture's endpoints.
+    #[serde(rename_all = "camelCase")]
+    MenubarSections { earlier: String, tomorrow: bool, days_ahead: u32 },
+    /// Clamped: the value comes off a pinch, and the honest answer to "a
+    /// little past the end" is the end, not an error under somebody's fingers.
+    HourHeight(i64),
+    /// Clamped, for `HourHeight`'s reason: the value comes off a drag.
+    TasksWidth(i64),
+    DateFormat(DateFormat),
+    /// Nothing to refuse: [`TimeFormat`] has no third variant to send.
+    TimeFormat(TimeFormat),
+    /// No refetch: the cache holds unrounded Celsius whatever this says.
+    TemperatureUnit(TemperatureUnit),
+    /// Also leaves rolling mode, in the same write — one user choice.
+    WeekStart(WeekStart),
+    /// Turning it on sets `week_start` aside rather than discarding it.
+    WeekStartsToday(bool),
+    /// 3, 5 or 7: the form offers only these, and this keeps a hand-written
+    /// invoke from asking for an arbitrary number of day columns.
+    WeekViewDays(u8),
+    VisibleHours { start: u8, end: u8 },
+    CombineIdenticalEvents(bool),
+    /// Also leaves "Last view" mode, in the same write — `WeekStart`'s shape.
+    DefaultView(DefaultView),
+    /// `default_view` is set aside, not discarded — `WeekStartsToday`'s shape.
+    DefaultViewFollowsLast(bool),
+    /// Sent on every view switch regardless of mode.
+    LastView(DefaultView),
 }
 
-/// Stores a fixed view and leaves "Last view" mode — [`set_week_start`]'s
-/// shape, atomic for the same reason: a crash between two writes must never
-/// leave the mode on with a choice the user just picked to replace it.
-#[tauri::command]
-pub async fn set_default_view(
-    state: tauri::State<'_, AppState>,
-    view: DefaultView,
-) -> Result<AppSettings, String> {
-    set_default_view_impl(&state.pool, view)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
+impl Setting {
+    /// Whether the tray's menu and the widget's feed show this setting, and
+    /// so must be rebuilt now rather than at their next tick.
+    fn shows_on_menu_surfaces(&self) -> bool {
+        matches!(
+            self,
+            Setting::TrayIcon(_)
+                | Setting::ShowDate(_)
+                | Setting::MenubarLabelFormat(_)
+                | Setting::MenubarDateFormat { .. }
+                | Setting::MenubarPreferences { .. }
+                | Setting::MenubarDayView(_)
+                | Setting::MenubarSections { .. }
+                | Setting::DateFormat(_)
+                | Setting::TimeFormat(_)
+                | Setting::WeekViewDays(_)
+                | Setting::VisibleHours { .. }
+                | Setting::CombineIdenticalEvents(_)
+        )
+    }
 }
 
-async fn set_default_view_impl(pool: &SqlitePool, view: DefaultView) -> anyhow::Result<AppSettings> {
+/// Why a setting was not stored.
+#[derive(Debug)]
+pub(crate) enum SetError {
+    /// A value this setting does not take, in a sentence we wrote — shown as
+    /// is, since it names what to change.
+    Refused(String),
+    /// The write itself failed; shown through `errors::user_facing`, like any
+    /// other failure, so nothing internal reaches the form.
+    Failed(anyhow::Error),
+}
+
+impl SetError {
+    pub(crate) fn shown(self) -> String {
+        match self {
+            SetError::Refused(message) => message,
+            SetError::Failed(e) => crate::errors::user_facing(&e),
+        }
+    }
+}
+
+impl From<anyhow::Error> for SetError {
+    fn from(e: anyhow::Error) -> Self {
+        SetError::Failed(e)
+    }
+}
+
+impl From<sqlx::Error> for SetError {
+    fn from(e: sqlx::Error) -> Self {
+        SetError::Failed(e.into())
+    }
+}
+
+fn refused(message: impl Into<String>) -> SetError {
+    SetError::Refused(message.into())
+}
+
+fn flag(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// Several rows as one write: all of them, or — on any failure — none.
+async fn write_all(pool: &SqlitePool, rows: &[(&str, &str)]) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    for (key, value) in [(DEFAULT_VIEW_KEY, view.as_str()), (DEFAULT_VIEW_FOLLOWS_LAST_KEY, "0")] {
+    for (key, value) in rows {
         sqlx::query(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -2002,40 +1518,220 @@ async fn set_default_view_impl(pool: &SqlitePool, view: DefaultView) -> anyhow::
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
-    Ok(read_settings(pool).await)
+    tx.commit().await
 }
 
-/// Turns "Last view" mode on or off — [`set_week_starts_today`]'s shape:
-/// `default_view` is set aside, not discarded, and is what's used again once
-/// this is turned back off.
+/// Validates and stores one setting. The database half of [`set_setting`],
+/// apart from the running app so a test needs no `tauri::State`.
+pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), SetError> {
+    use Setting as S;
+    match setting {
+        S::SyncIntervalMs(ms) => {
+            if *ms < crate::sync_loop::MIN_INTERVAL_MS {
+                return Err(refused(INTERVAL_TOO_SHORT));
+            }
+            write(pool, SYNC_INTERVAL_KEY, &ms.to_string()).await?;
+        }
+        S::SecondTimezone(tz) => {
+            let tz = validate_second_timezone(tz.clone()).map_err(SetError::Refused)?;
+            write(pool, SECOND_TZ_KEY, tz.as_deref().unwrap_or("")).await?;
+        }
+        S::WeatherEnabled(on) => write(pool, WEATHER_KEY, flag(*on)).await?,
+        S::PhotonPlaces(on) => write(pool, PHOTON_PLACES_KEY, flag(*on)).await?,
+        S::NotificationsEnabled(on) => write(pool, NOTIFICATIONS_KEY, flag(*on)).await?,
+        S::TaskNotificationsEnabled(on) => write(pool, TASK_NOTIFICATIONS_KEY, flag(*on)).await?,
+        S::TrayIcon(on) => write(pool, TRAY_ICON_KEY, flag(*on)).await?,
+        S::Appearance(a) => write(pool, APPEARANCE_KEY, a.as_str()).await?,
+        S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
+        S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
+        S::StartOnLogin(mode) => write(pool, AUTOSTART_KEY, mode.as_str()).await?,
+        S::FallbackReminderMinutes(minutes) => {
+            let as_input = crate::write::RemindersInput {
+                use_default: false,
+                overrides: minutes
+                    .iter()
+                    .map(|&m| crate::write::ReminderInput { method: "popup".into(), minutes: m })
+                    .collect(),
+            };
+            crate::write::validate_reminders(&as_input).map_err(SetError::Refused)?;
+            write(pool, FALLBACK_KEY, &serde_json::to_string(minutes).map_err(anyhow::Error::from)?)
+                .await?;
+        }
+        S::DefaultCalendarId(id) => {
+            write(pool, DEFAULT_CALENDAR_KEY, &id.map(|v| v.to_string()).unwrap_or_default()).await?;
+        }
+        S::DefaultEventDurationMinutes(minutes) => {
+            if *minutes == 0 {
+                return Err(refused(EVENT_DURATION_TOO_SHORT));
+            }
+            write(pool, DEFAULT_EVENT_DURATION_KEY, &minutes.to_string()).await?;
+        }
+        S::InterfaceScalePercent(percent) => {
+            if !(INTERFACE_SCALE_MIN..=INTERFACE_SCALE_MAX).contains(percent) {
+                return Err(refused(INTERFACE_SCALE_OUT_OF_RANGE));
+            }
+            write(pool, INTERFACE_SCALE_KEY, &percent.to_string()).await?;
+        }
+        S::AppearancePreferences {
+            background_transparency: background,
+            event_transparency: events,
+            event_corner_style: corners,
+            inactive_background_transparency: inactive,
+        } => {
+            let inactive = inactive.unwrap_or(*background);
+            let within = |v: f64, max: f64| v.is_finite() && (0.0..=max).contains(&v);
+            if !within(*background, 50.0) || !within(inactive, 50.0) || !within(*events, 25.0) {
+                return Err(refused(TRANSPARENCY_OUT_OF_RANGE));
+            }
+            let background = surface_percentage(*background, 50.0).to_string();
+            let inactive = surface_percentage(inactive, 50.0).to_string();
+            let events = surface_percentage(*events, 25.0).to_string();
+            write_all(
+                pool,
+                &[
+                    (BACKGROUND_TRANSPARENCY_KEY, &background),
+                    (INACTIVE_BACKGROUND_TRANSPARENCY_KEY, &inactive),
+                    (EVENT_TRANSPARENCY_KEY, &events),
+                    (EVENT_CORNER_STYLE_KEY, corners.as_str()),
+                    (APPEARANCE_TRANSPARENCY_SEMANTICS_KEY, ABSOLUTE_TRANSPARENCY_SEMANTICS),
+                ],
+            )
+            .await?;
+        }
+        S::ListMode(on) => write(pool, LIST_MODE_KEY, flag(*on)).await?,
+        S::ShowDate(on) => {
+            // An install that never chose a menu-bar date format has been
+            // showing the one `read_settings` derives; pin it before the date
+            // appears, so what shows is what was already on offer.
+            if read(pool, MENUBAR_DATE_FORMAT_KEY).await.is_none() {
+                let derived = read_settings(pool).await.menubar_date_format;
+                write(pool, MENUBAR_DATE_FORMAT_KEY, &derived).await?;
+            }
+            write(pool, SHOW_DATE_KEY, flag(*on)).await?;
+        }
+        S::MenubarLabelFormat(template) => {
+            let blanks = [("title", ""), ("time", ""), ("end_time", ""), ("countdown", ""), ("calendar", "")];
+            format_menu_label(template, &blanks).map_err(SetError::Refused)?;
+            write(pool, MENUBAR_LABEL_FORMAT_KEY, template).await?;
+        }
+        S::MenubarDateFormat { format, custom } => {
+            let known = matches!(format.as_str(), "general" | "custom")
+                || serde_json::from_value::<DateFormat>(serde_json::Value::String(format.clone())).is_ok();
+            if !known {
+                return Err(refused("Choose a menu-bar date format."));
+            }
+            custom_menu_date(custom, jiff::civil::date(2026, 9, 7)).map_err(SetError::Refused)?;
+            write_all(pool, &[(MENUBAR_DATE_FORMAT_KEY, format), (MENUBAR_DATE_CUSTOM_KEY, custom)])
+                .await?;
+        }
+        S::MenubarPreferences { day_view, label, join_minutes } => {
+            if *join_minutes > 60 {
+                return Err(refused("Choose a Join window from 0 to 60 minutes."));
+            }
+            write_all(
+                pool,
+                &[
+                    (MENUBAR_DAY_VIEW_KEY, flag(*day_view)),
+                    (MENUBAR_LABEL_KEY, flag(*label)),
+                    (MENUBAR_JOIN_MINUTES_KEY, &join_minutes.to_string()),
+                ],
+            )
+            .await?;
+        }
+        S::MenubarDayView(on) => write(pool, MENUBAR_DAY_VIEW_KEY, flag(*on)).await?,
+        S::MenubarSections { earlier, tomorrow, days_ahead } => {
+            if !matches!(earlier.as_str(), "folded" | "off") {
+                return Err(refused("Earlier today is either folded or off."));
+            }
+            if *days_ahead > 6 {
+                return Err(refused("Show up to six further days."));
+            }
+            write_all(
+                pool,
+                &[
+                    (MENUBAR_EARLIER_KEY, earlier),
+                    (MENUBAR_TOMORROW_KEY, flag(*tomorrow)),
+                    (MENUBAR_DAYS_AHEAD_KEY, &days_ahead.to_string()),
+                ],
+            )
+            .await?;
+        }
+        S::HourHeight(px) => {
+            write(pool, HOUR_HEIGHT_KEY, &px.clamp(&HOUR_HEIGHT_MIN, &HOUR_HEIGHT_MAX).to_string()).await?;
+        }
+        S::TasksWidth(px) => {
+            write(pool, TASKS_WIDTH_KEY, &px.clamp(&TASKS_WIDTH_MIN, &TASKS_WIDTH_MAX).to_string()).await?;
+        }
+        S::DateFormat(format) => write(pool, DATE_FORMAT_KEY, format.as_str()).await?,
+        S::TimeFormat(format) => write(pool, TIME_FORMAT_KEY, format.as_str()).await?,
+        S::TemperatureUnit(unit) => write(pool, TEMPERATURE_UNIT_KEY, unit.as_str()).await?,
+        S::WeekStart(start) => {
+            write_all(pool, &[(WEEK_START_KEY, start.as_str()), (WEEK_STARTS_TODAY_KEY, "0")]).await?;
+        }
+        S::WeekStartsToday(on) => write(pool, WEEK_STARTS_TODAY_KEY, flag(*on)).await?,
+        S::WeekViewDays(days) => {
+            if !matches!(days, 3 | 5 | 7) {
+                return Err(refused("the rolling week can show 3, 5, or 7 days"));
+            }
+            write(pool, WEEK_VIEW_DAYS_KEY, &days.to_string()).await?;
+        }
+        S::VisibleHours { start, end } => {
+            if start >= end || *end > 24 {
+                return Err(refused("Start time must be before end time."));
+            }
+            write(pool, VISIBLE_HOURS_KEY, &format!("{start},{end}")).await?;
+        }
+        S::CombineIdenticalEvents(on) => write(pool, COMBINE_IDENTICAL_EVENTS_KEY, flag(*on)).await?,
+        S::DefaultView(view) => {
+            write_all(pool, &[(DEFAULT_VIEW_KEY, view.as_str()), (DEFAULT_VIEW_FOLLOWS_LAST_KEY, "0")])
+                .await?;
+        }
+        S::DefaultViewFollowsLast(on) => write(pool, DEFAULT_VIEW_FOLLOWS_LAST_KEY, flag(*on)).await?,
+        S::LastView(view) => write(pool, LAST_VIEW_KEY, view.as_str()).await?,
+    }
+    Ok(())
+}
+
+/// What a stored setting changes in the running app, in the same breath as
+/// the write: a control whose effect waits for the next launch cannot be told
+/// from one that does nothing.
+async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
+    use Setting as S;
+    match setting {
+        S::WeatherEnabled(true) => {
+            crate::weather::refresh_soon(app.clone(), state.pool.clone(), state.demo, true);
+        }
+        S::TrayIcon(on) => crate::tray::set_visible(app, *on),
+        S::Appearance(appearance) => {
+            let palette =
+                crate::theme::resolve(crate::theme::omarchy_theme_dir().as_deref(), *appearance);
+            let dark = palette.is_dark;
+            // GTK settings must not be touched from a command's thread.
+            let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
+            use tauri::Emitter;
+            let _ = app.emit("theme-changed", palette);
+        }
+        S::WindowFrame(frame) => apply_window_frame(app, *frame),
+        S::QuitOnClose(on) => state.quit_on_close.store(*on, std::sync::atomic::Ordering::Relaxed),
+        S::StartOnLogin(mode) => crate::tray::apply_autostart(app, state.demo, mode.registers()),
+        S::InterfaceScalePercent(percent) => apply_interface_scale(app, *percent),
+        _ => {}
+    }
+    if setting.shows_on_menu_surfaces() {
+        refresh_menu_surfaces(app, state).await;
+    }
+}
+
+/// Stores one setting, applies it, and answers with the settings now in force.
 #[tauri::command]
-pub async fn set_default_view_follows_last(
+pub async fn set_setting(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    on: bool,
+    setting: Setting,
 ) -> Result<AppSettings, String> {
-    write(&state.pool, DEFAULT_VIEW_FOLLOWS_LAST_KEY, if on { "1" } else { "0" })
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))?;
+    store(&state.pool, &setting).await.map_err(SetError::shown)?;
+    apply(&app, &state, &setting).await;
     Ok(read_settings(&state.pool).await)
-}
-
-/// Stores the view the switcher was most recently on, called on every
-/// switch regardless of mode — see [`AppSettings::last_view`]. Nothing to
-/// refuse, [`set_default_view`]'s reason.
-#[tauri::command]
-pub async fn set_last_view(
-    state: tauri::State<'_, AppState>,
-    view: DefaultView,
-) -> Result<AppSettings, String> {
-    set_last_view_impl(&state.pool, view)
-        .await
-        .map_err(|e| crate::errors::user_facing(&e))
-}
-
-async fn set_last_view_impl(pool: &SqlitePool, view: DefaultView) -> anyhow::Result<AppSettings> {
-    write(pool, LAST_VIEW_KEY, view.as_str()).await?;
-    Ok(read_settings(pool).await)
 }
 
 #[cfg(test)]
@@ -2044,6 +1740,62 @@ mod tests {
 
     async fn pool() -> SqlitePool {
         omacal_store::connect_memory().await.unwrap()
+    }
+
+    /// **The wire shape is the contract with `settings.ts`**, so every key it
+    /// sends is read here as the UI spells it: camelCase keys, a bare value
+    /// for a single field, an object with camelCase fields for a grouped one,
+    /// and an absent optional field meaning `None`.
+    #[test]
+    fn every_key_the_form_sends_reads_as_its_setting() {
+        use serde_json::json;
+        let read = |v: serde_json::Value| -> Setting {
+            serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{v}: {e}"))
+        };
+        assert!(matches!(read(json!({"key": "syncIntervalMs", "value": 120000})), Setting::SyncIntervalMs(120_000)));
+        assert!(matches!(read(json!({"key": "secondTimezone", "value": null})), Setting::SecondTimezone(None)));
+        assert!(matches!(read(json!({"key": "defaultCalendarId", "value": 4})), Setting::DefaultCalendarId(Some(4))));
+        assert!(matches!(read(json!({"key": "fallbackReminderMinutes", "value": [10]})), Setting::FallbackReminderMinutes(ref m) if m == &[10]));
+        assert!(matches!(read(json!({"key": "startOnLogin", "value": "background"})), Setting::StartOnLogin(StartOnLogin::Background)));
+        assert!(matches!(read(json!({"key": "lastView", "value": "bigyear"})), Setting::LastView(_)));
+        assert!(matches!(
+            read(json!({"key": "appearancePreferences", "value": {
+                "backgroundTransparency": 10.0, "eventTransparency": 5.0, "eventCornerStyle": "square"}})),
+            Setting::AppearancePreferences { inactive_background_transparency: None, .. }
+        ));
+        assert!(matches!(
+            read(json!({"key": "menubarPreferences", "value": {"dayView": true, "label": false, "joinMinutes": 5}})),
+            Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 5 }
+        ));
+        assert!(matches!(
+            read(json!({"key": "menubarSections", "value": {"earlier": "off", "tomorrow": true, "daysAhead": 2}})),
+            Setting::MenubarSections { tomorrow: true, days_ahead: 2, .. }
+        ));
+        assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
+        assert!(matches!(
+            read(json!({"key": "menubarDateFormat", "value": {"format": "custom", "custom": "%-d"}})),
+            Setting::MenubarDateFormat { .. }
+        ));
+        // A key this build does not know is an error, not a silent no-op.
+        assert!(serde_json::from_value::<Setting>(json!({"key": "noSuchSetting", "value": 1})).is_err());
+    }
+
+    /// A refusal is shown as written; a failed write is not. The refusal is
+    /// ours and names what to change; the failure's text is the database's.
+    #[test]
+    fn a_refusal_is_shown_and_a_failure_goes_through_the_allowlist() {
+        assert_eq!(SetError::Refused("Pick one.".into()).shown(), "Pick one.");
+        let failed = SetError::Failed(anyhow::anyhow!("disk I/O error at /home/someone/.local/share"));
+        let shown = failed.shown();
+        assert!(!shown.contains("/home"), "the path reached the form: {shown}");
+        assert_eq!(shown, crate::errors::user_facing(&anyhow::anyhow!("anything unlisted")));
+    }
+
+    /// `set_setting` without the running app: store, then read back what
+    /// the form would be answered with.
+    async fn set(p: &SqlitePool, setting: Setting) -> Result<AppSettings, String> {
+        store(p, &setting).await.map_err(SetError::shown)?;
+        Ok(read_settings(p).await)
     }
 
     #[tokio::test]
@@ -2066,12 +1818,12 @@ mod tests {
         assert_eq!(d.menubar_earlier, MenubarEarlier::Folded);
         assert!(d.menubar_tomorrow);
         assert_eq!(d.menubar_days_ahead, 0, "a glance is not a planner");
-        store_menubar_sections(&p, "off", false, 3).await.unwrap();
+        store(&p, &Setting::MenubarSections { earlier: "off".into(), tomorrow: false, days_ahead: 3 }).await.unwrap();
         let s = read_settings(&p).await;
         assert_eq!((s.menubar_earlier, s.menubar_tomorrow, s.menubar_days_ahead), (MenubarEarlier::Off, false, 3));
         // Refused, and atomically: nothing of a bad write lands.
-        assert!(store_menubar_sections(&p, "expanded", true, 1).await.is_err());
-        assert!(store_menubar_sections(&p, "folded", true, 7).await.is_err());
+        assert!(store(&p, &Setting::MenubarSections { earlier: "expanded".into(), tomorrow: true, days_ahead: 1 }).await.is_err());
+        assert!(store(&p, &Setting::MenubarSections { earlier: "folded".into(), tomorrow: true, days_ahead: 7 }).await.is_err());
         let s = read_settings(&p).await;
         assert_eq!((s.menubar_earlier, s.menubar_tomorrow, s.menubar_days_ahead), (MenubarEarlier::Off, false, 3));
         // A hand-edited row out of range reads as the default, like the Join window.
@@ -2092,9 +1844,9 @@ mod tests {
     #[tokio::test]
     async fn popup_view_changes_preserve_label_and_join_preferences() {
         let p = pool().await;
-        store_menubar_preferences(&p, false, false, 15).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: false, label: false, join_minutes: 15 }).await.unwrap();
         for day_view in [true, false] {
-            store_menubar_day_view(&p, day_view).await.unwrap();
+            store(&p, &Setting::MenubarDayView(day_view)).await.unwrap();
             let stored = read_settings(&p).await;
             assert_eq!(stored.menubar_day_view, day_view);
             assert!(!stored.menubar_label);
@@ -2109,14 +1861,14 @@ mod tests {
         assert!(!initial.menubar_day_view);
         assert!(initial.menubar_label);
         assert_eq!(initial.menubar_join_minutes, 5);
-        store_menubar_preferences(&p, true, false, 0).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 0 }).await.unwrap();
         let stored = read_settings(&p).await;
         assert!(stored.menubar_day_view);
         assert!(!stored.menubar_label);
         assert_eq!(stored.menubar_join_minutes, 0);
-        assert!(store_menubar_preferences(&p, false, true, 61).await.is_err());
+        assert!(store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 61 }).await.is_err());
         assert!(read_settings(&p).await.menubar_day_view);
-        store_menubar_preferences(&p, false, true, 60).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 60 }).await.unwrap();
         assert_eq!(read_settings(&p).await.menubar_join_minutes, 60);
     }
 
@@ -2292,10 +2044,10 @@ mod tests {
         let p = pool().await;
         assert_eq!(read_settings(&p).await.interface_scale_percent, 100, "a fresh install is at 100");
 
-        let s = set_interface_scale_impl(&p, 150).await.unwrap();
+        let s = set(&p, Setting::InterfaceScalePercent(150)).await.unwrap();
         assert_eq!(s.interface_scale_percent, 150);
         for refused in [0, 74, 201, 1_000] {
-            let e = set_interface_scale_impl(&p, refused).await.unwrap_err();
+            let e = set(&p, Setting::InterfaceScalePercent(refused)).await.unwrap_err();
             assert_eq!(e.to_string(), INTERFACE_SCALE_OUT_OF_RANGE, "{refused}");
         }
         assert_eq!(read_settings(&p).await.interface_scale_percent, 150, "a refusal keeps the choice");
@@ -2310,11 +2062,11 @@ mod tests {
     async fn the_default_event_duration_round_trips_and_refuses_zero() {
         let p = pool().await;
 
-        let s = set_default_event_duration_impl(&p, 45).await.unwrap();
+        let s = set(&p, Setting::DefaultEventDurationMinutes(45)).await.unwrap();
         assert_eq!(s.default_event_duration_minutes, 45);
         assert_eq!(read_settings(&p).await.default_event_duration_minutes, 45);
 
-        assert!(set_default_event_duration_impl(&p, 0).await.is_err());
+        assert!(set(&p, Setting::DefaultEventDurationMinutes(0)).await.is_err());
         assert_eq!(
             read_settings(&p).await.default_event_duration_minutes,
             45,
@@ -2335,7 +2087,7 @@ mod tests {
     async fn appearance_round_trips_as_one_choice_and_rejects_bad_percentages() {
         let p = pool().await;
 
-        let s = set_appearance_preferences_impl(&p, 35.0, 20.0, EventCornerStyle::Square, None)
+        let s = set(&p, Setting::AppearancePreferences { background_transparency: 35.0, event_transparency: 20.0, event_corner_style: EventCornerStyle::Square, inactive_background_transparency: None })
             .await
             .unwrap();
         assert_eq!(s.background_transparency, 35.0);
@@ -2343,11 +2095,10 @@ mod tests {
         assert_eq!(s.event_corner_style, EventCornerStyle::Square);
 
         for (background, events) in [(50.1, 20.0), (35.0, 25.1)] {
-            let err = set_appearance_preferences_impl(&p, background, events, EventCornerStyle::Rounded, None)
+            let err = set(&p, Setting::AppearancePreferences { background_transparency: background, event_transparency: events, event_corner_style: EventCornerStyle::Rounded, inactive_background_transparency: None })
                 .await
                 .unwrap_err();
             assert_eq!(err.to_string(), TRANSPARENCY_OUT_OF_RANGE);
-            assert_eq!(crate::errors::user_facing(&err), TRANSPARENCY_OUT_OF_RANGE);
             let unchanged = read_settings(&p).await;
             assert_eq!(unchanged.background_transparency, 35.0);
             assert_eq!(unchanged.event_transparency, 20.0);
@@ -2368,10 +2119,10 @@ mod tests {
         assert_eq!((capped.background_transparency, capped.inactive_background_transparency), (50.0, 50.0));
         write(&p, EVENT_TRANSPARENCY_KEY, "90").await.unwrap();
         assert_eq!(read_settings(&p).await.event_transparency, 25.0);
-        let saved = set_appearance_preferences_impl(&p, 1.5, 20.5, EventCornerStyle::Rounded, Some(4.1)).await.unwrap();
+        let saved = set(&p, Setting::AppearancePreferences { background_transparency: 1.5, event_transparency: 20.5, event_corner_style: EventCornerStyle::Rounded, inactive_background_transparency: Some(4.1) }).await.unwrap();
         assert_eq!((saved.background_transparency, saved.inactive_background_transparency), (1.5, 4.1));
         assert_eq!(read_settings(&p).await.inactive_background_transparency, 4.1);
-        assert!(set_appearance_preferences_impl(&p, 10.0, 20.0, EventCornerStyle::Square, Some(50.1)).await.is_err());
+        assert!(set(&p, Setting::AppearancePreferences { background_transparency: 10.0, event_transparency: 20.0, event_corner_style: EventCornerStyle::Square, inactive_background_transparency: Some(50.1) }).await.is_err());
         let unchanged = read_settings(&p).await;
         assert_eq!((unchanged.background_transparency, unchanged.inactive_background_transparency, unchanged.event_transparency), (1.5, 4.1, 20.5));
     }
@@ -2395,7 +2146,7 @@ mod tests {
         assert_eq!(plain.event_transparency, 25.0);
 
         // Any new write marks the whole tuple absolute, including a real 0.
-        let absolute = set_appearance_preferences_impl(&p, 0.0, 25.0, EventCornerStyle::Rounded, None)
+        let absolute = set(&p, Setting::AppearancePreferences { background_transparency: 0.0, event_transparency: 25.0, event_corner_style: EventCornerStyle::Rounded, inactive_background_transparency: None })
             .await
             .unwrap();
         assert_eq!(absolute.background_transparency, 0.0);
@@ -2471,11 +2222,11 @@ mod tests {
     async fn fallback_reminders_round_trip_including_none() {
         let p = pool().await;
 
-        let s = set_fallback_reminders_impl(&p, vec![15]).await.unwrap();
+        let s = set(&p, Setting::FallbackReminderMinutes(vec![15])).await.unwrap();
         assert_eq!(s.fallback_reminder_minutes, vec![15]);
         assert_eq!(read_settings(&p).await.fallback_reminder_minutes, vec![15]);
 
-        let s = set_fallback_reminders_impl(&p, vec![]).await.unwrap();
+        let s = set(&p, Setting::FallbackReminderMinutes(vec![])).await.unwrap();
         assert!(s.fallback_reminder_minutes.is_empty());
         assert!(read_settings(&p).await.fallback_reminder_minutes.is_empty());
     }
@@ -2485,9 +2236,9 @@ mod tests {
     #[tokio::test]
     async fn fallback_reminders_are_held_to_googles_bounds() {
         let p = pool().await;
-        assert!(set_fallback_reminders_impl(&p, vec![40_321]).await.is_err());
-        assert!(set_fallback_reminders_impl(&p, (0..6).collect()).await.is_err());
-        assert!(set_fallback_reminders_impl(&p, vec![-1]).await.is_err());
+        assert!(set(&p, Setting::FallbackReminderMinutes(vec![40_321])).await.is_err());
+        assert!(set(&p, Setting::FallbackReminderMinutes((0..6).collect())).await.is_err());
+        assert!(set(&p, Setting::FallbackReminderMinutes(vec![-1])).await.is_err());
         assert_eq!(
             read_settings(&p).await.fallback_reminder_minutes,
             vec![60, 10],
@@ -2498,13 +2249,13 @@ mod tests {
     #[tokio::test]
     async fn an_interval_at_or_above_the_floor_is_stored_and_read_back() {
         let p = pool().await;
-        let got = set_sync_interval_impl(&p, 120_000).await.unwrap();
+        let got = set(&p, Setting::SyncIntervalMs(120_000)).await.unwrap();
         assert_eq!(got.sync_interval_ms, 120_000);
         assert_eq!(read_settings(&p).await.sync_interval_ms, 120_000);
 
         // Exactly the floor is allowed, so the refusal below cannot be
         // satisfied by a rule that refuses the boundary too.
-        let at = set_sync_interval_impl(&p, crate::sync_loop::MIN_INTERVAL_MS).await.unwrap();
+        let at = set(&p, Setting::SyncIntervalMs(crate::sync_loop::MIN_INTERVAL_MS)).await.unwrap();
         assert_eq!(at.sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
     }
 
@@ -2514,16 +2265,15 @@ mod tests {
     #[tokio::test]
     async fn an_interval_below_the_floor_is_refused_and_nothing_is_stored() {
         let p = pool().await;
-        set_sync_interval_impl(&p, 120_000).await.unwrap();
+        set(&p, Setting::SyncIntervalMs(120_000)).await.unwrap();
 
-        let err = set_sync_interval_impl(&p, 10_000).await.unwrap_err();
+        let err = set(&p, Setting::SyncIntervalMs(10_000)).await.unwrap_err();
         assert_eq!(err.to_string(), INTERVAL_TOO_SHORT);
         assert_eq!(
             read_settings(&p).await.sync_interval_ms,
             120_000,
             "a refused value must not half-land",
         );
-        assert_eq!(crate::errors::user_facing(&err), INTERVAL_TOO_SHORT);
     }
 
     /// Fresh install: no second zone, which is the feature off — and `""`
@@ -2646,16 +2396,16 @@ mod tests {
         let legacy = read_settings(&p).await;
         assert_eq!(legacy.menubar_date_format, "custom");
         assert_eq!(menu_date(&legacy, date), "7");
-        store_menu_date(&p, "general", "%-d").await.unwrap();
+        store(&p, &Setting::MenubarDateFormat { format: "general".into(), custom: "%-d".into() }).await.unwrap();
         write(&p, "date_format", "dmy").await.unwrap();
         assert_eq!(menu_date(&read_settings(&p).await, date), "07/09/2026");
-        store_menu_date(&p, "iso", "%-d").await.unwrap();
+        store(&p, &Setting::MenubarDateFormat { format: "iso".into(), custom: "%-d".into() }).await.unwrap();
         assert_eq!(menu_date(&read_settings(&p).await, date), "2026-09-07");
-        store_menu_date(&p, "custom", "%a %b %-d").await.unwrap();
+        store(&p, &Setting::MenubarDateFormat { format: "custom".into(), custom: "%a %b %-d".into() }).await.unwrap();
         assert_eq!(menu_date(&read_settings(&p).await, date), "Mon Sep 7");
         assert_eq!(custom_menu_date("%d", date).unwrap(), "07");
         for invalid in ["", "%", "%Q", "%H", "%n", "%1000000000d"] {
-            assert!(store_menu_date(&p, "custom", invalid).await.is_err(), "{invalid}");
+            assert!(store(&p, &Setting::MenubarDateFormat { format: "custom".into(), custom: invalid.into() }).await.is_err(), "{invalid}");
         }
         assert_eq!(menu_date(&read_settings(&p).await, date), "Mon Sep 7");
         assert_eq!(crate::upcoming::current(&p, 1_788_804_000_000).await.unwrap().today.unwrap().label,
@@ -2716,7 +2466,7 @@ mod tests {
     async fn the_last_view_round_trips_and_falls_back_to_week() {
         let p = pool().await;
         for view in [DefaultView::Month, DefaultView::BigYear, DefaultView::Day] {
-            let s = set_last_view_impl(&p, view).await.unwrap();
+            let s = set(&p, Setting::LastView(view)).await.unwrap();
             assert_eq!(s.last_view, view);
             assert_eq!(read_settings(&p).await.last_view, view);
         }
@@ -2738,9 +2488,9 @@ mod tests {
     async fn choosing_a_fixed_default_view_leaves_last_view_mode_atomically() {
         let p = pool().await;
         write(&p, DEFAULT_VIEW_FOLLOWS_LAST_KEY, "1").await.unwrap();
-        set_last_view_impl(&p, DefaultView::Year).await.unwrap();
+        set(&p, Setting::LastView(DefaultView::Year)).await.unwrap();
 
-        let s = set_default_view_impl(&p, DefaultView::Month).await.unwrap();
+        let s = set(&p, Setting::DefaultView(DefaultView::Month)).await.unwrap();
         assert_eq!(s.default_view, DefaultView::Month);
         assert!(!s.default_view_follows_last);
         assert_eq!(read(&p, DEFAULT_VIEW_KEY).await.as_deref(), Some("month"));
@@ -2813,14 +2563,14 @@ mod tests {
 
         write(&p, WEEK_STARTS_TODAY_KEY, "1").await.unwrap();
         for days in [3, 5, 7] {
-            let s = set_week_view_days_impl(&p, days).await.unwrap();
+            let s = set(&p, Setting::WeekViewDays(days)).await.unwrap();
             assert!(s.week_starts_today);
             assert_eq!(s.week_view_days, days);
         }
 
         let before = read(&p, WEEK_VIEW_DAYS_KEY).await;
         for days in [0, 1, 4, 6, 8, u8::MAX] {
-            assert!(set_week_view_days_impl(&p, days).await.is_err());
+            assert!(set(&p, Setting::WeekViewDays(days)).await.is_err());
             assert_eq!(read(&p, WEEK_VIEW_DAYS_KEY).await, before, "{days} changed the row");
         }
 
@@ -2835,7 +2585,7 @@ mod tests {
         let p = pool().await;
         write(&p, WEEK_STARTS_TODAY_KEY, "1").await.unwrap();
 
-        let s = set_week_start_impl(&p, WeekStart::Sunday).await.unwrap();
+        let s = set(&p, Setting::WeekStart(WeekStart::Sunday)).await.unwrap();
         assert_eq!(s.week_start, WeekStart::Sunday);
         assert!(!s.week_starts_today);
         assert_eq!(read(&p, WEEK_START_KEY).await.as_deref(), Some("sunday"));
@@ -2948,7 +2698,7 @@ mod tests {
     #[tokio::test]
     async fn storing_list_mode_leaves_its_neighbours_alone() {
         let p = pool().await;
-        set_sync_interval_impl(&p, 120_000).await.unwrap();
+        set(&p, Setting::SyncIntervalMs(120_000)).await.unwrap();
         write(&p, NOTIFICATIONS_KEY, "0").await.unwrap();
 
         write(&p, LIST_MODE_KEY, "1").await.unwrap();

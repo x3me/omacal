@@ -2,7 +2,6 @@
 <script lang="ts">
   import { DEFAULT_MEETING_FORMAT, meetingLabel } from '../../../packaging/omarchy-plugin/Timeline.mjs';
   import { DATE_FORMATS, type DateFormat } from './datefmt';
-  import { setDateFormatPreference } from './settings';
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
 
@@ -17,25 +16,17 @@
   import { connectCaldav } from './tasks';
   import { listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
-    getSettings, listTimezones, minutesOf, msOfMinutes, setAppearancePreferences,
-    setDefaultCalendar, setDefaultView, setDefaultViewFollowsLast, DEFAULT_VIEW_OPTIONS,
-    type DefaultViewChoice,
-    setDefaultEventDuration, setStartOnLogin, START_ON_LOGIN_OPTIONS,
-    setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
-    setAppearance, APPEARANCE_OPTIONS,
-    setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeatherLocation, setWeekStart,
-    setWeekStartsToday, setWeekViewDays, setVisibleHours, setInterfaceScale,
-    setTaskNotificationsEnabled, setCombineIdenticalEvents,
-    type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
-    type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
+    getSettings, setSetting, setDisplayTimezone, setWeatherLocation, listTimezones,
+    minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, APPEARANCE_OPTIONS,
+    WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings, type Appearance,
+    type StartOnLogin, type WeekViewDays, type WindowFrame,
   } from './settings';
   import { formatClock, type TimeFormat } from './timefmt';
   import type { TemperatureUnit } from './temperature';
   import type { WeekStartDay } from './weekstart';
 
   async function changeVisibleHours(start: number, end: number) {
-    try { settings = await setVisibleHours(start, end); onsettingschange?.(settings); }
+    try { settings = await setSetting('visibleHours', { start, end }); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
   }
 
@@ -43,12 +34,12 @@
    *  release: zooming under a dragging hand would move the slider itself. */
   let scalePreview = $state<number | null>(null);
   async function saveInterfaceScale(percent: number) {
-    try { settings = await setInterfaceScale(percent); onsettingschange?.(settings); }
+    try { settings = await setSetting('interfaceScalePercent', percent); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
     finally { scalePreview = null; }
   }
   async function changeCombineIdenticalEvents(on: boolean) {
-    try { settings = await setCombineIdenticalEvents(on); onsettingschange?.(settings); }
+    try { settings = await setSetting('combineIdenticalEvents', on); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
   }
   let {
@@ -108,7 +99,7 @@
    *  where "Saved." goes unseen.
    *
    *  They say *Applying…* first and *Saved* after, rather than only the
-   *  second: `set_menubar_preferences` rewrites the feed and then pokes the
+   *  second: a `menubarPreferences` write rewrites the feed and then pokes the
    *  Omarchy widget over IPC, waiting up to two seconds for it. That pause
    *  is real work, and a control that looks inert for two seconds and then
    *  changes the bar by itself reads as a control that needed an Apply
@@ -131,7 +122,7 @@
     menubarBusy = true;
     sectionsNote = { text: 'Applying…', kind: 'info' };
     try {
-      settings = await setMenubarSections(earlier, tomorrow, daysAhead);
+      settings = await setSetting('menubarSections', { earlier, tomorrow, daysAhead });
       onsettingschange?.(settings);
       sectionsNote = { text: 'Saved', kind: 'info' };
     } catch (e) { sectionsNote = { text: String(e), kind: 'error' }; }
@@ -170,7 +161,7 @@
     menubarBusy = true;
     formatNote = { text: 'Applying…', kind: 'info' };
     try {
-      settings = await setMenubarLabelFormat(template);
+      settings = await setSetting('menubarLabelFormat', template);
       meetingFormat = settings.menubarLabelFormat;
       formatNote = { text: 'Saved', kind: 'info' };
       onsettingschange?.(settings);
@@ -180,7 +171,7 @@
 
   async function saveMenuDate(format: AppSettings['menubarDateFormat'], custom = settings?.menubarDateCustom ?? '%-d') {
     try {
-      settings = await setMenubarDateFormat(format, custom);
+      settings = await setSetting('menubarDateFormat', { format, custom });
       menuDateCustom = settings.menubarDateCustom;
       menuDateNote = '';
       onsettingschange?.(settings);
@@ -200,7 +191,7 @@
     menubarBusy = true;
     say({ text: 'Applying…', kind: 'info' });
     try {
-      settings = await setMenubarPreferences(dayView, label, joinMinutes);
+      settings = await setSetting('menubarPreferences', { dayView, label, joinMinutes });
       onsettingschange?.(settings);
       say({ text: 'Saved', kind: 'info' });
     } catch (e) { say({ text: String(e), kind: 'error' }); }
@@ -332,7 +323,7 @@
     settings !== null && z2Valid && z2Choice !== (settings.secondTimezone ?? ''));
   async function applySecondZone() {
     try {
-      settings = await setSecondTimezone(z2Choice === '' ? null : z2Choice);
+      settings = await setSetting('secondTimezone', z2Choice === '' ? null : z2Choice);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -348,7 +339,7 @@
    * leave Week rolling with the *old* count — a view they did not ask for
    * and no message explaining it.
    *
-   * A whole-week row is one write: `set_week_start` clears the rolling flag
+   * A whole-week row is one write: `weekStart` clears the rolling flag
    * itself, so there is no second call to half-apply.
    */
   async function saveWeekView(id: string) {
@@ -356,10 +347,10 @@
     if (!choice) return;
     try {
       if (choice.days !== undefined) {
-        await setWeekViewDays(choice.days);
-        settings = await setWeekStartsToday(true);
+        await setSetting('weekViewDays', choice.days);
+        settings = await setSetting('weekStartsToday', true);
       } else {
-        settings = await setWeekStart(choice.id as WeekStartDay);
+        settings = await setSetting('weekStart', choice.id as WeekStartDay);
       }
       onsettingschange?.(settings);
     } catch (e) {
@@ -378,8 +369,8 @@
   async function saveDefaultView(choice: DefaultViewChoice) {
     try {
       settings = choice === 'last'
-        ? await setDefaultViewFollowsLast(true)
-        : await setDefaultView(choice);
+        ? await setSetting('defaultViewFollowsLast', true)
+        : await setSetting('defaultView', choice);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -387,13 +378,13 @@
   }
 
   async function saveDateFormat(format: DateFormat) {
-    try { settings = await setDateFormatPreference(format); onsettingschange?.(settings); }
+    try { settings = await setSetting('dateFormat', format); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
   }
 
   async function saveTimeFormat(format: TimeFormat) {
     try {
-      settings = await setTimeFormat(format);
+      settings = await setSetting('timeFormat', format);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -428,12 +419,12 @@
     note = null;
     appearanceQueue = appearanceQueue.then(async () => {
       try {
-        const stored = await setAppearancePreferences(
-          requested.backgroundTransparency,
-          requested.eventTransparency,
-          requested.eventCornerStyle,
-          requested.inactiveBackgroundTransparency,
-        );
+        const stored = await setSetting('appearancePreferences', {
+          backgroundTransparency: requested.backgroundTransparency,
+          eventTransparency: requested.eventTransparency,
+          eventCornerStyle: requested.eventCornerStyle,
+          inactiveBackgroundTransparency: requested.inactiveBackgroundTransparency,
+        });
         if (write !== appearanceWrite) return;
         settings = stored;
         applyAppearance(stored);
@@ -464,7 +455,7 @@
    * Saves the interval and shows whatever comes back.
    *
    * Spec §3: the floor still applies and the UI says so rather than silently
-   * clamping — but **the refusal is `set_sync_interval`'s, not this form's**,
+   * clamping — but **the refusal is the backend's, not this form's**,
    * and that is a decision the mutation sweep forced. A duplicate check here
    * refused with its own wording, which meant no test could tell which of the
    * two guards had fired: deleting the form's changed nothing anybody could
@@ -488,7 +479,7 @@
       // deleting the assignment and reddening no test at all. What the save
       // has to guarantee is that the value was *stored*, and the spec asserts
       // that by reopening the modal, which re-fetches.
-      await setSyncInterval(msOfMinutes(minutes));
+      await setSetting('syncIntervalMs', msOfMinutes(minutes));
       intervalNote = { text: 'Saved.', kind: 'info' };
     } catch (e) {
       intervalNote = { text: String(e), kind: 'error' };
@@ -500,7 +491,7 @@
   async function saveFallback(minutes: number[]) {
     note = null;
     try {
-      settings = await setFallbackReminders(minutes);
+      settings = await setSetting('fallbackReminderMinutes', minutes);
       if (settings) onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -511,7 +502,7 @@
   async function saveDefaultCalendar(id: number | null) {
     note = null;
     try {
-      settings = await setDefaultCalendar(id);
+      settings = await setSetting('defaultCalendarId', id);
       if (settings) onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -528,7 +519,7 @@
 
     durationNote = null;
     try {
-      settings = await setDefaultEventDuration(minutes);
+      settings = await setSetting('defaultEventDurationMinutes', minutes);
       durationText = String(settings.defaultEventDurationMinutes);
       onsettingschange?.(settings);
       durationNote = { text: 'Saved.', kind: 'info' };
@@ -557,7 +548,7 @@
   async function toggleWeather(on: boolean) {
     note = null;
     try {
-      settings = await setWeatherEnabled(on);
+      settings = await setSetting('weatherEnabled', on);
       if (settings) onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -593,7 +584,7 @@
   async function togglePhotonPlaces(on: boolean) {
     note = null;
     try {
-      settings = await setPhotonPlaces(on);
+      settings = await setSetting('photonPlaces', on);
       if (settings) onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -605,7 +596,7 @@
    *  no third variant a select could send. */
   async function saveTemperatureUnit(unit: TemperatureUnit) {
     try {
-      settings = await setTemperatureUnit(unit);
+      settings = await setSetting('temperatureUnit', unit);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -616,7 +607,7 @@
   async function toggleTaskNotifications(on: boolean) {
     note = null;
     try {
-      settings = await setTaskNotificationsEnabled(on);
+      settings = await setSetting('taskNotificationsEnabled', on);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       settings = settings ? { ...settings } : null;
@@ -626,7 +617,7 @@
   async function toggleNotifications(on: boolean) {
     note = null;
     try {
-      settings = await setNotificationsEnabled(on);
+      settings = await setSetting('notificationsEnabled', on);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       // The click already flipped the checkbox; put it back to what the
@@ -760,7 +751,7 @@
   async function toggleShowDate(on: boolean) {
     dateNote = { text: 'Applying…', kind: 'info' };
     try {
-      settings = await setShowDate(on);
+      settings = await setSetting('showDate', on);
       dateNote = { text: 'Saved', kind: 'info' };
     } catch (e) {
       dateNote = { text: String(e), kind: 'error' };
@@ -772,7 +763,7 @@
   async function toggleTrayIcon(on: boolean) {
     note = null;
     try {
-      settings = await setTrayIcon(on);
+      settings = await setSetting('trayIcon', on);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       // Same checkbox repair as `toggleNotifications`.
@@ -787,7 +778,7 @@
   async function saveAppearance(appearance: Appearance) {
     note = null;
     try {
-      settings = await setAppearance(appearance);
+      settings = await setSetting('appearance', appearance);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -797,7 +788,7 @@
   async function saveWindowFrame(frame: WindowFrame) {
     note = null;
     try {
-      settings = await setWindowFrame(frame);
+      settings = await setSetting('windowFrame', frame);
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -807,7 +798,7 @@
   async function toggleQuitOnClose(on: boolean) {
     note = null;
     try {
-      settings = await setQuitOnClose(on);
+      settings = await setSetting('quitOnClose', on);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       // Same checkbox repair as `toggleNotifications`.
@@ -818,7 +809,7 @@
   async function saveStartOnLogin(mode: StartOnLogin) {
     note = null;
     try {
-      settings = await setStartOnLogin(mode);
+      settings = await setSetting('startOnLogin', mode);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       // Same repair as `toggleNotifications`: re-assign so the select snaps

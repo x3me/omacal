@@ -182,26 +182,6 @@ const SAFE_EXACT: &[&str] = &[
     // §2 is about. `a_guest_list_conflict_reaches_the_user_verbatim` pins the
     // pair, so a reworded constant fails a test rather than going opaque.
     crate::events::CONFLICT_GUESTS,
-    // src-tauri/src/settings.rs — `set_sync_interval`'s floor. Fixed literal,
-    // held in `settings::INTERVAL_TOO_SHORT` and raised with `bail!`, reached
-    // only through `set_sync_interval`'s own `.map_err(user_facing)` with no
-    // `.context(..)` on the way, so `err.to_string()` is byte-identical.
-    // Allowlisted because the refusal is the whole point: a value accepted and
-    // then quietly clamped is worse than one turned down, and a turned-down
-    // value the user cannot read a reason for is barely better. Pinned by
-    // `an_interval_below_the_floor_is_refused_and_nothing_is_stored`.
-    crate::settings::INTERVAL_TOO_SHORT,
-    // src-tauri/src/settings.rs — the default event duration cannot describe
-    // a zero-length event. Fixed literal, raised before the settings write.
-    crate::settings::EVENT_DURATION_TOO_SHORT,
-    // src-tauri/src/settings.rs — the interface scale's range (#138). Fixed
-    // literal, raised before the settings write, no context on the way to
-    // `set_interface_scale`'s `.map_err(user_facing)`.
-    crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
-    // src-tauri/src/settings.rs — both appearance percentages are bounded to
-    // the range the sliders name. Fixed literal, raised before the transaction
-    // begins and propagated through `set_appearance` without added context.
-    crate::settings::TRANSPARENCY_OUT_OF_RANGE,
     // src-tauri/src/events.rs — `split_series`' refusal to split a series that
     // ends after a fixed number of occurrences. Fixed literal, no
     // interpolation, raised with `bail!` before either write and propagated by
@@ -559,13 +539,6 @@ mod tests {
             "the new series was created but the original could not be shortened — \
              you now have two overlapping series and should delete one",
             crate::events::CONFLICT_GUESTS,
-            crate::settings::INTERVAL_TOO_SHORT,
-            // Fixed literal raised before the settings write, with no
-            // interpolation or context added on the command path.
-            crate::settings::EVENT_DURATION_TOO_SHORT,
-            // Fixed literal raised before the appearance transaction begins,
-            // with no interpolation or context added on the command path.
-            crate::settings::TRANSPARENCY_OUT_OF_RANGE,
             // Checked against the doc-comment rule: a fixed literal raised
             // only after Google's insert succeeded, no interpolation, and
             // `create_event`'s `.map_err(user_facing)` adds no context.
@@ -621,9 +594,6 @@ mod tests {
             crate::caldav_write::EVENT_CHANGED_ON_SERVER,
             crate::caldav_write::EVENT_NOT_SYNCED_YET,
             crate::caldav_account::CALENDAR_IS_READ_ONLY,
-            // The interface scale's range, a fixed literal raised before the
-            // write.
-            crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
         ];
         for expected in EXPECTED {
             assert!(

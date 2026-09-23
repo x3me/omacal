@@ -217,7 +217,7 @@ pub(crate) fn opens_window(argv: &[String], mode: crate::settings::StartOnLogin)
 ///
 /// Called at startup *and* from the setting's own command, so a change takes
 /// effect at the moment it is made rather than at some later launch — the
-/// same rule [`crate::settings::set_tray_icon`] follows, and here it is
+/// same rule [`crate::settings::Setting::TrayIcon`] follows, and here it is
 /// stronger: the whole complaint behind this setting (issue #22) is an app
 /// that writes the entry back whatever the user does with it.
 ///

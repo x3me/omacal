@@ -85,8 +85,8 @@ async function popup(page: import('@playwright/test').Page, visibleStart = 0, vi
         if (cmd === 'plugin:event|unlisten') return;
         if (cmd === 'menubar_feed') return structuredClone({ events: events.filter(e => e.end_ms > start + 13 * 3600000), panel, tasks: options.tasks ? [{title: 'Submit expenses', overdue: false}] : [] });
         if (cmd === 'get_palette') return { bg: '#20232b', surface: '#303540', text: '#e5e7eb', muted: '#9ca3af', accent: '#87b7ff', is_dark: true };
-        if (cmd === 'set_menubar_day_view') { panel.day_view = args.dayView; return {}; }
-        if (cmd === 'set_menubar_preferences') { panel.day_view = args.dayView; panel.label = args.label; panel.join_minutes = args.joinMinutes; return {}; }
+        if (cmd === 'set_setting' && args.setting.key === 'menubarDayView') { panel.day_view = args.setting.value; return {}; }
+        if (cmd === 'set_setting' && args.setting.key === 'menubarPreferences') { const v = args.setting.value; panel.day_view = v.dayView; panel.label = v.label; panel.join_minutes = v.joinMinutes; return {}; }
         if (cmd === 'menubar_action') { calls.push(args); return; }
         throw new Error(cmd);
       },

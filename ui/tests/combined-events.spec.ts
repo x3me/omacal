@@ -222,7 +222,7 @@ test('combining is opt-in, saves immediately, reloads the calendar and survives 
   await openSettings();
   await expect(toggle).toBeChecked();
   await toggle.uncheck();
-  await expect.poll(() => page.evaluate(() => window.__harness.calls.filter(c => c.cmd === 'set_combine_identical_events').map(c => c.args))).toEqual([{ on: true }, { on: false }]);
+  await expect.poll(() => page.evaluate(() => window.__harness.settingValues('combineIdenticalEvents'))).toEqual([true, false]);
 });
 
 test('a combined block requires a copy choice for edits but still allows Alt-drag creation', async ({ page }) => {

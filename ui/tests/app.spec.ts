@@ -28,6 +28,10 @@ const W2 = APP_MON + WEEK;
 
 const app = (fixture = 'default') => `/tests/harness/index.html?c=App&f=${fixture}`;
 
+/** The values `set_setting` was sent for one key, oldest first. */
+const settingValues = (page: Page, key: string): Promise<any[]> =>
+  page.evaluate((k) => window.__harness.settingValues(k), key);
+
 const colourAlpha = (css: string): number => {
   const fn = css.match(/^color\([^/)]*(?:\/\s*([0-9.]+))?\)$/);
   if (fn) return fn[1] === undefined ? 1 : parseFloat(fn[1]);
@@ -76,7 +80,7 @@ test.describe('App', () => {
         el.dispatchEvent(new Event('change', {bubbles: true}));
       }, value);
     }
-    await expect.poll(() => page.evaluate(() => (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length)).toBe(3);
+    await expect.poll(() => page.evaluate(() => (window as any).__harness.settingValues('appearancePreferences').length)).toBe(3);
     const alpha = () => page.evaluate(() => ({background: document.documentElement.style.getPropertyValue('--background-fill-opacity'), events: document.documentElement.style.getPropertyValue('--event-fill-opacity')}));
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect.poll(alpha).toEqual({background: '98.5%', events: '79.5%'});
@@ -121,7 +125,7 @@ test.describe('App', () => {
     await expect(slider).toHaveAttribute('max', '200');
     await expect(modal.getByRole('button', {name: 'Back to 100%'})).toHaveCount(0);
     const scaleCalls = () => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_interface_scale').map((c: any) => c.args));
+      (window as any).__harness.settingValues('interfaceScalePercent'));
 
     await slider.evaluate((el) => {
       (el as HTMLInputElement).value = '140';
@@ -134,11 +138,11 @@ test.describe('App', () => {
       el.dispatchEvent(new Event('input', {bubbles: true}));
       el.dispatchEvent(new Event('change', {bubbles: true}));
     });
-    await expect.poll(scaleCalls).toEqual([{percent: 150}]);
+    await expect.poll(scaleCalls).toEqual([150]);
     await expect(slider).toHaveValue('150');
 
     await modal.getByRole('button', {name: 'Back to 100%'}).click();
-    await expect.poll(scaleCalls).toEqual([{percent: 150}, {percent: 100}]);
+    await expect.poll(scaleCalls).toEqual([150, 100]);
     await expect(slider).toHaveValue('100');
     await expect(modal.getByRole('button', {name: 'Back to 100%'})).toHaveCount(0);
   });
@@ -158,15 +162,15 @@ test.describe('App', () => {
       }, value);
     await commit('Active background transparency', '50');
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(1);
     await commit('Event transparency', '25');
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(2);
     await modal.getByRole('radio', { name: 'Square' }).check();
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(3);
 
     // A fresh document has no preview state to inherit. Only get_settings and
@@ -2258,8 +2262,8 @@ test.describe('App', () => {
     ]);
 
     await select.selectOption('month');
-    const [args] = await callsTo(page, 'set_default_view');
-    expect(args).toEqual({ view: 'month' });
+    const [value] = await settingValues(page, 'defaultView');
+    expect(value).toBe('month');
 
     // Reopened, the select shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -2346,15 +2350,15 @@ test.describe('App', () => {
     const select = modal.locator('#default-view');
 
     await select.selectOption('last');
-    let [args] = await callsTo(page, 'set_default_view_follows_last');
-    expect(args).toEqual({ on: true });
+    const [follows] = await settingValues(page, 'defaultViewFollowsLast');
+    expect(follows).toBe(true);
 
     await select.selectOption('day');
-    [args] = await callsTo(page, 'set_default_view');
-    expect(args).toEqual({ view: 'day' });
+    const [view] = await settingValues(page, 'defaultView');
+    expect(view).toBe('day');
 
     // Reopened, the select reports the fixed choice, not "Last view" —
-    // the same atomic clear `set_default_view` makes on the backend.
+    // the same atomic clear `Setting::DefaultView` makes on the backend.
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);
     await page.getByRole('button', { name: 'Menu' }).click();
@@ -2367,7 +2371,7 @@ test.describe('App', () => {
    * The point of the setting, end to end: with "Last view" chosen, wherever
    * the switcher was last left is where a reload — a fresh launch's own
    * stand-in, `the chosen first day survives a reload`'s reason — opens.
-   * `pick` records the view on every switch (`set_last_view`), regardless of
+   * `pick` records the view on every switch (`lastView`), regardless of
    * whether this mode is even on, precisely so turning it on has a real
    * memory to open on rather than a blank one.
    */
@@ -2595,8 +2599,8 @@ test.describe('App', () => {
     ]);
 
     await select.selectOption('light');
-    const [args] = await callsTo(page, 'set_appearance');
-    expect(args).toEqual({ appearance: 'light' });
+    const [value] = await settingValues(page, 'appearance');
+    expect(value).toBe('light');
 
     // Reopened, the select shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -2623,8 +2627,8 @@ test.describe('App', () => {
     await expect(select.locator('option')).toHaveText(['Follow the desktop', 'Shown', 'Hidden']);
 
     await select.selectOption('shown');
-    const [args] = await callsTo(page, 'set_window_frame');
-    expect(args).toEqual({ frame: 'shown' });
+    const [value] = await settingValues(page, 'windowFrame');
+    expect(value).toBe('shown');
 
     // Reopened, the select shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -2694,8 +2698,8 @@ test.describe('App', () => {
     await expect(box).not.toBeChecked();
 
     await box.check();
-    const [args] = await callsTo(page, 'set_quit_on_close');
-    expect(args).toEqual({ on: true });
+    const [value] = await settingValues(page, 'quitOnClose');
+    expect(value).toBe(true);
 
     // Reopened, the box shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -3503,10 +3507,10 @@ test.describe('App', () => {
 
   test('turning it on stores it', async ({ page }) => {
     await opened(page);
-    expect(await callsTo(page, 'set_list_mode')).toHaveLength(0);
+    expect(await settingValues(page, 'listMode')).toHaveLength(0);
     await page.keyboard.press('f');
     await expect(rows(page)).toHaveCount(1);
-    expect(await callsTo(page, 'set_list_mode')).toEqual([{ on: true }]);
+    expect(await settingValues(page, 'listMode')).toEqual([true]);
   });
 
   /**
@@ -3549,7 +3553,7 @@ test.describe('App', () => {
    * `F` works the instant `<svelte:window>` is listening, and `get_settings` is
    * a round trip. Without a supersession stamp the read — which describes the
    * world *before* the keystroke — lands afterwards and puts the calendar back,
-   * having also silently disagreed with the row `set_list_mode` wrote in the
+   * having also silently disagreed with the row `listMode` wrote in the
    * meantime. The user sees the key not working.
    *
    * The read is armed through `addInitScript` rather than through the harness,
@@ -3570,7 +3574,7 @@ test.describe('App', () => {
     await expect(rows(page), 'the stale read undid the keystroke').toHaveCount(1);
     await expect(toggle(page)).toHaveAttribute('aria-pressed', 'true');
     // …and the write that keystroke made is what survives to the next launch.
-    expect(await callsTo(page, 'set_list_mode')).toEqual([{ on: true }]);
+    expect(await settingValues(page, 'listMode')).toEqual([true]);
   });
 
   /**
@@ -3639,7 +3643,7 @@ test.describe('App', () => {
       // cannot make: a view that simply has no list to draw would satisfy the
       // assertions above while the preference had already been flipped
       // underneath it. Proved by an absence, per testing standard §7.
-      expect(await callsTo(page, 'set_list_mode')).toHaveLength(0);
+      expect(await settingValues(page, 'listMode')).toHaveLength(0);
 
       // Back to a view that has one, and it is still a grid.
       await page.keyboard.press('2');
@@ -5328,8 +5332,8 @@ test.describe('App: zooming the hours', () => {
   const colHeight = (page: Page) =>
     page.locator('.col').first().evaluate((el) => el.getBoundingClientRect().height);
   const lastStored = (page: Page) => page.evaluate(() => {
-    const writes = window.__harness.calls.filter((c) => c.cmd === 'set_hour_height');
-    return writes.length ? writes[writes.length - 1].args : null;
+    const writes = window.__harness.settingValues('hourHeight');
+    return writes.length ? writes[writes.length - 1] : null;
   });
 
   test('Ctrl+= zooms the hours, and the height is kept for next time', async ({ page }) => {
@@ -5346,7 +5350,7 @@ test.describe('App: zooming the hours', () => {
     await expect.poll(() => colHeight(page)).toBe(109 * 24); // 109.375, drawn and stored at 109
 
     // Stored once the keys have gone quiet — whole pixels, the final value.
-    await expect.poll(() => lastStored(page), { timeout: 3000 }).toEqual({ px: 109 });
+    await expect.poll(() => lastStored(page), { timeout: 3000 }).toBe(109);
 
     // And read back on the next launch: the stub keeps its settings for the tab.
     await page.reload();
@@ -5410,14 +5414,14 @@ test.describe("App: showing today's date", () => {
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Menu bar' }).click();
 
-    await page.evaluate(() => window.__harness.holdNextMenubarCall('set_menubar_preferences'));
+    await page.evaluate(() => window.__harness.holdNextMenubarCall('menubarPreferences'));
     await modal.getByLabel('Popup view').selectOption('day');
     await expect(modal.getByTestId('menubar-view-note')).toHaveText('Applying…');
     await expect(modal.getByLabel('Popup view')).toBeDisabled();
     await expect(modal.getByLabel('Show meeting title and countdown')).toBeDisabled();
     await expect(modal.getByLabel('Show Join before a meeting')).toBeDisabled();
 
-    await page.evaluate(() => window.__harness.releaseMenubarCall('set_menubar_preferences'));
+    await page.evaluate(() => window.__harness.releaseMenubarCall('menubarPreferences'));
     await expect(modal.getByTestId('menubar-view-note')).toHaveText('Saved');
     await expect(modal.getByLabel('Popup view')).toBeEnabled();
     await expect(modal.getByLabel('Popup view')).toHaveValue('day');
@@ -5434,8 +5438,7 @@ test.describe("App: showing today's date", () => {
     await modal.getByRole('tab', { name: 'Menu bar' }).click();
     await modal.getByLabel('Show Join before a meeting').selectOption('15');
     await modal.getByLabel('Show meeting title and countdown').uncheck();
-    const calls = await page.evaluate(() => window.__harness.calls
-      .filter(c => c.cmd === 'set_menubar_preferences').map(c => c.args));
+    const calls = await page.evaluate(() => window.__harness.settingValues('menubarPreferences'));
     expect(calls).toEqual([
       { dayView: false, label: true, joinMinutes: 15 },
       { dayView: false, label: false, joinMinutes: 15 },
@@ -5458,8 +5461,7 @@ test.describe("App: showing today's date", () => {
     await modal.getByLabel('Popup view').selectOption('day');
     await modal.getByLabel('Show Join before a meeting').selectOption('15');
     await modal.getByLabel('Show meeting title and countdown').uncheck();
-    const calls = await page.evaluate(() => window.__harness.calls
-      .filter(c => c.cmd === 'set_menubar_preferences').map(c => c.args));
+    const calls = await page.evaluate(() => window.__harness.settingValues('menubarPreferences'));
     expect(calls).toEqual([
       { dayView: true, label: true, joinMinutes: 5 },
       { dayView: true, label: true, joinMinutes: 15 },
@@ -5510,7 +5512,7 @@ test.describe("App: showing today's date", () => {
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Menu bar' }).click();
 
-    await page.evaluate(() => window.__harness.holdNextMenubarCall('set_menubar_preferences'));
+    await page.evaluate(() => window.__harness.holdNextMenubarCall('menubarPreferences'));
     await modal.getByLabel('Show meeting title and countdown').uncheck();
 
     await expect(modal.getByTestId('menubar-label-note')).toHaveText('Applying…');
@@ -5518,7 +5520,7 @@ test.describe("App: showing today's date", () => {
     // cannot race the first.
     await expect(modal.getByLabel('Show Join before a meeting')).toBeDisabled();
 
-    await page.evaluate(() => window.__harness.releaseMenubarCall('set_menubar_preferences'));
+    await page.evaluate(() => window.__harness.releaseMenubarCall('menubarPreferences'));
     await expect(modal.getByTestId('menubar-label-note')).toHaveText('Saved');
     await expect(modal.getByLabel('Show Join before a meeting')).toBeEnabled();
   });
@@ -5640,8 +5642,7 @@ test.describe("App: showing today's date", () => {
     await modal.getByLabel('Earlier today').selectOption('off');
     await expect(modal.getByTestId('menubar-sections-note')).toHaveText('Saved');
 
-    const calls = await page.evaluate(() => window.__harness.calls
-      .filter((c) => c.cmd === 'set_menubar_sections').map((c) => c.args));
+    const calls = await page.evaluate(() => window.__harness.settingValues('menubarSections'));
     expect(calls).toEqual([
       { earlier: 'folded', tomorrow: true, daysAhead: 2 },
       { earlier: 'folded', tomorrow: false, daysAhead: 2 },
@@ -5672,9 +5673,9 @@ test.describe("App: showing today's date", () => {
 
     await box.check();
     const calls = await page.evaluate(
-      () => window.__harness.calls.filter((c) => c.cmd === 'set_show_date').map((c) => c.args),
+      () => window.__harness.settingValues('showDate'),
     );
-    expect(calls).toEqual([{ on: true }]);
+    expect(calls).toEqual([true]);
     // And it says so beside the box — the save was always real; the answer
     // went to the foot of the modal, which reads as no answer.
     await expect(modal.getByTestId('show-date-note')).toHaveText('Saved');
@@ -5730,9 +5731,7 @@ test.describe('the tasks sidebar', () => {
    *  once is that wide again tomorrow. Measured through the separator's own
    *  `aria-valuenow`: the panel's box carries its 1px border as well. */
   const widthCalls = (page: import('@playwright/test').Page) =>
-    page.evaluate(() => (window as any).__harness.calls
-      .filter((c: { cmd: string }) => c.cmd === 'set_tasks_width')
-      .map((c: { args: { px: number } }) => c.args.px));
+    page.evaluate(() => (window as any).__harness.settingValues('tasksWidth'));
 
   test('the sidebar is resized by dragging its edge, and the width is stored', async ({ page }) => {
     const side = await openTasks(page);

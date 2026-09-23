@@ -248,139 +248,76 @@ export type AppSettings = {
 export const getSettings = () => invoke<AppSettings>('get_settings');
 
 /**
- * Stores a new sync interval and answers with the settings as they now are.
+ * Everything `setSetting` stores, keyed as the backend's `settings::Setting`
+ * spells it — the `AppSettings` field each lands in wherever there is one.
+ * The grouped keys store several fields as one write, so a failure can never
+ * leave half of one decision behind.
  *
- * **Rejects below the floor rather than clamping**, and the rejection is the
- * point: a value accepted and then quietly changed is worse than one turned
- * down. The form refuses first, so this is the second of two guards rather
- * than the only one — but it is the one that holds if the form ever forgets.
+ * Why each is refused, clamped or applied at once is documented once, on the
+ * Rust variant; the backend answers every key with the settings now in force.
  */
-export const setSyncInterval = (ms: number) =>
-  invoke<AppSettings>('set_sync_interval', { ms });
+export type SettingValues = {
+  /** Refused below `minSyncIntervalMs`, never clamped. */
+  syncIntervalMs: number;
+  /** `null` turns the second clock off. */
+  secondTimezone: string | null;
+  weatherEnabled: boolean;
+  photonPlaces: boolean;
+  notificationsEnabled: boolean;
+  taskNotificationsEnabled: boolean;
+  trayIcon: boolean;
+  appearance: Appearance;
+  windowFrame: WindowFrame;
+  quitOnClose: boolean;
+  startOnLogin: StartOnLogin;
+  /** `[]` is the feature turned off. */
+  fallbackReminderMinutes: number[];
+  /** `null` clears the choice. */
+  defaultCalendarId: number | null;
+  defaultEventDurationMinutes: number;
+  interfaceScalePercent: number;
+  appearancePreferences: {
+    backgroundTransparency: number;
+    eventTransparency: number;
+    eventCornerStyle: EventCornerStyle;
+    /** Absent means "the same as the active background". */
+    inactiveBackgroundTransparency?: number;
+  };
+  listMode: boolean;
+  showDate: boolean;
+  menubarLabelFormat: string;
+  menubarDateFormat: { format: AppSettings['menubarDateFormat']; custom: string };
+  menubarPreferences: { dayView: boolean; label: boolean; joinMinutes: number };
+  menubarDayView: boolean;
+  menubarSections: { earlier: 'folded' | 'off'; tomorrow: boolean; daysAhead: number };
+  /** Clamped rather than refused: the value comes off a gesture. */
+  hourHeight: number;
+  /** Clamped rather than refused: the value comes off a drag. */
+  tasksWidth: number;
+  dateFormat: DateFormat;
+  timeFormat: TimeFormat;
+  temperatureUnit: TemperatureUnit;
+  /** Also leaves rolling mode. */
+  weekStart: WeekStartDay;
+  weekStartsToday: boolean;
+  weekViewDays: WeekViewDays;
+  visibleHours: { start: number; end: number };
+  combineIdenticalEvents: boolean;
+  /** Also leaves "Last view" mode. */
+  defaultView: View;
+  defaultViewFollowsLast: boolean;
+  lastView: View;
+};
 
-export const setNotificationsEnabled = (on: boolean) =>
-  invoke<AppSettings>('set_notifications_enabled', { on });
+/** Stores one setting and answers with the settings now in force. */
+export const setSetting = <K extends keyof SettingValues>(key: K, value: SettingValues[K]) =>
+  invoke<AppSettings>('set_setting', { setting: { key, value } });
 
-/** The task half of the switch above (#137). */
-export const setTaskNotificationsEnabled = (on: boolean) =>
-  invoke<AppSettings>('set_task_notifications_enabled', { on });
-
-/** Stores the tray-icon preference; the backend also applies it to the
- *  running tray immediately, so the icon reacts to the click. */
-/** Stores whether today's date is shown. The backend redresses the tray on
- *  the spot and rewrites the widget's feed, so the choice shows on both
- *  surfaces without waiting for either one's tick. */
-export const setShowDate = (on: boolean) =>
-  invoke<AppSettings>('set_show_date', { on });
-
-export const setTrayIcon = (on: boolean) =>
-  invoke<AppSettings>('set_tray_icon', { on });
-
-/** Stores the palette choice. The backend repaints on the spot — it emits the
- *  same `theme-changed` event the Omarchy theme watcher does, so there is one
- *  repaint path rather than two, and no restart. */
-export const setAppearance = (appearance: Appearance) =>
-  invoke<AppSettings>('set_appearance', { appearance });
-
-/** Stores the frame choice. The backend redecorates the window on the spot,
- *  so there is nothing to wait for and no restart. */
-export const setWindowFrame = (frame: WindowFrame) =>
-  invoke<AppSettings>('set_window_frame', { frame });
-
-/** Stores the close-behaviour preference. Takes effect on the next close, not
- *  the next launch — the backend keeps its own copy of this one for the
- *  window handler to read. */
-export const setQuitOnClose = (on: boolean) =>
-  invoke<AppSettings>('set_quit_on_close', { on });
-
-/** Stores the start-on-login choice; the backend registers or unregisters
- *  the launch entry in the same call, so *that* half is true the moment the
- *  modal reports it. Whether the entry opens a window is read at the next
- *  launch, which is the only place the question can be asked. */
-export const setStartOnLogin = (mode: StartOnLogin) =>
-  invoke<AppSettings>('set_start_on_login', { mode });
-
-/** Stores the weather preference; a turn-on also fetches now, backend-side,
- *  so the headers change while the modal is still open. */
 /** Sets the forecast's place by name, or clears it with `null`. Refused,
  *  with a sentence to show, for a name the geocoder does not know. */
 export const setWeatherLocation = (name: string | null) =>
   invoke<AppSettings>('set_weather_location', { name });
 
-export const setWeatherEnabled = (on: boolean) =>
-  invoke<AppSettings>('set_weather_enabled', { on });
-
-/** Stores whether Photon may be queried from Location. History suggestions
- *  ignore this — they never leave the machine. */
-export const setPhotonPlaces = (on: boolean) =>
-  invoke<AppSettings>('set_photon_places', { on });
-
-/** Stores the temperature unit. Nothing is refetched: the cache is already
- *  unrounded Celsius regardless of this setting, so the headers just round
- *  differently on the next paint. */
-export const setTemperatureUnit = (unit: TemperatureUnit) =>
-  invoke<AppSettings>('set_temperature_unit', { unit });
-
-/** Stores the clock format. Nothing is refused: `settings::TimeFormat` has two
- *  variants and the select offers both, so there is no third value to turn
- *  down — see the note on `set_time_format`. */
-export const setTimeFormat = (format: TimeFormat) =>
-  invoke<AppSettings>('set_time_format', { format });
-
-/** Stores a fixed view for OmaCal to open on and leaves "Last view" mode —
- *  `set_week_start`'s shape: the backend clears `defaultViewFollowsLast` in
- *  the same write. Nothing is refused: the select offers exactly the five
- *  variants `settings::DefaultView` has. */
-export const setDefaultView = (view: View) =>
-  invoke<AppSettings>('set_default_view', { view });
-
-/** Turns "Last view" mode on or off, preserving whichever `defaultView` was
- *  in force before — `setWeekStartsToday`'s shape for `setWeekStart`. */
-export const setDefaultViewFollowsLast = (on: boolean) =>
-  invoke<AppSettings>('set_default_view_follows_last', { on });
-
-/** Stores the view the switcher was most recently on, called by `App`'s
- *  `pick` on every switch regardless of mode. */
-export const setLastView = (view: View) =>
-  invoke<AppSettings>('set_last_view', { view });
-
-/** Stores the day a week begins on. Nothing is refused: the select offers
- *  exactly the three variants `settings::WeekStart` has. */
-export const setWeekStart = (start: WeekStartDay) =>
-  invoke<AppSettings>('set_week_start', { start });
-
-/** Enters or leaves the rolling Week view without changing the concrete day
- *  used to align Month, Year and Big Year. */
-export const setWeekStartsToday = (on: boolean) =>
-  invoke<AppSettings>('set_week_starts_today', { on });
-
-/** Stores the rolling Week view's total column count. */
-export const setWeekViewDays = (days: WeekViewDays) =>
-  invoke<AppSettings>('set_week_view_days', { days });
-
-/** Stores the filmstrip toggle. Nothing is refused: unlike the sync interval
- *  there is no value of a boolean the app has to protect anything from. */
-export const setListMode = (on: boolean) =>
-  invoke<AppSettings>('set_list_mode', { on });
-
-/** Stores the hour height. The backend clamps rather than refuses — the
- *  value comes off a gesture, and "a little past the end" means the end. */
-/** Stores the tasks sidebar's width. Clamped backend-side, like the hour
- *  height: the number comes off a drag, so the end of the range is a better
- *  answer than an error under somebody's hand. */
-export const setTasksWidth = (px: number) =>
-  invoke<AppSettings>('set_tasks_width', { px });
-
-export const setHourHeight = (px: number) =>
-  invoke<AppSettings>('set_hour_height', { px });
-
-/** Stores the fallback reminder rows. The backend refuses out-of-bounds
- *  values with the limit named (fallback spec §3); `[]` is accepted and is
- *  the feature turned off. */
-export const setFallbackReminders = (minutes: number[]) =>
-  invoke<AppSettings>('set_fallback_reminders', { minutes });
-
-/** Stores the default calendar for new events; `null` clears the choice. */
 /** Every zone the picker may offer — jiff's copy of the IANA database, the
  *  same authority the setter validates against. */
 export const listTimezones = () => invoke<string[]>('list_timezones');
@@ -393,60 +330,8 @@ export const listTimezones = () => invoke<string[]>('list_timezones');
 export const setDisplayTimezone = (tz: string | null) =>
   invoke<void>('set_display_timezone', { tz });
 
-/**
- * Stores the second time zone; `null` turns the feature off. No restart,
- * unlike the display zone: nothing process-level captures this one — the
- * webview converts at render time from the IANA name — so the settings that
- * come back are already the settings in force.
- */
-export const setSecondTimezone = (tz: string | null) =>
-  invoke<AppSettings>('set_second_timezone', { tz });
-
-export const setDefaultCalendar = (id: number | null) =>
-  invoke<AppSettings>('set_default_calendar', { id });
-
-/** Stores the interface scale and applies it to the window at once (#138). */
-export const setInterfaceScale = (percent: number) =>
-  invoke<AppSettings>('set_interface_scale', { percent });
-
-/** Stores the free-form default length for new timed events, in minutes. */
-export const setDefaultEventDuration = (minutes: number) =>
-  invoke<AppSettings>('set_default_event_duration', { minutes });
-
-/** Stores the canvas opacity, event-fill opacity, and event corner shape in a
- *  single transaction. Settings previews locally while a slider moves and
- *  invokes this once when that interaction commits. */
-export const setAppearancePreferences = (
-  backgroundTransparency: number,
-  eventTransparency: number,
-  eventCornerStyle: EventCornerStyle,
-  inactiveBackgroundTransparency: number = backgroundTransparency,
-) => invoke<AppSettings>('set_appearance_preferences', {
-  backgroundTransparency,
-  inactiveBackgroundTransparency,
-  eventTransparency,
-  eventCornerStyle,
-});
-
 /** Minutes, as the General tab shows them. Stored in milliseconds because
  *  that is what `sync_loop` compares against a clock. */
 export const minutesOf = (ms: number): number => Math.round(ms / 60_000);
 export const msOfMinutes = (min: number): number => Math.round(min * 60_000);
 
-export const setDateFormatPreference = (format: DateFormat) => invoke<AppSettings>('set_date_format', { format });
-
-
-export const setMenubarPreferences = (dayView: boolean, label: boolean, joinMinutes: number) =>
-  invoke<AppSettings>('set_menubar_preferences', { dayView, label, joinMinutes });
-export const setMenubarDayView = (dayView: boolean) =>
-  invoke<AppSettings>('set_menubar_day_view', { dayView });
-export const setMenubarSections = (earlier: 'folded' | 'off', tomorrow: boolean, daysAhead: number) =>
-  invoke<AppSettings>('set_menubar_sections', { earlier, tomorrow, daysAhead });
-
-export const setVisibleHours = (start: number, end: number) => invoke<AppSettings>("set_visible_hours", { start, end });
-
-export const setMenubarDateFormat = (format: AppSettings['menubarDateFormat'], custom: string) => invoke<AppSettings>('set_menubar_date_format', { format, custom });
-
-export const setMenubarLabelFormat = (template: string) => invoke<AppSettings>('set_menubar_label_format', { template });
-
-export const setCombineIdenticalEvents = (on: boolean) => invoke<AppSettings>("set_combine_identical_events", { on });

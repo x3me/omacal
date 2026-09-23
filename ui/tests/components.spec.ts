@@ -1429,13 +1429,13 @@ test.describe('Header', () => {
     expect(await page.evaluate(() => ({
       data: document.documentElement.dataset.backgroundTransparency,
       fill: document.documentElement.style.getPropertyValue('--background-fill-opacity'),
-      calls: (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      calls: (window as any).__harness.settingValues('appearancePreferences').length,
     }))).toEqual({ data: '40', fill: '60%', calls: 0 });
 
     // Releasing/committing stores the whole appearance tuple once.
     await background.evaluate((el) => el.dispatchEvent(new Event('change', { bubbles: true })));
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(1);
 
     await events.evaluate((el) => {
@@ -1444,15 +1444,15 @@ test.describe('Header', () => {
       el.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(2);
     await modal.getByRole('radio', { name: 'Square' }).check();
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').length,
+      (window as any).__harness.settingValues('appearancePreferences').length,
     )).toBe(3);
 
     const last = await page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_appearance_preferences').pop()?.args);
+      (window as any).__harness.settingValues('appearancePreferences').pop());
     expect(last).toEqual({
       backgroundTransparency: 40,
       inactiveBackgroundTransparency: 0,
@@ -1492,9 +1492,8 @@ test.describe('Header', () => {
     await toggle.uncheck();
     await expect(toggle).not.toBeChecked();
 
-    const calls = await page.evaluate(() => (window as any).__harness.calls);
-    const call = calls.find((c: any) => c.cmd === 'set_weather_enabled');
-    expect(call.args).toMatchObject({ on: false });
+    const values = await page.evaluate(() => (window as any).__harness.settingValues('weatherEnabled'));
+    expect(values[0]).toBe(false);
   });
 
   /** Photon (PR #125 review): off until asked, because the query leaves
@@ -1511,9 +1510,8 @@ test.describe('Header', () => {
     await toggle.check();
     await expect(toggle).toBeChecked();
 
-    const calls = await page.evaluate(() => (window as any).__harness.calls);
-    const call = calls.find((c: any) => c.cmd === 'set_photon_places');
-    expect(call.args).toMatchObject({ on: true });
+    const values = await page.evaluate(() => (window as any).__harness.settingValues('photonPlaces'));
+    expect(values[0]).toBe(true);
   });
 
   /**
@@ -1547,8 +1545,7 @@ test.describe('Header', () => {
     // Each choice written through the command, in order, and the select's
     // value is what the backend answered rather than what the browser
     // painted — the same rule every other control here follows.
-    const calls = await page.evaluate(() => (window as any).__harness.calls);
-    expect(calls.filter((c: any) => c.cmd === 'set_start_on_login').map((c: any) => c.args.mode))
+    expect(await page.evaluate(() => (window as any).__harness.settingValues('startOnLogin')))
       .toEqual(['background', 'off']);
   });
 
@@ -1581,10 +1578,9 @@ test.describe('Header', () => {
     await modal.getByLabel('Remove fallback reminder').first().click();
     await expect(modal.getByLabel('Fallback amount')).toHaveCount(1);
     const calls = await page.evaluate(
-      () => (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_fallback_reminders'),
+      () => (window as any).__harness.settingValues('fallbackReminderMinutes'),
     );
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args.minutes).toEqual([10]);
+    expect(calls).toEqual([[10]]);
   });
 
   test('adding a fallback row appends and saves it', async ({ page }) => {
@@ -1594,9 +1590,9 @@ test.describe('Header', () => {
     await modal.getByRole('button', { name: '+ Add notification' }).click();
     await expect(modal.getByLabel('Fallback amount')).toHaveCount(3);
     const calls = await page.evaluate(
-      () => (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_fallback_reminders'),
+      () => (window as any).__harness.settingValues('fallbackReminderMinutes'),
     );
-    expect(calls[calls.length - 1].args.minutes).toEqual([60, 10, 15]);
+    expect(calls[calls.length - 1]).toEqual([60, 10, 15]);
   });
 
   test('General offers the default calendar, writable ones only', async ({ page }) => {
@@ -1611,10 +1607,9 @@ test.describe('Header', () => {
 
     await pick.selectOption({ label: 'Team' });
     const calls = await page.evaluate(
-      () => (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_default_calendar'),
+      () => (window as any).__harness.settingValues('defaultCalendarId'),
     );
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args.id).toBe(2);
+    expect(calls).toEqual([2]);
   });
 
   test('General saves a manually entered default meeting duration', async ({ page }) => {
@@ -1627,11 +1622,9 @@ test.describe('Header', () => {
     await modal.getByRole('button', { name: 'Save default meeting duration' }).click();
 
     const calls = await page.evaluate(
-      () => (window as any).__harness.calls.filter(
-        (c: any) => c.cmd === 'set_default_event_duration'),
+      () => (window as any).__harness.settingValues('defaultEventDurationMinutes'),
     );
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args.minutes).toBe(45);
+    expect(calls).toEqual([45]);
 
     await page.keyboard.press('Escape');
     const again = await openSettings(page);
@@ -1756,8 +1749,8 @@ test.describe('Header', () => {
     // Stored under the command's own name — and no restart note appears,
     // because none is coming.
     const call = await page.evaluate(() =>
-      (window as any).__harness.calls.find((c: { cmd: string }) => c.cmd === 'set_second_timezone')?.args);
-    expect(call).toEqual({ tz: 'Asia/Kolkata' });
+      (window as any).__harness.settingValues('secondTimezone')[0]);
+    expect(call).toBe('Asia/Kolkata');
     await expect(page.getByTestId('tz-note')).toHaveCount(0);
 
     // The stored choice survives a reopen, and clearing sends null — the
@@ -1769,8 +1762,8 @@ test.describe('Header', () => {
     await page.getByRole('option', { name: 'Off', exact: true }).click();
     await again.getByRole('button', { name: 'Apply', exact: true }).click();
     const second = await page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: { cmd: string }) => c.cmd === 'set_second_timezone').pop()?.args);
-    expect(second).toEqual({ tz: null });
+      (window as any).__harness.settingValues('secondTimezone').pop());
+    expect(second).toBeNull();
   });
 
   test('time-zone combobox cancels invalid text and supports keyboard navigation', async ({ page }) => {
@@ -1915,8 +1908,8 @@ test.describe('Header', () => {
 
     await tasks.uncheck();
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_notifications_enabled').pop()?.args,
-    )).toEqual({ on: false });
+      (window as any).__harness.settingValues('taskNotificationsEnabled').pop(),
+    )).toBe(false);
     await page.keyboard.press('Escape');
     const again = await openSettings(page, 'Notifications');
     await expect(again.getByLabel('Announce tasks when they are due')).not.toBeChecked();

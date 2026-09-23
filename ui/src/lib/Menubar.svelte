@@ -6,7 +6,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
   import { applyPalette } from './theme';
-  import { setMenubarDayView } from './settings';
+  import { setSetting } from './settings';
   import { visibleRange, layout, agendaSections, progress, joinable, uniqueAllDay, type Event } from '../../../packaging/omarchy-plugin/Timeline.mjs';
 
   type Panel = { visible_start_ms?: number; visible_end_ms?: number; agenda_days?: { date_label: string; events: Event[] }[]; truncated?: boolean; day_start_ms: number; day_end_ms: number; timezone: string;
@@ -63,7 +63,7 @@
   }
   async function changeView(day: boolean) {
     if (!panel) return;
-    try { await setMenubarDayView(day); initialScroll = false; await refresh(); }
+    try { await setSetting('menubarDayView', day); initialScroll = false; await refresh(); }
     catch (e) { error = String(e); }
   }
   $effect(() => {

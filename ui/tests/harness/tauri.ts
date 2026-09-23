@@ -104,14 +104,14 @@ export type Harness = {
    *  it is parked is the only way to produce that ordering deliberately. */
   /** Park the next menu-bar write instead of answering it.
    *
-   *  What the *Applying…* state needs: `set_menubar_preferences` rewrites the
+   *  What the *Applying…* state needs: `menubarPreferences` rewrites the
    *  feed and then pokes the Omarchy widget over IPC, waiting up to two
    *  seconds for it, and the pane now says so while that happens. A stub that
    *  answers instantly cannot produce the pause the message exists for.
    *  Mirrors `holdNextCalendarCall`; it is not a second mechanism. */
-  holdNextMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format' | 'set_menubar_sections'): void;
+  holdNextMenubarCall(key: 'menubarPreferences' | 'menubarLabelFormat' | 'menubarSections'): void;
   /** Answer the parked menu-bar write and let its `.then` chain run. */
-  releaseMenubarCall(cmd: 'set_menubar_preferences' | 'set_menubar_label_format' | 'set_menubar_sections'): Promise<void>;
+  releaseMenubarCall(key: 'menubarPreferences' | 'menubarLabelFormat' | 'menubarSections'): Promise<void>;
   holdNextSettings(): void;
   /** Park the next full sync to observe the UI during reconciliation. */
   holdNextSync(): void;
@@ -147,6 +147,9 @@ export type Harness = {
   exportAnswers(path: string | null): void;
   /** Every command the app has invoked, in order. */
   calls: { cmd: string; args: unknown }[];
+  /** The values `set_setting` was sent for one key, oldest first — what a
+   *  spec reads where it once filtered `calls` by a per-setting command. */
+  settingValues(key: string): any[];
 };
 
 /** What the `export_event` stub answers. A spec sets it through
@@ -227,6 +230,11 @@ async function whenListening(event: string, polls = 300): Promise<void> {
 
 const harness: Harness = {
   calls: [],
+  settingValues(key) {
+    return harness.calls
+      .filter((c) => c.cmd === 'set_setting' && (c.args as any).setting.key === key)
+      .map((c) => (c.args as any).setting.value);
+  },
   exportAnswers(path) {
     exportAnswer = path;
   },
@@ -295,12 +303,12 @@ const harness: Harness = {
     // same reason `release` above waits.
     await new Promise((r) => setTimeout(r, 50));
   },
-  holdNextMenubarCall(cmd) {
-    holdMenubarOnce = cmd;
+  holdNextMenubarCall(key) {
+    holdMenubarOnce = key;
   },
-  async releaseMenubarCall(cmd) {
-    parkedMenubar.get(cmd)?.();
-    parkedMenubar.delete(cmd);
+  async releaseMenubarCall(key) {
+    parkedMenubar.get(key)?.();
+    parkedMenubar.delete(key);
     // `release`'s reasoning: let the resolution's own `.then` — the note
     // flipping from Applying… to Saved, `menubarBusy` clearing — actually
     // run before the spec asserts on it.
@@ -405,11 +413,11 @@ function calendarResult<T>(cmd: string, ok: T): Promise<T> {
 /** The value, or a promise parked until `releaseMenubarCall` — the write has
  *  already been applied to the stub's settings either way, exactly as the
  *  backend applies it before poking the widget. */
-function heldMenubar<T>(cmd: string, value: T): T | Promise<T> {
-  if (holdMenubarOnce !== cmd) return value;
+function heldMenubar<T>(key: string, value: T): T | Promise<T> {
+  if (holdMenubarOnce !== key) return value;
   holdMenubarOnce = null;
   return new Promise<T>((resolve) => {
-    parkedMenubar.set(cmd, () => resolve(value));
+    parkedMenubar.set(key, () => resolve(value));
   });
 }
 
@@ -1059,19 +1067,6 @@ export function installTauriStub(scenario: string): Harness {
         }
         return { ...settings };
       }
-      case 'set_sync_interval': {
-        // The backend refuses below the floor rather than clamping, and so
-        // does this: a stub that accepted anything would let a form which
-        // forgot its own guard pass every spec.
-        if ((args.ms as number) < settings.minSyncIntervalMs) {
-          throw new Error(
-            "omacal will not sync more often than once a minute — Google's quota is finite " +
-            'and a desktop app has no business polling faster than that',
-          );
-        }
-        settings = saveSettings({ ...settings, syncIntervalMs: args.ms as number });
-        return { ...settings };
-      }
       // A short list, not the real ~600: the spec's premise is that choosing
       // one and applying sends it, not that jiff's database is complete.
       case 'list_timezones':
@@ -1082,17 +1077,6 @@ export function installTauriStub(scenario: string): Harness {
         // replies, which is exactly what lets a spec see the "Restarting…"
         // state the window would otherwise take with it.
         return null;
-      case 'set_second_timezone': {
-        // The backend's own refusal, mirrored against the stub's short list
-        // so a spec can watch the form surface it; the real validator asks
-        // jiff the same question of the same name.
-        const tz = (args.tz as string | null) ?? null;
-        if (tz !== null && !STUB_TIMEZONES.includes(tz)) {
-          throw new Error(`omacal does not know the time zone "${tz}"`);
-        }
-        settings = saveSettings({ ...settings, secondTimezone: tz });
-        return { ...settings };
-      }
       // Empty on purpose: App-level scenarios stay weatherless, so no
       // existing spec or screenshot grows a sky it never asked for. The
       // rendering itself is proven component-side, where the fixture hands
@@ -1119,140 +1103,83 @@ export function installTauriStub(scenario: string): Harness {
         settings = saveSettings({ ...settings, weatherLocation: resolved });
         return { ...settings };
       }
-      case 'set_weather_enabled':
-        settings = saveSettings({ ...settings, weatherEnabled: args.on as boolean });
-        return { ...settings };
-      case 'set_photon_places':
-        settings = saveSettings({ ...settings, photonPlaces: args.on as boolean });
-        return { ...settings };
-      case 'set_temperature_unit':
-        settings = saveSettings({ ...settings, temperatureUnit: args.unit as TemperatureUnit });
-        return { ...settings };
-      case 'set_start_on_login':
-        settings = saveSettings({ ...settings, startOnLogin: args.mode as StartOnLogin });
-        return { ...settings };
-      case 'set_appearance':
-        settings = saveSettings({ ...settings, appearance: args.appearance as Appearance });
-        return { ...settings };
-      case 'set_window_frame':
-        settings = saveSettings({ ...settings, windowFrame: args.frame as WindowFrame });
-        return { ...settings };
-      case 'set_quit_on_close':
-        settings = saveSettings({ ...settings, quitOnClose: args.on as boolean });
-        return { ...settings };
-      case 'set_task_notifications_enabled':
-        settings = saveSettings({ ...settings, taskNotificationsEnabled: args.on as boolean });
-        return settings;
-      case 'set_notifications_enabled':
-        settings = saveSettings({ ...settings, notificationsEnabled: args.on as boolean });
-        return { ...settings };
-      case 'set_combine_identical_events':
-        settings = saveSettings({ ...settings, combineIdenticalEvents: args.on as boolean });
-        return settings;
-      case 'set_list_mode':
-        settings = saveSettings({ ...settings, listMode: args.on as boolean });
-        return { ...settings };
-      case 'set_menubar_preferences':
-        settings = saveSettings({ ...settings, menubarDayView: args.dayView as boolean,
-          menubarLabel: args.label as boolean, menubarJoinMinutes: args.joinMinutes as number });
-        return heldMenubar(cmd, settings);
-      case 'set_menubar_sections':
-        settings = saveSettings({ ...settings,
-          menubarEarlier: args.earlier as 'folded' | 'off', menubarTomorrow: args.tomorrow as boolean, menubarDaysAhead: args.daysAhead as number });
-        return heldMenubar(cmd, settings);
-      case 'set_show_date':
-        settings = saveSettings({ ...settings, showDate: args.on as boolean });
-        return { ...settings };
-      case 'set_tasks_width':
-        settings = saveSettings({ ...settings, tasksWidth: args.px as number });
-        return settings;
-      case 'set_hour_height':
-        // The backend clamps; the stub stores what it was told, so a spec
-        // reads back exactly the value the app asked to keep.
-        settings = saveSettings({ ...settings, hourHeight: args.px as number });
-        return { ...settings };
-      case 'set_default_view':
-        settings = saveSettings({
-          ...settings, defaultView: args.view as View, defaultViewFollowsLast: false,
-        });
-        return { ...settings };
-      case 'set_default_view_follows_last':
-        settings = saveSettings({ ...settings, defaultViewFollowsLast: args.on as boolean });
-        return { ...settings };
-      case 'set_last_view':
-        settings = saveSettings({ ...settings, lastView: args.view as View });
-        return { ...settings };
-      case 'set_week_start':
-        settings = saveSettings({
-          ...settings, weekStart: args.start as WeekStartDay, weekStartsToday: false,
-        });
-        return { ...settings };
-      case 'set_week_starts_today':
-        settings = saveSettings({ ...settings, weekStartsToday: args.on as boolean });
-        return { ...settings };
-      case 'set_visible_hours':
-        settings = saveSettings({ ...settings, visibleStartHour: args.start as number, visibleEndHour: args.end as number });
-        return settings;
-      case 'set_week_view_days':
-        settings = saveSettings({ ...settings, weekViewDays: args.days as WeekViewDays });
-        return { ...settings };
-      case 'set_menubar_label_format':
-        settings = saveSettings({ ...settings, menubarLabelFormat: args.template as string });
-        return heldMenubar(cmd, settings);
       case 'open_date_format_guide': return null;
       // The backend resolves the address; the stub only records which was asked for.
       case 'open_project_link': return null;
-      case 'set_menubar_date_format':
-        settings = saveSettings({ ...settings, menubarDateFormat: args.format as typeof settings.menubarDateFormat, menubarDateCustom: args.custom as string });
-        return settings;
-      case 'set_date_format':
-        settings = saveSettings({ ...settings, dateFormat: args.format as import('../../src/lib/datefmt').DateFormat });
-        return settings;
-      case 'set_time_format':
-        settings = saveSettings({ ...settings, timeFormat: args.format as TimeFormat });
-        return { ...settings };
-      case 'set_default_calendar':
-        settings = saveSettings({ ...settings, defaultCalendarId: (args.id as number | null) ?? null });
-        return { ...settings };
-      // `settings::set_interface_scale`'s range, and the stored value the
-      // snapshot then carries. The zoom itself is the backend's.
-      case 'set_interface_scale': {
-        const percent = args.percent as number;
-        if (percent < 75 || percent > 200) throw new Error('the interface scale must be between 75 and 200 percent');
-        settings = saveSettings({ ...settings, interfaceScalePercent: percent });
-        return settings;
-      }
-      case 'set_default_event_duration':
-        settings = saveSettings({ ...settings, defaultEventDurationMinutes: args.minutes as number });
-        return { ...settings };
-      case 'set_appearance_preferences': {
-        const backgroundTransparency = args.backgroundTransparency as number;
-        const eventTransparency = args.eventTransparency as number;
-        const inactive = args.inactiveBackgroundTransparency as number ?? backgroundTransparency;
-        if (!Number.isFinite(backgroundTransparency) || backgroundTransparency < 0 || backgroundTransparency > 50
-            || !Number.isFinite(inactive) || inactive < 0 || inactive > 50
-            || eventTransparency < 0 || eventTransparency > 25) {
-          throw new Error('background transparency must be between 0 and 50 percent; event transparency between 0 and 25 percent');
+      // `settings::set_setting`, played: one case, keyed as the backend's
+      // `Setting` enum is. The refusals are the backend's own, mirrored so a
+      // spec can watch the form surface them — a stub that accepted anything
+      // would let a form which forgot its own guard pass every spec.
+      case 'set_setting': {
+        const { key, value } = args.setting as { key: string; value: any };
+        switch (key) {
+          case 'syncIntervalMs':
+            if ((value as number) < settings.minSyncIntervalMs) {
+              throw new Error(
+                "omacal will not sync more often than once a minute — Google's quota is finite " +
+                'and a desktop app has no business polling faster than that',
+              );
+            }
+            break;
+          case 'secondTimezone':
+            // Mirrored against the stub's short list; the real validator
+            // asks jiff the same question of the same name.
+            if (value !== null && !STUB_TIMEZONES.includes(value)) {
+              throw new Error(`omacal does not know the time zone "${value}"`);
+            }
+            break;
+          case 'interfaceScalePercent':
+            // The range, and the stored value the snapshot then carries. The
+            // zoom itself is the backend's.
+            if (value < 75 || value > 200) throw new Error('the interface scale must be between 75 and 200 percent');
+            break;
+          case 'fallbackReminderMinutes':
+            // 5 rows, four weeks, nothing negative.
+            if (value.length > 5) throw new Error('an event can carry at most 5 reminders');
+            if (value.some((m: number) => m < 0 || m > 40_320)) {
+              throw new Error('a reminder must be 0 to 40320 minutes (four weeks) ahead');
+            }
+            break;
+          case 'appearancePreferences': {
+            const { backgroundTransparency: bg, eventTransparency: ev, eventCornerStyle } = value;
+            const inactive = value.inactiveBackgroundTransparency ?? bg;
+            if (!Number.isFinite(bg) || bg < 0 || bg > 50 || !Number.isFinite(inactive) || inactive < 0
+                || inactive > 50 || ev < 0 || ev > 25) {
+              throw new Error('background transparency must be between 0 and 50 percent; event transparency between 0 and 25 percent');
+            }
+            settings = saveSettings({ ...settings, backgroundTransparency: bg,
+              inactiveBackgroundTransparency: inactive, eventTransparency: ev, eventCornerStyle });
+            return { ...settings };
+          }
+          // The grouped keys land in the fields they are grouped from.
+          case 'menubarPreferences':
+            settings = saveSettings({ ...settings, menubarDayView: value.dayView,
+              menubarLabel: value.label, menubarJoinMinutes: value.joinMinutes });
+            return heldMenubar(key, { ...settings });
+          case 'menubarSections':
+            settings = saveSettings({ ...settings, menubarEarlier: value.earlier,
+              menubarTomorrow: value.tomorrow, menubarDaysAhead: value.daysAhead });
+            return heldMenubar(key, { ...settings });
+          case 'menubarDateFormat':
+            settings = saveSettings({ ...settings, menubarDateFormat: value.format, menubarDateCustom: value.custom });
+            return { ...settings };
+          case 'visibleHours':
+            settings = saveSettings({ ...settings, visibleStartHour: value.start, visibleEndHour: value.end });
+            return { ...settings };
+          // A fixed choice leaves its mode, in the same write.
+          case 'weekStart':
+            settings = saveSettings({ ...settings, weekStart: value, weekStartsToday: false });
+            return { ...settings };
+          case 'defaultView':
+            settings = saveSettings({ ...settings, defaultView: value, defaultViewFollowsLast: false });
+            return { ...settings };
         }
-        settings = saveSettings({
-          ...settings,
-          backgroundTransparency,
-          inactiveBackgroundTransparency: inactive,
-          eventTransparency,
-          eventCornerStyle: args.eventCornerStyle as EventCornerStyle,
-        });
-        return { ...settings };
-      }
-      case 'set_fallback_reminders': {
-        const minutes = args.minutes as number[];
-        // The backend's own refusals, mirrored so a spec can watch the form
-        // surface them: 5 rows, four weeks, nothing negative.
-        if (minutes.length > 5) throw new Error('an event can carry at most 5 reminders');
-        if (minutes.some((m) => m < 0 || m > 40_320)) {
-          throw new Error('a reminder must be 0 to 40320 minutes (four weeks) ahead');
-        }
-        settings = saveSettings({ ...settings, fallbackReminderMinutes: minutes });
-        return { ...settings };
+        if (!(key in settings)) throw new Error(`the stub has no setting called ${key}`);
+        // The backend clamps the hour height and the tasks width; the stub
+        // stores what it was told, so a spec reads back exactly the value the
+        // app asked to keep.
+        settings = saveSettings({ ...settings, [key]: value });
+        return heldMenubar(key, { ...settings });
       }
       case 'set_calendar_label':
         return calendarResult(cmd, undefined);
