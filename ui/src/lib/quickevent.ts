@@ -835,7 +835,11 @@ export function quickPreviewRows(
   result: QuickEventResult,
   calendars: Calendar[],
   dateFormat: DateFormat = 'locale',
-  timeFormat?: TimeFormat,
+  // Defaulted rather than optional, as `taskdates.dueLabel`'s is. The optional
+  // form fell back to `toLocaleTimeString`, which `timefmt.ts` exists to rule
+  // out — and only three test call sites ever took that branch; the one real
+  // caller, `QuickEventModal`, always passes `clockFormat()`.
+  timeFormat: TimeFormat = '24h',
 ): Array<{ label: string; value: string }> {
   const v = result.value;
   const start = new Date(`${v.date}T${v.start}:00`);
@@ -845,7 +849,7 @@ export function quickPreviewRows(
   });
   const time = v.isAllDay
     ? 'All day'
-    : timeFormat ? `${formatClock(start.getTime(), timeFormat)}–${formatClock(end.getTime(), timeFormat)}` : `${start.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}–${end.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+    : `${formatClock(start.getTime(), timeFormat)}–${formatClock(end.getTime(), timeFormat)}`;
   const rows = [
     { label: 'Title', value: v.title || '(no title)' },
     { label: 'When', value: `${date} · ${time}` },

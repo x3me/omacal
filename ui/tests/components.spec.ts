@@ -3320,7 +3320,9 @@ test.describe('BigYearRibbon', () => {
 
   test('a span crossing a row shows a continuation marker on both halves', async ({ page }) => {
     await page.goto(show('crossing'));
-    await expect(page.locator('.pill.cont')).toHaveCount(2);
+    // The head is squared on its right, the tail on its left.
+    await expect(page.locator('.pill.cr:not(.cl)')).toHaveCount(1);
+    await expect(page.locator('.pill.cl:not(.cr)')).toHaveCount(1);
   });
 
   // ---- a title appears once, not on every row ------------------------------

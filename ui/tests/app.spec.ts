@@ -7044,7 +7044,7 @@ test('menu-bar date override and meeting template save and survive reopening', a
   await modal.getByRole('link', { name: 'Formatting guide' }).click();
   await modal.getByRole('tab', { name: 'Menu bar', exact: true }).click();
   await modal.getByLabel('Meeting label format').fill('{countdown} · {title}');
-  await expect(modal.getByLabel('Meeting label preview')).toHaveText('Preview: in 5m · Design sync');
+  await expect(modal.getByText(/^Preview: /)).toHaveText('Preview: in 5m · Design sync');
   await modal.getByRole('button', { name: 'Save format', exact: true }).click();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Menu', exact: true }).click();

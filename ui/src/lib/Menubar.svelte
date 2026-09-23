@@ -118,7 +118,7 @@
     {#if !feed}<p class="empty">Loading calendar…</p>
     {:else if panel?.day_view}
       {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel.day_start_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>{/if}
-      <div class="timeline" bind:this={timeline} style:height={`${gridHeight}px`} aria-label="Day calendar">
+      <div class="timeline" bind:this={timeline} style:height={`${gridHeight}px`} role="group" aria-label="Day calendar">
         {#each hours as hour}<div class="hour" style:top={`${(hour - range.start) / (range.end - range.start) * 100}%`}><span>{clock(hour)}</span></div>{/each}
         {#each rows as row}
           <button class="event" class:compact={row.height * gridHeight < 40} class:past={row.event.end_ms <= now} style:top={`${row.top * 100}%`} style:height={`${row.height * gridHeight}px`}
@@ -128,7 +128,7 @@
             <strong>{row.event.title ?? '(no title)'}</strong><small>{clock(row.event.start_ms)} – {clock(row.event.end_ms)}{row.event.conference ? ' · ▣' : ''}</small>
           </button>
         {/each}
-        {#if now >= range.start && now < range.end}<div class="now-line" style:top={`${fraction * 100}%`} aria-label={`Now ${clock(now)}`}><span>{clock(now)}</span></div>{/if}
+        {#if now >= range.start && now < range.end}<div class="now-line" style:top={`${fraction * 100}%`}><span>{clock(now)}</span></div>{/if}
       </div>
     {:else}
       <div class="agenda">

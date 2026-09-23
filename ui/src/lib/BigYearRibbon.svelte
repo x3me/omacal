@@ -191,7 +191,6 @@
               class="pill"
               data-combined-count={ev.copies?.length || undefined}
               style:color={ev.copies?.length ? "var(--text)" : undefined}
-              class:cont={lane.cont_left || lane.cont_right}
               class:cl={lane.cont_left}
               class:cr={lane.cont_right}
               class:lit={isLit(ev)}

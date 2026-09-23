@@ -78,7 +78,7 @@
 >
   <h2>{title}</h2>
   {@render body()}
-  <div class="actions" data-choice-group data-confirm-actions>{@render actions()}</div>
+  <div class="actions" data-choice-group>{@render actions()}</div>
 </div>
 
 <style>

@@ -121,7 +121,7 @@
     {:else}
       <div class="interpretation" aria-live="polite">
         {#if parsed.islands.length > 0}
-          <div class="matched" aria-label="Matched phrases">
+          <div class="matched">
             <span>Matched</span>
             {#each parsed.islands as island, i (`${island.kind}-${island.text}-${i}`)}
               <b title={island.kind}>{island.text}</b>

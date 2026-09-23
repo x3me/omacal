@@ -32,8 +32,15 @@ import type { Lane, MonthPayload, UiEvent, WeekPayload } from './api';
 export const LISTABLE_VIEWS = ['day', 'week', 'month'] as const;
 export type ListableView = (typeof LISTABLE_VIEWS)[number];
 
-/** Month's timed-event reading budget. Shared with keyboard navigation so a
- * cursor can never name a row the grid has already folded into `+N more`. */
+/** How many timed lines a Month cell shows before folding the rest into
+ *  "+N more" — three being what a narrow cell has room for before a title
+ *  stops being legible. Shared with keyboard navigation, so a cursor can never
+ *  name a row the grid has already folded away.
+ *
+ *  **Not the bar lane cap**, though both are three. That one is how many
+ *  all-day *lanes* stack above the timed lines, and it comes from the payload
+ *  (`commands::GRID_LANE_CAP`); this one is the timed lines below them, and
+ *  lives here because the cursor needs it. */
 export const MONTH_GRID_TIMED_LIMIT = 3;
 
 /** Where down the viewport a Today request parks the current hour or row.

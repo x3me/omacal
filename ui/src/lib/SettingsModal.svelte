@@ -1610,7 +1610,7 @@
           {/if}
         </div>
         <p class="hint">Reorder or omit placeholders: {'{title}'}, {'{time}'}, {'{end_time}'}, {'{countdown}'}, {'{calendar}'}. Add your own separators.</p>
-        <p class="hint" aria-label="Meeting label preview">Preview: {meetingLabel(meetingFormat, {
+        <p class="hint">Preview: {meetingLabel(meetingFormat, {
           title: 'Design sync', time: formatClock(SAMPLE_MS, settings?.timeFormat ?? '24h'),
           end_time: formatClock(SAMPLE_MS + 30 * 60000, settings?.timeFormat ?? '24h'), countdown: 'in 5m', calendar: 'Work'
         })}</p>

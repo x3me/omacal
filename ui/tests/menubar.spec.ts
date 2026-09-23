@@ -123,7 +123,7 @@ test('popup shows elapsed time, switches views, renders titles as text, and join
   await page.getByRole('button', { name: 'Day', exact: true }).click();
   await expect(page.getByLabel('Day calendar')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Labor Day', exact: true })).toHaveCount(1);
-  await expect(page.getByLabel('Now 13:22')).toBeVisible();
+  await expect(page.locator('.now-line')).toHaveText('13:22');
   const blocks = page.locator('.event');
   const a = await blocks.nth(1).boundingBox(), b = await blocks.nth(2).boundingBox();
   expect(a && b && a.x + a.width <= b.x).toBeTruthy();
@@ -268,7 +268,8 @@ test('day scrolling accounts for all-day rows and leaves tasks in the same scrol
   const scroll = page.locator('.scroll');
   await expect(page.getByLabel('Day calendar')).toBeVisible();
   const top = (await scroll.boundingBox())!.y;
-  const marker = await page.getByLabel('Now 13:21').boundingBox();
+  await expect(page.locator('.now-line')).toHaveText('13:21');
+  const marker = await page.locator('.now-line').boundingBox();
   expect(marker!.y - top).toBeCloseTo(100, 0);
   await scroll.evaluate(el => { el.scrollTop = el.scrollHeight; });
   const task = await page.getByRole('button', {name: 'Submit expenses', exact: true}).boundingBox();

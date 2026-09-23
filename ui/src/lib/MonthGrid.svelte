@@ -39,11 +39,6 @@
   // so a Rust-side change that this did not follow would put the overflow row
   // on top of the last lane of bars.
   const MAX_BAR_LANES = $derived(month.lane_cap);
-  // How many timed lines a cell shows before folding the rest into "+N more".
-  // Matches `pack_lanes`'s own lane cap for bars — three is what a narrow
-  // cell has room for before a title stops being legible. The value lives in
-  // `filmstrip.ts` because App's keyboard cursor must share this exact limit.
-
   // Written Monday-first and rotated, never rewritten per setting: one
   // spelling of the seven names, and `rotate` is tested on its own.
   const MONDAY_FIRST = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
