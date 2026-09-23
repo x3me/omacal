@@ -25,7 +25,11 @@ pub enum CalDavError {
     /// The etag guard fired: someone else changed the resource first.
     #[error("the event changed on the server since it was loaded")]
     PreconditionFailed,
-    #[error("the server answered {0}")]
+    /// Capitalised to match `errors::SERVER_ANSWERED` in the app crate, which
+    /// allow-lists it: the event write path carries this into `user_facing`
+    /// (`caldav_write::friendly`'s catch-all arm), and the lowercase spelling it
+    /// had matched nothing there, so a 507 reached the user as "Sync failed".
+    #[error("The server answered {0}")]
     Http(StatusCode),
     #[error(transparent)]
     Other(#[from] anyhow::Error),

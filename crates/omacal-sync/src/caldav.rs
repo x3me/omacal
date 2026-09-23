@@ -299,6 +299,15 @@ pub async fn sync_caldav_calendar(
         // Inferred deletions, bounded to what the query would have returned:
         // anything alive in (or recurring into) the window that the server
         // did not mention no longer exists.
+        //
+        // **Bounded at both ends, unlike the Google sweep** in `lib.rs`, which
+        // has no `start_utc <` term. The two are not a copy that drifted and
+        // should not be merged into one helper: this runs on every successful
+        // CalDAV sync, so it must not reach past what this REPORT asked for,
+        // while the Google one runs only after a *full* resync, where the
+        // fetch covered the window entire. The third copy that did duplicate
+        // this one — the WebCal path — is gone: a feed arrives whole, so it
+        // deletes by "not named in the file" and needs no window at all.
         let placeholders: Vec<String> =
             (0..seen.len()).map(|i| format!("?{}", i + 4)).collect();
         let sql = format!(

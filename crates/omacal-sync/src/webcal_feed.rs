@@ -29,7 +29,11 @@ pub const MAX_FEED_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WebcalFeedError {
-    #[error("the server answered {0}")]
+    /// Spelled as `CalDavError::Http` and `errors::SERVER_ANSWERED` are. Not on
+    /// a user-facing path today — `user_facing_feed` builds its own sentence
+    /// and the sync loop only counts failures — but four spellings of one
+    /// sentence is how a later path picks the wrong one.
+    #[error("The server answered {0}")]
     Http(reqwest::StatusCode),
     #[error(transparent)]
     Other(#[from] anyhow::Error),

@@ -1,3 +1,21 @@
+/// The prefix `server_answered` builds on, and that `CalDavError::Http`'s
+/// Display must match. Allow-listed below so a 403 or a 507 on a CalDAV event
+/// write reaches the user as itself rather than as a sync fault.
+pub(crate) const SERVER_ANSWERED: &str = "The server answered ";
+
+/// What a transport failure's status code reads as, in one place.
+///
+/// It was written out twice — `caldav_account::user_facing_caldav` and
+/// `webcal_subscription::user_facing_feed` — with `CalDavError`'s own
+/// `#[error]` a third, lowercase spelling of the same sentence. Whichever
+/// changed, the others silently did not.
+///
+/// Interpolates a `StatusCode`, which is a number and a fixed reason phrase
+/// and nothing of the user's, so the prefix admits nothing else.
+pub(crate) fn server_answered(status: impl std::fmt::Display) -> String {
+    format!("{SERVER_ANSWERED}{status}")
+}
+
 /// Error messages this app itself produces that are safe to show verbatim,
 /// matched by exact prefix against the literal strings the code actually
 /// emits.
@@ -28,6 +46,13 @@ const SAFE_PREFIXES: &[&str] = &[
     // directory (os error 2)"); fires before any secret is ever read off disk,
     // so "client_secret" here can only ever be the literal key name.
     "no config at ",
+    // crates/omacal-caldav/src/client.rs — `CalDavError::Http`'s Display,
+    // carried into `user_facing` by `caldav_write::friendly`'s catch-all arm
+    // with no `.context(..)` added. (The account and feed mappers build the
+    // same sentence through `server_answered` but return it directly, so they
+    // do not depend on this entry.) The tail is a `StatusCode`'s Display —
+    // "404 Not Found", "507 Insufficient Storage" — nothing of the user's.
+    SERVER_ANSWERED,
     // src-tauri/src/tasks.rs — `list_name`'s collision refusal, which appends
     // the name of the list already using it. Variable and benign: a list name
     // the user typed or their CalDAV server published, read back to them in
@@ -644,6 +669,23 @@ mod tests {
         assert_ne!(user_facing(&raised), OPAQUE);
     }
 
+    /// A status code on a CalDAV event write reaches the user. That path
+    /// carries `CalDavError::Http` into `user_facing`, and its Display was the
+    /// lowercase third spelling of "the server answered", which matched
+    /// nothing — so a full server read "Sync failed. See the application log".
+    #[test]
+    fn a_caldav_status_code_is_shown_as_itself() {
+        let raised = anyhow::Error::from(omacal_caldav::CalDavError::Http(
+            reqwest::StatusCode::INSUFFICIENT_STORAGE,
+        ));
+        assert_eq!(user_facing(&raised), "The server answered 507 Insufficient Storage");
+        assert_eq!(
+            server_answered(reqwest::StatusCode::NOT_FOUND),
+            "The server answered 404 Not Found",
+            "the mappers and the error type spell it the same way",
+        );
+    }
+
     /// A task verb's refusals reach the user, and a transport failure does
     /// not. Until 2026-09-23 three of the four task commands ended
     /// `.map_err(|e| e.to_string())`, which skipped this function entirely:
@@ -723,6 +765,9 @@ mod tests {
     fn every_prefix_the_app_relies_on_showing_is_still_allowlisted() {
         const EXPECTED: &[&str] = &[
             "no config at ",
+            // Checked against the doc-comment rule: the trailing detail is a
+            // `StatusCode` — a number and its fixed reason phrase.
+            SERVER_ANSWERED,
             // Checked against the doc-comment rule: the trailing detail is a
             // list name, variable and benign, appended by one `bail!`.
             crate::tasks::LIST_NAME_TAKEN,

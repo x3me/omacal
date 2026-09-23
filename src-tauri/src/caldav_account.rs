@@ -157,7 +157,7 @@ fn user_facing_caldav(e: CalDavError) -> String {
             "The server rejected the credentials. For iCloud, use an app-specific password from appleid.apple.com, not your Apple ID password.".to_string()
         }
         CalDavError::PreconditionFailed => e.to_string(),
-        CalDavError::Http(status) => format!("The server answered {status}"),
+        CalDavError::Http(status) => crate::errors::server_answered(status),
         CalDavError::Other(e) => crate::errors::user_facing(&e),
     }
 }

@@ -65,7 +65,7 @@ pub async fn subscribe_webcal(
 
 fn user_facing_feed(e: omacal_sync::webcal_feed::WebcalFeedError) -> String {
     match e {
-        omacal_sync::webcal_feed::WebcalFeedError::Http(status) => format!("The server answered {status}"),
+        omacal_sync::webcal_feed::WebcalFeedError::Http(status) => crate::errors::server_answered(status),
         omacal_sync::webcal_feed::WebcalFeedError::Other(e) => crate::errors::user_facing(&e),
     }
 }
