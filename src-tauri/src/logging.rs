@@ -12,10 +12,10 @@
 
 /// How large the log may grow before the next launch sets it aside.
 ///
-/// Two megabytes is a few days of ordinary use and a couple of hours of
-/// `debug`, which is the shape of a session somebody is asked to reproduce a
-/// bug in. Small enough to paste the interesting part out of, large enough
-/// that the interesting part is still there.
+/// Two megabytes is weeks of ordinary use at [`LEVEL`]. Small enough to paste
+/// the interesting part out of, large enough that the interesting part is
+/// still there. Checked only at launch, which is safe only because `LEVEL`
+/// keeps a running session's output small.
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Whether a log of `size` should be set aside before this run appends to it.
@@ -59,33 +59,52 @@ fn open_log_at(path: &std::path::Path) -> Option<std::fs::File> {
     std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
-/// Starts tracing: standard output, plus the file when one can be opened.
+/// The most detail either destination records: `info` and above.
 ///
-/// **Never fails.** A log that cannot be written is worth less than the app
-/// starting, so every filesystem error here falls back to the stdout-only
-/// subscriber this replaced.
-pub(crate) fn init() {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
+/// **Set here, not inherited.** `fmt::init()` caps itself at `info`, but a
+/// `fmt::layer()` on a bare `registry()` has no cap at all — and until this
+/// existed the file recorded every `trace` event of every dependency: each SQL
+/// statement sqlx ran, each inotify event, each connection hyper pooled. A
+/// field log reached 186 MB in sixteen hours, 9 of its 858,999 lines at
+/// `info`, and since the size cap above is only checked at launch, a long
+/// session grew it without limit.
+const LEVEL: tracing_subscriber::filter::LevelFilter =
+    tracing_subscriber::filter::LevelFilter::INFO;
 
-    // No `EnvFilter`: it needs a tracing-subscriber feature this build does
-    // not carry, and turning it on would pull a regex engine in for a
-    // behaviour nobody asked to change. Both layers filter exactly as the
-    // `fmt::init()` they replace did — this commit adds a destination, not a
-    // policy.
-    let Some(file) = open_log() else {
-        tracing_subscriber::fmt::init();
-        return;
-    };
+/// Both destinations, filtered alike. Separate from [`init`] so a test can
+/// install it for one closure instead of for the whole process.
+fn subscriber<W>(file: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    use tracing_subscriber::layer::SubscriberExt;
 
     tracing_subscriber::registry()
+        .with(LEVEL)
         .with(tracing_subscriber::fmt::layer())
         // **No ANSI in the file.** The terminal layer above keeps its colour;
         // written to a file those escapes have to be stripped before the log
         // can be read or pasted, which is a chore handed to somebody who is
         // already having a bad day.
         .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(file))
-        .init();
+}
+
+/// Starts tracing: standard output, plus the file when one can be opened.
+///
+/// **Never fails.** A log that cannot be written is worth less than the app
+/// starting, so every filesystem error here falls back to the stdout-only
+/// subscriber this replaced.
+pub(crate) fn init() {
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // No `EnvFilter`: it needs a tracing-subscriber feature this build does
+    // not carry, and would pull a regex engine in. A fixed [`LEVEL`] is the
+    // whole policy.
+    let Some(file) = open_log() else {
+        tracing_subscriber::fmt::init();
+        return;
+    };
+    subscriber(file).init();
 }
 
 #[cfg(test)]
@@ -127,6 +146,26 @@ mod tests {
         assert_eq!(fresh.trim(), "after rotation", "the new log kept the old bytes");
         let old = std::fs::read_to_string(path.with_extension("log.old")).unwrap();
         assert_eq!(old.len(), MAX_BYTES as usize, "the set-aside log lost content");
+    }
+
+    /// **`debug` and `trace` never reach the file**, from our code or a
+    /// dependency's. Installed for this closure only, so no other test in the
+    /// binary is affected.
+    #[test]
+    fn the_file_records_info_and_above_and_nothing_finer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("omacal.log");
+        let file = open_log_at(&path).unwrap();
+        tracing::subscriber::with_default(subscriber(file), || {
+            tracing::trace!("a trace line");
+            tracing::debug!(target: "sqlx::query", "a dependency's debug line");
+            tracing::info!("an info line");
+            tracing::warn!("a warn line");
+        });
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("an info line") && log.contains("a warn line"), "{log}");
+        assert!(!log.contains("a trace line"), "trace reached the file:\n{log}");
+        assert!(!log.contains("debug line"), "debug reached the file:\n{log}");
     }
 
     /// The log sits **beside the database**, which is the directory a user is
