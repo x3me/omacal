@@ -34,7 +34,11 @@
   // now keep their own reading budget and a busier row makes the grid scroll
   // sooner rather than taking that space from its timed lines. Unlike
   // `BigYearRibbon`, Month view therefore pays only for lanes a week uses.
-  const MAX_BAR_LANES = 3;
+  // Carried in the payload by `commands::GRID_LANE_CAP`, not agreed by hand:
+  // this number also *places* the `+N more` row (`grid-row: cap + 1` below),
+  // so a Rust-side change that this did not follow would put the overflow row
+  // on top of the last lane of bars.
+  const MAX_BAR_LANES = $derived(month.lane_cap);
   // How many timed lines a cell shows before folding the rest into "+N more".
   // Matches `pack_lanes`'s own lane cap for bars — three is what a narrow
   // cell has room for before a title stops being legible. The value lives in

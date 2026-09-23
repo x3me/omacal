@@ -113,11 +113,26 @@ pub struct MonthRow {
     pub bar_overflow: Vec<usize>,
 }
 
+/// How many lanes of all-day bars a Month cell, or pills a Big Year row,
+/// draws before the rest fold into `+N more`.
+///
+/// **Carried in the payload, not agreed by hand.** It was a bare `3` in two
+/// `pack_lanes` calls here and a `3` in three TS constants
+/// (`MonthGrid.MAX_BAR_LANES`, `BigYearRibbon.PILL_LANE_CAP`,
+/// `filmstrip.MONTH_GRID_TIMED_LIMIT`) — and the TS copies *position* the
+/// overflow row at `cap + 1`, so raising this alone put `+N more` on top of
+/// the last lane of bars and lowering it opened a blank track. The symptom
+/// reads as a CSS fault, not a constant drift. `PER_DAY_CAP` is carried in
+/// the widget feed for this exact reason.
+pub const GRID_LANE_CAP: u8 = 3;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MonthPayload {
     pub rows: Vec<MonthRow>, // always 6
     pub year: i32,
     pub month: u32, // 1-12
+    /// See [`GRID_LANE_CAP`] — the UI places `+N more` at this plus one.
+    pub lane_cap: u8,
 }
 
 pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
@@ -586,7 +601,7 @@ pub fn assemble_month_combining(
             }
 
             // Three lanes, matching the spec's month rows.
-            let (bars, bar_overflow) = pack_lanes(&segments, 7, 3);
+            let (bars, bar_overflow) = pack_lanes(&segments, 7, GRID_LANE_CAP);
 
             let cells = (0..7)
                 .map(|c| {
@@ -606,7 +621,7 @@ pub fn assemble_month_combining(
         })
         .collect();
 
-    MonthPayload { rows, year, month }
+    MonthPayload { rows, year, month, lane_cap: GRID_LANE_CAP }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -765,6 +780,8 @@ pub struct RibbonRow {
 pub struct BigYearPayload {
     pub year: i32,
     pub rows: Vec<RibbonRow>, // always 14
+    /// See [`GRID_LANE_CAP`] — the UI places `+N more` at this plus one.
+    pub lane_cap: u8,
 }
 
 
@@ -868,7 +885,7 @@ pub fn assemble_big_year_combining(
             if combine { crate::combined::combine_lanes(&mut pill_events, &mut segments); }
 
             // Three lanes, matching the spec's row height.
-            let (pills, overflow) = pack_lanes(&segments, 28, 3);
+            let (pills, overflow) = pack_lanes(&segments, 28, GRID_LANE_CAP);
 
             let days = (0..28)
                 .map(|c| {
@@ -885,7 +902,7 @@ pub fn assemble_big_year_combining(
         })
         .collect();
 
-    BigYearPayload { year, rows }
+    BigYearPayload { year, rows, lane_cap: GRID_LANE_CAP }
 }
 
 /// Opens an event's meeting link with its preferred application — the Join

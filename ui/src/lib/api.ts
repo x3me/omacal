@@ -71,7 +71,7 @@ export type MonthRow = {
 };
 /** `rows` is always 6, even when the month fits in five, so the grid never
  *  changes height as you page through the year. */
-export type MonthPayload = { rows: MonthRow[]; year: number; month: number };
+export type MonthPayload = { rows: MonthRow[]; year: number; month: number; lane_cap: number };
 
 /** Midnight local on the first day of the week containing `d`.
  *
@@ -129,7 +129,7 @@ export type RibbonRow = {
 /** The legend under the ribbon is not part of the payload: it is the
  *  app's own calendar list, which already knows every calendar's colour and
  *  whether it is shown, and which the legend now toggles (2026-09-03). */
-export type BigYearPayload = { year: number; rows: RibbonRow[] };
+export type BigYearPayload = { year: number; rows: RibbonRow[]; lane_cap: number };
 
 export const getBigYear = (year: number) =>
   invoke<BigYearPayload>('get_big_year', { year });

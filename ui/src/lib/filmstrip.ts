@@ -36,6 +36,16 @@ export type ListableView = (typeof LISTABLE_VIEWS)[number];
  * cursor can never name a row the grid has already folded into `+N more`. */
 export const MONTH_GRID_TIMED_LIMIT = 3;
 
+/** Where down the viewport a Today request parks the current hour or row.
+ *
+ *  Shared by `WeekGrid` and `Filmstrip` because they are two renderings of
+ *  the same period and `F` switches between them: if the two drifted, Today
+ *  would park the current hour at a different height depending on which was
+ *  up, which reads as jitter rather than as a setting. It lived in both
+ *  components, with Filmstrip's comment saying "As in WeekGrid" — an
+ *  acknowledged copy is still a copy. */
+export const NOW_VIEWPORT_FRACTION = 0.45;
+
 export function listable(view: string): view is ListableView {
   return (LISTABLE_VIEWS as readonly string[]).includes(view);
 }

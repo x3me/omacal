@@ -623,6 +623,9 @@ function getBigYearStub(y: number): BigYearPayload {
   const ribbonStart = new Date(y, 0, 1 - back).getTime();
   return {
     year: y,
+    // The stub answers with the backend's `GRID_LANE_CAP`; the components
+    // read it rather than a constant of their own.
+    lane_cap: 3,
     rows: Array.from({ length: 14 }, (_, r) => ({
       days: Array.from({ length: 28 }, (_, c) => ({
         start_ms: ribbonStart + (r * 28 + c) * DAY_MS,

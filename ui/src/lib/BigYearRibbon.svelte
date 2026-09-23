@@ -87,7 +87,8 @@
   // is a different number on purpose — and it's what the "+N more" row's own
   // position (`grid-row:{cap + 1}`) reads off: the row just past the highest
   // lane a pill can occupy. Mirrors `MonthGrid`'s `MAX_BAR_LANES`.
-  const PILL_LANE_CAP = 3;
+  // Carried in the payload by `commands::GRID_LANE_CAP` — see `MonthGrid`.
+  const PILL_LANE_CAP = $derived(ribbon.lane_cap);
 
   const MONTH_NAMES = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',

@@ -817,7 +817,7 @@ function emptyMonth(
     bar_events: [] as UiEvent[],
     bar_overflow: [] as number[],
   }));
-  return { rows, year, month };
+  return { rows, year, month, lane_cap: 3 };
 }
 
 /** August 2026: a timed event and a multi-day bar, each named for what its
@@ -1074,7 +1074,7 @@ function emptyBigYear(
     pill_events: [] as UiEvent[],
     overflow: [] as number[],
   }));
-  return { year, rows };
+  return { year, rows, lane_cap: 3 };
 }
 
 /** The legend under the ribbon reads the app's calendar list, not the

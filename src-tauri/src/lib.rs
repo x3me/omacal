@@ -1199,22 +1199,12 @@ pub fn apply_icu_tz_early() {
 }
 
 pub fn apply_display_tz_early() {
-    #[cfg(target_os = "linux")]
-    let dir = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
-        .map(|d| d.join("com.omacal.app"));
-    #[cfg(target_os = "macos")]
-    let dir = std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/com.omacal.app"));
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let dir: Option<std::path::PathBuf> = None;
-
-    let Some(dir) = dir else { return };
+    // `cli::app_data_dir` is the one derivation — it was reproduced here with
+    // `#[cfg]` blocks that Linux CI never compiled, and the two had drifted:
+    // this copy filtered a relative `XDG_DATA_HOME` and that one did not, and
+    // that one required `HOME` even when `XDG_DATA_HOME` was set. `com.omacal.app`
+    // is spelled once more, rather than a fourth time.
+    let Some(dir) = crate::cli::app_data_dir() else { return };
     let sidecar = std::fs::read_to_string(dir.join(settings::DISPLAY_TZ_SIDECAR))
         .ok()
         .map(|s| s.trim().to_string())

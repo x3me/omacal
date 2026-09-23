@@ -5,6 +5,7 @@
   import { dateFormat } from './date.svelte';
   import { clockFormat } from './clock.svelte';
   import { formatClock } from './timefmt';
+  import { NOW_VIEWPORT_FRACTION } from './filmstrip';
   import { openConference, type UiEvent } from './api';
   import type { Rect } from './position';
   import { locationLabel, meetingUrl } from './location';
@@ -92,7 +93,6 @@
 
   let stripEl: HTMLDivElement | undefined = $state();
   let handledRevealNowRequest: number | null = null;
-  const NOW_VIEWPORT_FRACTION = 0.45;
 
   // A list has no hour geometry to calculate against, so centre the rendered
   // NOW row itself. As in WeekGrid, a Today request waits for the newly-loaded

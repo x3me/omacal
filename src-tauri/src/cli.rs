@@ -653,14 +653,20 @@ pub(crate) fn db_path() -> Option<std::path::PathBuf> {
 /// The directory itself, shared with [`crate::logging`] so the log lands
 /// beside the database rather than reproducing this identifier a third time.
 pub(crate) fn app_data_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let home = std::path::Path::new(&home);
+    // **`XDG_DATA_HOME` only when it is absolute.** The spec says a relative
+    // value must be ignored, and when it is honoured `HOME` is not needed at
+    // all — which is why the fallback, not the whole function, is what `HOME`
+    // gates. `apply_display_tz_early` in `lib.rs` used to spell this out a
+    // second time with `#[cfg]` blocks, and the two had drifted apart on both
+    // points; it calls this now.
+    let home = || std::env::var_os("HOME").map(std::path::PathBuf::from);
     Some(if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/com.omacal.app")
+        home()?.join("Library/Application Support/com.omacal.app")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share"))
+            .filter(|p| p.is_absolute())
+            .or_else(|| home().map(|h| h.join(".local/share")))?
             .join("com.omacal.app")
     })
 }

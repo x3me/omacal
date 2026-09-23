@@ -4,6 +4,7 @@
   import { visibleHours } from "./visiblehours.svelte";
   import { clockFormat } from './clock.svelte';
   import { gutterWidth, secondZone } from './secondzone.svelte';
+  import { NOW_VIEWPORT_FRACTION } from './filmstrip';
   import { zoneName } from './zonename.svelte';
   import { temperatureUnit } from './tempunit.svelte';
   import { formatTemp } from './temperature';
@@ -30,7 +31,8 @@
   import EventPopover from './EventPopover.svelte';
   import { getEventDetail, refreshEvent, type EventDetail, type Occurrence } from './eventdetail';
   import {
-    RESIZE_EDGE_PX, SNAP_MS, beganDrag, colsMoved, edgeAt, spanForMove, spanForResize, sweepAsk,
+    RESIZE_EDGE_PX, SNAP_MS, beganDrag, colsMoved, edgeAt, hasResizeEdges, spanForMove,
+    spanForResize, sweepAsk,
   } from './drag';
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
@@ -201,7 +203,7 @@
     const e = Math.min(formPreview.endMs, day.end_ms);
     if (e <= s) return false;
     const columnHeight = visibleHeight / crop(day).span;
-    return ((e - s) / (day.end_ms - day.start_ms)) * columnHeight >= RESIZE_EDGE_PX * 3;
+    return hasResizeEdges(((e - s) / (day.end_ms - day.start_ms)) * columnHeight);
   }
 
   function columnStyle(day: { start_ms: number; end_ms: number }) {
@@ -516,7 +518,6 @@
   }
   let handledRevealNowRequest: number | null = null;
   const INITIAL_VIEWPORT_FRACTION = 1 / 3;
-  const NOW_VIEWPORT_FRACTION = 0.45;
 
   $effect(() => {
     if (!bodyEl || visibleWeek.days.length === 0) return;
@@ -2445,7 +2446,10 @@
           color: var(--text); }
   .tchip.over { background: color-mix(in srgb, var(--error) 12%, var(--bg)); }
   .tchip.landing { outline: 1px solid var(--accent); cursor: grabbing; }
-  .tpin.landing { z-index: 60; pointer-events: none; opacity: .9; }
+  /* 50 is the drag band — `.ev.dragging` and `.tpin.dragging`. It was 60,
+     which is the Settings scrim's, and nothing but the band system keeps a
+     grid decoration from painting over a modal. */
+  .tpin.landing { z-index: 50; pointer-events: none; opacity: .9; }
   .tchip input { width: 11px; height: 11px; flex: 0 0 11px; margin: 0; }
   .tt { appearance: none; -webkit-appearance: none; font: inherit; border: 0; background: none;
         color: inherit; padding: 0; text-align: left; min-width: 0; cursor: grab;
@@ -2560,7 +2564,7 @@
            border-radius: var(--event-card-radius, 6px);
            background: color-mix(in srgb, var(--ghost, var(--accent)) 14%, var(--bg));
            box-shadow: inset 2px 0 0 0 var(--ghost, var(--accent));
-           pointer-events: none; z-index: 60; }
+           pointer-events: none; z-index: 50; }
   .sweep-feedback { position: fixed; z-index: 70; pointer-events: none;
                     display: flex; flex-direction: column; gap: 3px;
                     padding: 7px 10px; border-radius: 6px;

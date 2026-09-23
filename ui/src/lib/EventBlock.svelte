@@ -2,7 +2,7 @@
   import CalendarColors from './CalendarColors.svelte';
   import type { ColorSegment } from './combined';
   import { clockFormat } from './clock.svelte';
-  import { RESIZE_EDGE_PX, beganDrag } from './drag';
+  import { RESIZE_EDGE_PX, beganDrag, hasResizeEdges } from './drag';
   import { formatClock } from './timefmt';
   import type { EventCopy, UiEvent, Placed } from './api';
   import type { Calendar } from './calendars';
@@ -160,7 +160,7 @@
    *  because the only cursor the block ever showed was `grab` (reported
    *  2026-08-26: "I want to extend this to grabbing an edge" — it existed,
    *  invisibly). */
-  const grips = $derived(heightPx >= RESIZE_EDGE_PX * 3);
+  const grips = $derived(hasResizeEdges(heightPx));
 
   function showTip(r: Rect, source: { calendar_id?: number; color: string } = event) {
     // Above the block unless that would leave the viewport; clamped right so

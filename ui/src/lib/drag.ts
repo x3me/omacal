@@ -68,12 +68,24 @@ export const RESIZE_EDGE_PX = 6;
  * commoner gesture by far. `null` there means such a block can still be
  * dragged, and resized by making it longer from a taller sibling or the form.
  */
+/** Whether a block is tall enough to have edges at all — `edgeAt`'s own
+ *  first rule, exported because two components draw grips from it.
+ *
+ *  `EventBlock` decides whether to draw them on a block and `WeekGrid`
+ *  whether to draw them on the form's draft; both restated `>= band * 3` by
+ *  hand. The failure mode of a drift is visible grips that do nothing, or
+ *  invisible edges that resize — the second of which `drag.ts` records having
+ *  been reported once already. */
+export function hasResizeEdges(height: number, band: number = RESIZE_EDGE_PX): boolean {
+  return height >= band * 3;
+}
+
 export function edgeAt(
   offsetY: number,
   height: number,
   band: number = RESIZE_EDGE_PX,
 ): 'start' | 'end' | null {
-  if (height < band * 3) return null;
+  if (!hasResizeEdges(height, band)) return null;
   if (offsetY <= band) return 'start';
   if (offsetY >= height - band) return 'end';
   return null;

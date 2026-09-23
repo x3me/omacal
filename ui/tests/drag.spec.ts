@@ -653,6 +653,6 @@ test('the module exports the geometry the plan names, and the gesture constants'
   // undefined in a gesture spec rather than as a failure here.
   expect((await drag(page)).sort()).toEqual(
     ['DRAG_THRESHOLD_PX', 'RESIZE_EDGE_PX', 'SNAP_MS', 'beganDrag', 'colsMoved', 'edgeAt',
-     'snapMs', 'spanForMove', 'spanForResize', 'spanForSweep', 'sweepAsk'],
+     'hasResizeEdges', 'snapMs', 'spanForMove', 'spanForResize', 'spanForSweep', 'sweepAsk'],
   );
 });
