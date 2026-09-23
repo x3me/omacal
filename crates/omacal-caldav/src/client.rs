@@ -94,8 +94,12 @@ pub struct CalDavClient {
 /// A fixed literal with nothing interpolated, so it can be shown verbatim:
 /// the user typed the address and gets to read why it was turned down. Pinned
 /// by `errors::user_facing`'s allow-list on the app side.
-pub const NOT_PRIVATE_HTTP: &str = "CalDAV needs an https:// address — plain http:// is accepted \
-     only for a server on this machine or your own network";
+///
+/// **Names no protocol**, because two forms show it: CalDAV's connect form
+/// and a subscription's, whose user pasted an iCal link and never chose
+/// "CalDAV" at all.
+pub const NOT_PRIVATE_HTTP: &str = "The address needs to start with https:// — plain http:// is \
+     accepted only for a server on this machine or your own network";
 
 /// Whether an address can only be reached across a wire the user owns.
 ///

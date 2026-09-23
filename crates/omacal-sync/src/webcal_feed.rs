@@ -165,6 +165,10 @@ fn feed_transport_error(e: reqwest::Error) -> anyhow::Error {
     }
 }
 
+fn too_large() -> WebcalFeedError {
+    WebcalFeedError::Other(anyhow::anyhow!("the feed is larger than {MAX_FEED_BYTES} bytes"))
+}
+
 /// GETs the feed, sending the cached cursor as conditional headers.
 /// `Ok(None)` is "not modified" (HTTP 304): nothing changed, sync nothing.
 pub async fn fetch_feed(
@@ -180,7 +184,7 @@ pub async fn fetch_feed(
     if let Some((name, value)) = cached_token.and_then(conditional_header) {
         req = req.header(name, value);
     }
-    let resp = req.send().await.map_err(feed_transport_error)?;
+    let mut resp = req.send().await.map_err(feed_transport_error)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
@@ -188,12 +192,10 @@ pub async fn fetch_feed(
     if !status.is_success() {
         return Err(WebcalFeedError::Http(status));
     }
-    if let Some(len) = resp.content_length() {
-        if len > MAX_FEED_BYTES as u64 {
-            return Err(WebcalFeedError::Other(anyhow::anyhow!(
-                "the feed is larger than {MAX_FEED_BYTES} bytes"
-            )));
-        }
+    // A declared length refuses before a byte of body is read; the loop below
+    // is what holds when nothing was declared.
+    if resp.content_length().is_some_and(|len| len > MAX_FEED_BYTES as u64) {
+        return Err(too_large());
     }
     let etag = resp
         .headers()
@@ -205,11 +207,14 @@ pub async fn fetch_feed(
         .get("Last-Modified")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let bytes = resp.bytes().await.map_err(feed_transport_error)?;
-    if bytes.len() > MAX_FEED_BYTES {
-        return Err(WebcalFeedError::Other(anyhow::anyhow!(
-            "the feed is larger than {MAX_FEED_BYTES} bytes"
-        )));
+    // **Counted as it arrives**, so a feed that never declared its length is
+    // refused at the cap rather than after it has been held whole in memory.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(feed_transport_error)? {
+        if bytes.len() + chunk.len() > MAX_FEED_BYTES {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(Some(FetchedFeed {
         body: String::from_utf8_lossy(&bytes).into_owned(),
@@ -399,6 +404,46 @@ mod tests {
     fn the_content_hash_is_stable_and_sensitive() {
         assert_eq!(content_hash("a"), content_hash("a"));
         assert_ne!(content_hash("a"), content_hash("b"));
+    }
+
+    /// **The cap holds while the body is arriving, not only once it has.** A
+    /// server that declares no length skips the `Content-Length` check, and
+    /// the old `resp.bytes()` buffered the whole body before the size was
+    /// looked at — so an endless feed ran the app out of memory before it
+    /// could be refused. wiremock always declares a length, hence a raw
+    /// socket: 64 MiB, no `Content-Length`, closed when done. A capped read
+    /// hangs up near the 32 MiB cap, so the server manages to write barely
+    /// more than that; an uncapped one takes all 64.
+    #[tokio::test]
+    async fn an_undeclared_oversized_feed_is_refused_before_it_is_all_read() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req);
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/calendar\r\nConnection: close\r\n\r\n").unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent < 64 * 1024 * 1024 {
+                if sock.write_all(&chunk).is_err() { break; }
+                sent += chunk.len();
+            }
+            sent
+        });
+
+        let Err(err) = fetch_feed(&format!("http://{addr}/feed.ics"), None).await else {
+            panic!("an oversized feed was accepted");
+        };
+        assert!(err.to_string().contains("larger than"), "{err}");
+        // Joined off the runtime's one thread: blocking it would stop hyper's
+        // connection task from ever closing the socket the server writes to.
+        let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+        assert!(
+            sent < 48 * 1024 * 1024,
+            "the whole body was read before the cap was checked ({sent} bytes sent)"
+        );
     }
 
     #[tokio::test]
