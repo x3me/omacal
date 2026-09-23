@@ -157,10 +157,46 @@ pub fn https_or_private(url: &Url) -> anyhow::Result<()> {
 pub fn anonymous_feed_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // **Every hop is held to the cleartext rule, not only the first.** The
+        // doc above promised "the cleartext rule is identical", but
+        // `Policy::limited` followed any redirect at all, and `https_or_private`
+        // ran only on the address the user typed — so an `https://` feed could
+        // send the next request to plain `http://`, or at a loopback or LAN
+        // address. For a feed that matters more than it would for most URLs:
+        // a private "secret address in iCal format" *is* the credential.
+        //
+        // Cross-host hops are still followed (feeds commonly bounce through a
+        // CDN), and the cap stays at five, matching `limited(5)`.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 5 {
+                attempt.error("too many redirects")
+            } else if https_or_private(attempt.url()).is_err() {
+                attempt.error(RedirectRefused)
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(anyhow::Error::from)
 }
+
+/// A redirect hop the cleartext rule refused.
+///
+/// A type rather than a string so the fetch can tell *this* apart from a
+/// request that simply failed, and answer with [`NOT_PRIVATE_HTTP`] — the same
+/// sentence a typed `http://` address gets — instead of reqwest's "error
+/// following redirect for url (…)", which would read as a fault and carry the
+/// address it refused.
+#[derive(Debug)]
+pub struct RedirectRefused;
+
+impl std::fmt::Display for RedirectRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(NOT_PRIVATE_HTTP)
+    }
+}
+
+impl std::error::Error for RedirectRefused {}
 
 /// Whether `candidate` may receive the credentials given to `original`:
 /// same host, or a sibling under the same registrable parent (last two

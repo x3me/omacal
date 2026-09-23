@@ -101,10 +101,22 @@ pub(crate) async fn sync_account(pool: &SqlitePool, account_id: i64) -> (u64, Ve
         {
             Ok(out) => total += (out.upserted + out.deleted) as u64,
             Err(e) => {
-                tracing::warn!(account = %account_name, calendar = %feed_url, %e, "subscribed feed sync failed");
-                // Same `{account} / {calendar}` shape Google uses — the feed
-                // URL alone says nothing about which subscription failed.
-                failed.push(format!("{account_name} / {feed_url}"));
+                // **The host and the row id, never the address.** For a
+                // subscription the URL is frequently the credential itself —
+                // a private calendar's "secret address in iCal format" grants
+                // read access to anyone holding it — and the failure message
+                // the user reads says "see the application log", which is how
+                // that address would end up pasted into a bug report. Google
+                // logs a calendar id and CalDAV an email; neither is a secret.
+                // The host still says which subscription it was. `%e` is safe:
+                // `fetch_feed` strips the URL out of every transport error.
+                let host = omacal_sync::webcal_feed::default_name_for(&feed_url);
+                tracing::warn!(account = %account_name, calendar_id = cal_id, %host, %e,
+                               "subscribed feed sync failed");
+                // Counted, not shown, today (`sync_result` reads `.len()`) — but
+                // a label that is the credential would become a leak the day
+                // these are displayed, so it carries the host as well.
+                failed.push(format!("{account_name} / {host}"));
             }
         }
     }

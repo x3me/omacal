@@ -139,6 +139,32 @@ fn feed_client() -> Result<reqwest::Client, WebcalFeedError> {
         .map_err(WebcalFeedError::Other)
 }
 
+/// What a failed request becomes, with the address taken out of it.
+///
+/// **A redirect the cleartext rule refused says so** — `NOT_PRIVATE_HTTP`, the
+/// sentence a typed `http://` address gets — found by walking the source chain
+/// for `RedirectRefused` rather than trusting reqwest's own wording.
+///
+/// **Everything else loses its URL before it becomes an error value at all.**
+/// A `reqwest::Error` displays as "error sending request for url
+/// (https://…)", and for a subscription that address is frequently the
+/// credential: a private calendar's "secret address in iCal format" grants
+/// read access to anyone holding it. Stripping it here, at the one place feed
+/// errors are made, means no log line and no message downstream can carry it —
+/// rather than relying on every caller to remember not to print `%e`.
+fn feed_transport_error(e: reqwest::Error) -> anyhow::Error {
+    let refused = std::iter::successors(
+        std::error::Error::source(&e),
+        |err| err.source(),
+    )
+    .any(|err| err.is::<omacal_caldav::RedirectRefused>());
+    if refused {
+        anyhow::anyhow!(omacal_caldav::NOT_PRIVATE_HTTP)
+    } else {
+        anyhow::Error::from(e.without_url())
+    }
+}
+
 /// GETs the feed, sending the cached cursor as conditional headers.
 /// `Ok(None)` is "not modified" (HTTP 304): nothing changed, sync nothing.
 pub async fn fetch_feed(
@@ -154,7 +180,7 @@ pub async fn fetch_feed(
     if let Some((name, value)) = cached_token.and_then(conditional_header) {
         req = req.header(name, value);
     }
-    let resp = req.send().await.map_err(anyhow::Error::from)?;
+    let resp = req.send().await.map_err(feed_transport_error)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
@@ -179,7 +205,7 @@ pub async fn fetch_feed(
         .get("Last-Modified")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let bytes = resp.bytes().await.map_err(anyhow::Error::from)?;
+    let bytes = resp.bytes().await.map_err(feed_transport_error)?;
     if bytes.len() > MAX_FEED_BYTES {
         return Err(WebcalFeedError::Other(anyhow::anyhow!(
             "the feed is larger than {MAX_FEED_BYTES} bytes"
@@ -453,6 +479,65 @@ mod tests {
             "a date is not an entity-tag: as one it matches nothing and the feed refetches in full",
         );
 
+    }
+
+    /// **A redirect to cleartext on the open internet is refused**, and the
+    /// hop is never sent. The feed client followed any redirect until
+    /// 2026-09-23, so an `https://` feed could send the next request — and for
+    /// a private calendar the address *is* the credential — in the clear.
+    ///
+    /// The mock is `http://127.0.0.1`, which the rule allows as loopback; the
+    /// target is a public host, which it does not. The policy decides before
+    /// the request leaves, so nothing reaches example.com.
+    #[tokio::test]
+    async fn a_redirect_to_public_cleartext_is_refused_before_it_is_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .respond_with(ResponseTemplate::new(302)
+                .insert_header("Location", "http://example.com/secret-address-4f9a.ics"))
+            .mount(&server).await;
+
+        let err = fetch_feed(&format!("{}/feed.ics", server.uri()), None)
+            .await
+            .err()
+            .expect("a hop to public http must be refused");
+        let shown = err.to_string();
+        assert_eq!(shown, omacal_caldav::NOT_PRIVATE_HTTP, "says why, as a typed http:// does");
+        assert!(!shown.contains("secret-address"), "the refused address leaked: {shown}");
+    }
+
+    /// The guard must not break the redirects feeds actually rely on.
+    #[tokio::test]
+    async fn a_redirect_the_rule_allows_is_still_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/old.ics"))
+            .respond_with(ResponseTemplate::new(301)
+                .insert_header("Location", format!("{}/feed.ics", server.uri())))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/feed.ics"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
+            .mount(&server).await;
+
+        let got = fetch_feed(&format!("{}/old.ics", server.uri()), None)
+            .await
+            .unwrap()
+            .expect("a 200 at the end of the redirect");
+        assert!(got.body.contains("Standup"));
+    }
+
+    /// **No feed address inside a transport error.** A `reqwest::Error` prints
+    /// "error sending request for url (…)", and the sync loop logs `%e` beside
+    /// a failure the user is told to look up in the log.
+    #[tokio::test]
+    async fn a_transport_error_carries_no_part_of_the_address() {
+        // Port 1 on loopback: allowed by the cleartext rule, refused by the
+        // kernel, so the request fails at the transport.
+        let err = fetch_feed("http://127.0.0.1:1/secret-address-77b2.ics", None)
+            .await
+            .err()
+            .expect("nothing listens on port 1");
+        let shown = format!("{err} / {err:?}");
+        assert!(!shown.contains("secret-address"), "the address reached the error: {shown}");
     }
 
     /// Which header a cursor travels in, and that a content hash travels in
