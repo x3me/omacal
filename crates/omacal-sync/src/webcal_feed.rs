@@ -314,31 +314,14 @@ pub async fn apply_feed_body(
     // theirs because they only ever looked at a slice of the collection, and
     // may not delete what they did not examine. A feed is the whole truth on
     // every fetch, so anything on this calendar the file does not name is
-    // gone — which is both simpler and more correct than the predicate this
-    // replaced, and one fewer copy of it to keep in step.
-    //
-    // Through a temp table rather than `NOT IN (?, ?, …)`: an unwindowed feed
-    // can name more ids than SQLite's 32,766-variable ceiling, and binding
-    // them one per placeholder would fail the whole sync on a large feed.
-    sqlx::query("CREATE TEMP TABLE IF NOT EXISTS feed_seen (uid TEXT PRIMARY KEY)")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM feed_seen").execute(&mut *tx).await?;
-    for id in &seen {
-        sqlx::query("INSERT OR IGNORE INTO feed_seen (uid) VALUES (?1)")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    outcome.deleted += sqlx::query(
-        "DELETE FROM events
-          WHERE calendar_id = ?1 AND google_id NOT IN (SELECT uid FROM feed_seen)",
+    // gone: `Reach::Whole`.
+    outcome.deleted += crate::reap::delete_unnamed(
+        &mut tx,
+        calendar_id,
+        &seen,
+        crate::reap::Reach::Whole,
     )
-    .bind(calendar_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected() as usize;
-    sqlx::query("DELETE FROM feed_seen").execute(&mut *tx).await?;
+    .await? as usize;
 
     // The window columns belong to the providers that still have one.
     sqlx::query(

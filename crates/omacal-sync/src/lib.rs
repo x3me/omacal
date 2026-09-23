@@ -1,5 +1,6 @@
 pub mod caldav;
 pub mod convert;
+mod reap;
 pub mod webcal_feed;
 pub use convert::{
     from_google_attendee, from_google_reminder, from_google_reminders, is_tombstone,
@@ -226,32 +227,15 @@ async fn apply(
                 Change::Delete(google_id) => google_id.as_str(),
             })
             .collect();
-        // One statement bound to the full set — chunking a NOT IN would
-        // over-delete ids living in a later chunk. SQLite's parameter
-        // ceiling is 32766; `maxResults` pages cap a window far below it.
-        // Bare `?` throughout — never mixed with `?N`: sqlx binds by call
-        // order against the numbering SQLite infers, and the mixture bound
-        // the id list one slot off (caught by this feature's own test: the
-        // sweep deleted the row it had just been told to keep).
-        let placeholders = vec!["?"; fetched.len()].join(", ");
-        let sql = if fetched.is_empty() {
-            "DELETE FROM events
-              WHERE calendar_id = ?
-                AND (recurrence IS NOT NULL OR end_utc >= ?)"
-                .to_string()
-        } else {
-            format!(
-                "DELETE FROM events
-                  WHERE calendar_id = ?
-                    AND (recurrence IS NOT NULL OR end_utc >= ?)
-                    AND google_id NOT IN ({placeholders})"
-            )
-        };
-        let mut q = sqlx::query(&sql).bind(calendar_id).bind(window_start_ms);
-        for id in &fetched {
-            q = q.bind(*id);
-        }
-        let swept = q.execute(&mut *tx).await?.rows_affected() as usize;
+        // Through `reap`, whose temp table has no variable ceiling — the
+        // `maxResults` pages bound a single fetch, not the window's total.
+        let swept = crate::reap::delete_unnamed(
+            &mut tx,
+            calendar_id,
+            &fetched,
+            crate::reap::Reach::EndingFrom { start_ms: window_start_ms },
+        )
+        .await? as usize;
         outcome.deleted += swept;
         if swept > 0 {
             tracing::info!(calendar_id, swept, "full resync removed rows the refetch no longer returned");

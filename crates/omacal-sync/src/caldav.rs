@@ -300,31 +300,17 @@ pub async fn sync_caldav_calendar(
         // anything alive in (or recurring into) the window that the server
         // did not mention no longer exists.
         //
-        // **Bounded at both ends, unlike the Google sweep** in `lib.rs`, which
-        // has no `start_utc <` term. The two are not a copy that drifted and
-        // should not be merged into one helper: this runs on every successful
-        // CalDAV sync, so it must not reach past what this REPORT asked for,
-        // while the Google one runs only after a *full* resync, where the
-        // fetch covered the window entire. The third copy that did duplicate
-        // this one — the WebCal path — is gone: a feed arrives whole, so it
-        // deletes by "not named in the file" and needs no window at all.
-        let placeholders: Vec<String> =
-            (0..seen.len()).map(|i| format!("?{}", i + 4)).collect();
-        let sql = format!(
-            "DELETE FROM events WHERE calendar_id = ?1
-               AND start_utc < ?2 AND (end_utc > ?3 OR recurrence IS NOT NULL)
-               {}",
-            if seen.is_empty() {
-                String::new()
-            } else {
-                format!("AND google_id NOT IN ({})", placeholders.join(", "))
-            }
-        );
-        let mut q = sqlx::query(&sql).bind(calendar_id).bind(window_end_ms).bind(window_start_ms);
-        for id in &seen {
-            q = q.bind(id);
-        }
-        let deleted = q.execute(&mut *tx).await.map_err(anyhow::Error::from)?.rows_affected();
+        // **Bounded at both ends, unlike the Google sweep** — see
+        // `reap::Reach` for why each provider reaches exactly as far as its
+        // own fetch asked, and no further.
+        let deleted = crate::reap::delete_unnamed(
+            &mut tx,
+            calendar_id,
+            &seen,
+            crate::reap::Reach::Overlapping { start_ms: window_start_ms, end_ms: window_end_ms },
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
         outcome.deleted += deleted as usize;
 
         sqlx::query(
