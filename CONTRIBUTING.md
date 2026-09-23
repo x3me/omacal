@@ -48,6 +48,35 @@ watch the test go red, restore from a copy, watch it go green — and say so in
 the commit body ("proven red against X"). Tests that have not earned their
 green this way tend to get rewritten in review.
 
+## Two rules that fail quietly
+
+Neither of these reddens anything when you get it wrong, which is why they
+keep arriving as review comments instead of as test failures.
+
+**A new message shown to the user has to be allow-listed.**
+`src-tauri/src/errors.rs` holds `SAFE_EXACT` and `SAFE_PREFIXES`; anything
+that does not match one is replaced by "Sync failed. See the application log
+for details." That default is deliberate — an error can carry a URL, an
+address or a token, and a deny-list only ever covers the secrets it was told
+to name. So if you add a refusal the user is meant to act on:
+
+- make it a `pub(crate) const`, interpolating nothing (or only a benign,
+  genuinely variable tail — that is what `SAFE_PREFIXES` is for);
+- add it to the right list with a comment citing the call site that raises it
+  and confirming nothing wraps it in `.context(..)` on the way;
+- name it in `every_message_the_app_relies_on_showing_is_still_allowlisted`
+  (or its prefix twin), which fails on a count mismatch if you forget;
+- and test that it is not `OPAQUE`.
+
+Skipping this does not fail the build. It just means a user who mistyped
+something reads a sync-fault report, which is how "that is not a calendar
+address" reached people as "Sync failed. See the application log."
+
+**A change to the CLI updates `skills/omacal/SKILL.md` in the same commit.**
+The skill is embedded in the binary with `include_str!` and refreshed on
+users' machines by `omacal skill install`, so a stale one is an agent being
+told about a flag that no longer exists. Same commit, not a follow-up.
+
 ## Where to start
 
 The codebase pushes logic out of the integration layers and into pure,

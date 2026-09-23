@@ -974,6 +974,17 @@ export function installTauriStub(scenario: string): Harness {
       // and with what, in `harness.calls`.
       case 'connect_caldav':
         return args.email;
+      case 'subscribe_webcal':
+        // The real one answers with the calendar id the feed syncs into, and
+        // refuses a URL that is not one before anything is written — the
+        // refusal the form shows is the backend's, so the stub raises the
+        // same sentence rather than inventing a shape of its own.
+        if (!/^(webcal|webcals|https?):\/\/\S+/i.test(String(args.url ?? '').trim())) {
+          return Promise.reject(
+            'That is not a calendar address. It should look like https://example.com/calendar.ics',
+          );
+        }
+        return 91;
       case 'get_week':
         return getWeek(scenario, args.weekStartMs).then((w) => padded(w, args.pad, padBuilder(scenario)));
       case 'get_range':

@@ -2715,6 +2715,42 @@ test.describe('App', () => {
    * *ordinary* shape of a Radicale account, so the form has to carry it as
    * far as the backend before anything can be said about the server.
    */
+  /** The WebCal form, which shipped in 5.1.0 with no browser coverage at all
+   *  while the CalDAV form beside it — same modal, same shape — had this. */
+  test('a public calendar is subscribed to by its address, and a typo is refused', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Accounts' }).click();
+    await modal.getByRole('button', { name: 'Add WebCal account' }).click();
+
+    // A subscription takes no writes, and the form says so before you commit.
+    await expect(modal.getByText(/Read-only: the feed syncs/)).toBeVisible();
+
+    // The same cleartext rule CalDAV states, said while the address is typed.
+    await modal.getByLabel('Calendar URL', { exact: true }).fill('http://feeds.example.com/x.ics');
+    await expect(modal.getByText(/Plain http is accepted only/)).toBeVisible();
+
+    // A typo is refused by name rather than as a sync fault.
+    await modal.getByLabel('Calendar URL', { exact: true }).fill('not a url');
+    await modal.getByRole('button', { name: 'Subscribe' }).click();
+    await expect(modal.getByText(/not a calendar address/)).toBeVisible();
+
+    await modal.getByLabel('Calendar URL', { exact: true }).fill('webcal://example.com/holidays.ics');
+    await modal.getByLabel('Name').fill('Holidays');
+    await modal.getByRole('button', { name: 'Subscribe' }).click();
+
+    await expect(modal.getByText(/Subscribed\./)).toBeVisible();
+    // Two submits: the refused typo, then the real one.
+    const calls = await callsTo(page, 'subscribe_webcal');
+    expect(calls).toHaveLength(2);
+    expect(calls[calls.length - 1], 'the submit never reached the backend').toMatchObject({
+      url: 'webcal://example.com/holidays.ics',
+      name: 'Holidays',
+    });
+  });
+
   test('a CalDAV server on the LAN connects with a bare username', async ({ page }) => {
     await writable(page);
     await page.getByRole('button', { name: 'Menu' }).click();

@@ -41,7 +41,22 @@ meetings, due tasks.
 A new invitation notifies you and **stays on screen until you deal with
 it**; one click accepts. The header tray keeps Yes / Maybe / No for anything
 unanswered, plus who declined your meetings and what was rescheduled or
-cancelled. Only the invitation itself notifies.
+cancelled. Only the invitation itself notifies. Answering **updates the
+calendar at once** while the reply saves behind it, so a morning's worth of
+invitations takes a morning's worth of clicks and no waiting; one that fails
+comes back to you on the invitation it belongs to.
+
+## Tasks, on the grid with the meetings
+
+Task lists sync from CalDAV alongside the calendars, and for an account that
+brings none there are lists that live on this machine. A task due at a *time*
+is drawn **at that hour, among the meetings** — drag it to another hour or
+another day, tick it off where it sits. One due on a date sits in the day's
+row above the grid instead.
+
+A task with a time **announces itself when it is due**, at the lead your phone
+set if it carries one. The Tasks pane holds the rest: what is outstanding,
+what is done, and which list each one is on.
 
 ## It never emails people on your behalf
 
@@ -54,6 +69,11 @@ a change that raced another device tells you instead of overwriting.
 No API key, no cloud project. Installed builds carry OmaCal's own
 Google-verified client. iCloud connects with an app-specific password; any
 other CalDAV server with its URL. Task lists (VTODO) come along.
+
+Public calendars need no account at all: **Add WebCal account** takes a
+`webcal://` or `https://` address — a university timetable, a fixture list, a
+holidays feed — and follows it on the same sync as everything else. A
+subscription is someone else's calendar, so it is read-only throughout.
 
 ## Install
 
@@ -80,7 +100,9 @@ Five views, Day to a whole-year ribbon; a week that can start today and
 show the next three, five or seven days; keyboard-first, with `?` showing
 every key; a list mode that leaves empty days out; search that resolves a
 repeating event to one result; several accounts, with colours that stay
-local; reminders that mirror what your phone fires.
+local; reminders that mirror what your phone fires; the same meeting held on
+two calendars drawn as one block, if you turn it on; and an interface scale
+for a screen whose own scaling never reaches the app.
 
 Building from source: [`docs/running-on-omarchy.md`](docs/running-on-omarchy.md) ·
 [`docs/running-on-macos.md`](docs/running-on-macos.md). The design record
