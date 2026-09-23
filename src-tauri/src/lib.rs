@@ -1075,7 +1075,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
 
     for (account_id, _, _, _, _) in all.iter().filter(|(_, _, p, _, _)| p == "webcal") {
         let (t, f) =
-            webcal_subscription::sync_account(pool, *account_id, window_start, window_end).await;
+            webcal_subscription::sync_account(pool, *account_id).await;
         total += t;
         failed.extend(f);
     }

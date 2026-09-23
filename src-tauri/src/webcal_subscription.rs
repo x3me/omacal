@@ -54,9 +54,7 @@ pub async fn subscribe_webcal(
 
     // Immediate first sync so the calendar is not empty until the ticker.
     // A failure here is not fatal: the rows exist and the loop will retry.
-    let now = crate::now_ms();
-    let (ws, we) = crate::synced_window(now);
-    if let Err(e) = omacal_sync::webcal_feed::sync_webcal_calendar(&state.pool, calendar_id, &feed_url, ws, we)
+    if let Err(e) = omacal_sync::webcal_feed::sync_webcal_calendar(&state.pool, calendar_id, &feed_url)
         .await
     {
         tracing::warn!(%e, calendar_id, "subscribed feed did not sync on its first try");
@@ -74,14 +72,11 @@ fn user_facing_feed(e: omacal_sync::webcal_feed::WebcalFeedError) -> String {
 
 /// Syncs every enabled calendar of one subscribed-feeds account. One bad feed
 /// never stops the others — the same per-calendar isolation Google gets.
+///
+/// Takes no window: a feed arrives whole, so there is no slice to ask for.
 /// No `dead`/reauth concept: feeds hold no credentials, so every failure is
 /// a plain `failed` label, never a reconnect banner.
-pub(crate) async fn sync_account(
-    pool: &SqlitePool,
-    account_id: i64,
-    window_start_ms: i64,
-    window_end_ms: i64,
-) -> (u64, Vec<String>) {
+pub(crate) async fn sync_account(pool: &SqlitePool, account_id: i64) -> (u64, Vec<String>) {
     let account_name: String = sqlx::query_scalar("SELECT email FROM accounts WHERE id = ?1")
         .bind(account_id)
         .fetch_optional(pool)
@@ -101,7 +96,7 @@ pub(crate) async fn sync_account(
     let mut total = 0u64;
     let mut failed = Vec::new();
     for (cal_id, feed_url) in cals {
-        match omacal_sync::webcal_feed::sync_webcal_calendar(pool, cal_id, &feed_url, window_start_ms, window_end_ms)
+        match omacal_sync::webcal_feed::sync_webcal_calendar(pool, cal_id, &feed_url)
             .await
         {
             Ok(out) => total += (out.upserted + out.deleted) as u64,

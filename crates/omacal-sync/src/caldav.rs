@@ -226,8 +226,19 @@ pub async fn sync_caldav_calendar(
             .map_err(anyhow::Error::from)?
             .flatten();
 
+    // An unchanged ctag means nothing was edited — but it says nothing about
+    // what the window has newly reached, so the day-advance check gets a say
+    // before the short-circuit. See `crate::window_advanced_a_day`.
     let ctag = client.ctag(collection_url).await?;
-    if ctag.is_some() && ctag == stored_ctag {
+    // `supports_events` gates the check, because the window write below is
+    // inside that branch: a tasks-only collection never records one, so an
+    // ungated check would read "no window" for ever and refetch its tasks on
+    // every tick. Tasks have no window to advance past in any case.
+    if ctag.is_some()
+        && ctag == stored_ctag
+        && !(supports_events
+            && crate::window_advanced_a_day(pool, calendar_id, window_end_ms).await)
+    {
         return Ok(SyncOutcome::default());
     }
 

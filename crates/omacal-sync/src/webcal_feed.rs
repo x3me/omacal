@@ -189,14 +189,18 @@ pub async fn fetch_feed(
 }
 
 /// Syncs one subscribed feed into its calendar: conditional GET, full parse,
-/// then the same transactional upsert + window-bounded inferred-deletion as
-/// the CalDAV path. `feed_url` is the calendar row's `google_id`.
+/// then a transactional upsert and whole-collection inferred deletion.
+/// `feed_url` is the calendar row's `google_id`.
+///
+/// **No window, unlike CalDAV and Google.** Those two ask the server for a
+/// slice and so must bound what they store and what they reap. A feed arrives
+/// whole or not at all, so there is nothing to bound — and bounding it was a
+/// bug: an event past the horizon was parsed, discarded, and then never seen
+/// again, because the next sync answered 304 and never re-parsed the file.
 pub async fn sync_webcal_calendar(
     pool: &SqlitePool,
     calendar_id: i64,
     feed_url: &str,
-    window_start_ms: i64,
-    window_end_ms: i64,
 ) -> Result<SyncOutcome, WebcalFeedError> {
     let stored: Option<String> =
         sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = ?1")
@@ -206,57 +210,22 @@ pub async fn sync_webcal_calendar(
             .map_err(anyhow::Error::from)?
             .flatten();
 
+    // HTTP 304: the file has not changed, and without a window there is
+    // nothing else that could have — the rows are current, full stop.
     let Some(fetched) = fetch_feed(feed_url, stored.as_deref()).await? else {
-        // HTTP 304: nothing changed, but the window moved — record it so the
-        // next change probe compares against a fresh window, like the CalDAV
-        // path which always writes the window on success.
-        refresh_window(pool, calendar_id, window_start_ms, window_end_ms).await?;
         return Ok(SyncOutcome::default());
     };
     let cursor = cursor_for(fetched.etag.as_deref(), fetched.last_modified.as_deref(), &fetched.body);
     // Content-identical but validator-less (the server issues neither ETag
-    // nor Last-Modified): skip the write churn, but still record the window.
+    // nor Last-Modified): the rows already match the file, so skip the churn.
     if stored.as_deref() == Some(cursor.as_str()) {
-        refresh_window(pool, calendar_id, window_start_ms, window_end_ms).await?;
         return Ok(SyncOutcome::default());
     }
 
-    let applied = apply_feed_body(
-        pool,
-        calendar_id,
-        &fetched.body,
-        &cursor,
-        window_start_ms,
-        window_end_ms,
-    )
-    .await
-    .map_err(WebcalFeedError::Other)?;
+    let applied = apply_feed_body(pool, calendar_id, &fetched.body, &cursor)
+        .await
+        .map_err(WebcalFeedError::Other)?;
     Ok(applied)
-}
-
-/// Records a fresh window without touching the cursor: a 304 (or a
-/// content-identical body) means the rows are current, but the window the
-/// next probe compares against has still moved.
-async fn refresh_window(
-    pool: &SqlitePool,
-    calendar_id: i64,
-    window_start_ms: i64,
-    window_end_ms: i64,
-) -> Result<(), WebcalFeedError> {
-    sqlx::query(
-        "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
-         VALUES (?1, (SELECT sync_token FROM sync_state WHERE calendar_id = ?1), ?2, ?3)
-         ON CONFLICT (calendar_id) DO UPDATE SET
-             window_start = excluded.window_start,
-             window_end = excluded.window_end",
-    )
-    .bind(calendar_id)
-    .bind(window_start_ms)
-    .bind(window_end_ms)
-    .execute(pool)
-    .await
-    .map_err(anyhow::Error::from)?;
-    Ok(())
 }
 
 /// Parses one feed body and reconciles it with the store. Split from
@@ -266,8 +235,6 @@ pub async fn apply_feed_body(
     calendar_id: i64,
     body: &str,
     cursor: &str,
-    window_start_ms: i64,
-    window_end_ms: i64,
 ) -> anyhow::Result<SyncOutcome> {
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
         .bind(calendar_id)
@@ -283,14 +250,12 @@ pub async fn apply_feed_body(
             tracing::warn!("VEVENT with unusable times; skipping");
             continue;
         };
-        // Client-side window: the whole file was fetched, but the store only
-        // keeps what the window would have returned — plus every recurring
-        // master, whose occurrences may fall inside it.
-        let in_window = stored.start_utc < window_end_ms
-            && (stored.end_utc > window_start_ms || stored.recurrence.is_some());
-        if in_window {
-            rows.push(stored);
-        }
+        // **No window.** The whole file was fetched and parsed either way — the
+        // window was a client-side discard of rows already in hand, and
+        // discarding them is what made an event beyond the horizon invisible
+        // for good once the feed stopped changing: the next sync answered 304
+        // and never re-parsed. A feed costs the same to store whole.
+        rows.push(stored);
     }
     let seen: Vec<String> = rows.iter().map(|r| r.google_id.clone()).collect();
 
@@ -310,38 +275,44 @@ pub async fn apply_feed_body(
         outcome.upserted += 1;
     }
 
-    // Inferred deletions, bounded to what this fetch covered — the CalDAV
-    // predicate verbatim, so a finished series outside the window is left
-    // alone rather than wrongly reaped.
-    let placeholders: Vec<String> = (0..seen.len()).map(|i| format!("?{}", i + 4)).collect();
-    let sql = format!(
-        "DELETE FROM events WHERE calendar_id = ?1
-           AND start_utc < ?2 AND (end_utc > ?3 OR recurrence IS NOT NULL)
-           {}",
-        if seen.is_empty() {
-            String::new()
-        } else {
-            format!("AND google_id NOT IN ({})", placeholders.join(", "))
-        }
-    );
-    let mut q = sqlx::query(&sql).bind(calendar_id).bind(window_end_ms).bind(window_start_ms);
+    // **Deletions need no window here.** The CalDAV and Google paths bound
+    // theirs because they only ever looked at a slice of the collection, and
+    // may not delete what they did not examine. A feed is the whole truth on
+    // every fetch, so anything on this calendar the file does not name is
+    // gone — which is both simpler and more correct than the predicate this
+    // replaced, and one fewer copy of it to keep in step.
+    //
+    // Through a temp table rather than `NOT IN (?, ?, …)`: an unwindowed feed
+    // can name more ids than SQLite's 32,766-variable ceiling, and binding
+    // them one per placeholder would fail the whole sync on a large feed.
+    sqlx::query("CREATE TEMP TABLE IF NOT EXISTS feed_seen (uid TEXT PRIMARY KEY)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM feed_seen").execute(&mut *tx).await?;
     for id in &seen {
-        q = q.bind(id);
+        sqlx::query("INSERT OR IGNORE INTO feed_seen (uid) VALUES (?1)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     }
-    outcome.deleted += q.execute(&mut *tx).await?.rows_affected() as usize;
+    outcome.deleted += sqlx::query(
+        "DELETE FROM events
+          WHERE calendar_id = ?1 AND google_id NOT IN (SELECT uid FROM feed_seen)",
+    )
+    .bind(calendar_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected() as usize;
+    sqlx::query("DELETE FROM feed_seen").execute(&mut *tx).await?;
 
+    // The window columns belong to the providers that still have one.
     sqlx::query(
-        "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (calendar_id) DO UPDATE SET
-             sync_token = excluded.sync_token,
-             window_start = excluded.window_start,
-             window_end = excluded.window_end",
+        "INSERT INTO sync_state (calendar_id, sync_token)
+         VALUES (?1, ?2)
+         ON CONFLICT (calendar_id) DO UPDATE SET sync_token = excluded.sync_token",
     )
     .bind(calendar_id)
     .bind(cursor)
-    .bind(window_start_ms)
-    .bind(window_end_ms)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -412,7 +383,7 @@ mod tests {
         sqlx::query("UPDATE calendars SET google_id = ?1 WHERE id = 1").bind(&url)
             .execute(&pool).await.unwrap();
 
-        let out = sync_webcal_calendar(&pool, 1, &url, 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_webcal_calendar(&pool, 1, &url).await.unwrap();
         assert_eq!(out.upserted, 2);
         let tok: Option<String> = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
@@ -431,16 +402,16 @@ mod tests {
         sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, 'etag:\"v1\"', 0, 0)")
             .execute(&pool).await.unwrap();
 
-        let out = sync_webcal_calendar(&pool, 1, &url, 100, 200).await.unwrap();
+        let out = sync_webcal_calendar(&pool, 1, &url).await.unwrap();
         assert_eq!(out, SyncOutcome::default());
-        // The rows are current, but the window the next probe compares against
-        // has still moved — the CalDAV path always writes it on success.
-        let (ws, we): (i64, i64) =
-            sqlx::query_as("SELECT window_start, window_end FROM sync_state WHERE calendar_id = 1")
+        // Nothing else to record: without a window, an unchanged file means
+        // unchanged rows, and the cursor it was probed with still stands.
+        let tok: Option<String> =
+            sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!((ws, we), (100, 200));
+        assert_eq!(tok.as_deref(), Some("etag:\"v1\""));
     }
 
     /// The mirror of the test above for a feed that offers `Last-Modified`
@@ -463,7 +434,7 @@ mod tests {
             .bind(format!("lm:{LM}"))
             .execute(&pool).await.unwrap();
 
-        let out = sync_webcal_calendar(&pool, 1, &url, 100, 200).await.unwrap();
+        let out = sync_webcal_calendar(&pool, 1, &url).await.unwrap();
         assert_eq!(out, SyncOutcome::default(), "304 writes nothing");
 
         let sent = server.received_requests().await.unwrap();
@@ -478,10 +449,6 @@ mod tests {
             "a date is not an entity-tag: as one it matches nothing and the feed refetches in full",
         );
 
-        let (ws, we): (i64, i64) =
-            sqlx::query_as("SELECT window_start, window_end FROM sync_state WHERE calendar_id = 1")
-                .fetch_one(&pool).await.unwrap();
-        assert_eq!((ws, we), (100, 200), "the window still moves");
     }
 
     /// Which header a cursor travels in, and that a content hash travels in
@@ -497,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_validator_less_refetch_with_identical_content_skips_writes_but_refreshes_the_window() {
+    async fn a_validator_less_refetch_with_identical_content_skips_the_writes() {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/feed.ics"))
             .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
@@ -511,21 +478,24 @@ mod tests {
             .bind(&cursor)
             .execute(&pool).await.unwrap();
 
-        let out = sync_webcal_calendar(&pool, 1, &url, 100, 9_999_999_999_999).await.unwrap();
+        let out = sync_webcal_calendar(&pool, 1, &url).await.unwrap();
         assert_eq!(out, SyncOutcome::default(), "no write churn on identical content");
-        let (tok, ws): (Option<String>, i64) =
-            sqlx::query_as("SELECT sync_token, window_start FROM sync_state WHERE calendar_id = 1")
+        let tok: Option<String> =
+            sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(tok.as_deref(), Some(cursor.as_str()));
-        assert_eq!(ws, 100, "window still moves");
     }
 
+    /// A feed names its collection in full, so anything it does not name is
+    /// gone — including rows a window would once have shielded. That shielding
+    /// was the bug: the file is the whole truth on every fetch.
     #[tokio::test]
-    async fn an_event_missing_from_the_refetch_is_deleted_in_window_only() {
+    async fn an_event_missing_from_the_refetch_is_deleted_however_far_out() {
         let pool = seeded_pool().await;
-        // In-window ghost (must go), pre-window relic (must stay).
+        // Two ghosts the feed does not name: one recent, one far in the past
+        // that the old window-bounded delete would have left behind for ever.
         for (gid, start, end) in [("ghost", 3_000_000, 3_100_000), ("relic", 100, 200)] {
             sqlx::query(
                 "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, status, updated_at)
@@ -535,22 +505,32 @@ mod tests {
         let one = FEED.replace("UID:two", "UID:kept")
             .replace("20260818", "20260819");
         // Feed holds one event overlapping the window; ghost is absent.
-        let out = apply_feed_body(&pool, 1, &one, "hash:x", 1_000_000, 9_999_999_999_999)
+        let out = apply_feed_body(&pool, 1, &one, "hash:x")
             .await.unwrap();
-        assert_eq!(out.deleted, 1);
+        assert_eq!(out.deleted, 2, "both ghosts go; the feed named neither");
         let left: Vec<String> =
             sqlx::query_scalar("SELECT google_id FROM events WHERE calendar_id = 1 ORDER BY google_id")
                 .fetch_all(&pool).await.unwrap();
-        assert!(left.contains(&"relic".to_string()), "pre-window rows are never reaped");
+        assert!(!left.contains(&"relic".to_string()));
         assert!(!left.contains(&"ghost".to_string()));
+        assert!(left.iter().any(|g| g == "one"), "what the feed names stays");
     }
 
+    /// **The bug this replaced.** Every event in the file is stored, however
+    /// far from today it sits. The window used to discard them after parsing,
+    /// so an event beyond the horizon was invisible until the feed changed
+    /// again — and a holidays feed may not change for a year.
     #[tokio::test]
-    async fn events_outside_the_window_are_not_stored() {
+    async fn every_event_in_the_feed_is_stored_however_far_out() {
         let pool = seeded_pool().await;
-        // Both feed events are Aug 2026; sync a 2020 window.
-        let out = apply_feed_body(&pool, 1, FEED, "hash:y", 1_500_000_000_000, 1_600_000_000_000)
-            .await.unwrap();
-        assert_eq!(out.upserted, 0);
+        let far = FEED
+            .replace("20260817", "20991231")
+            .replace("20260818", "20991231");
+        let out = apply_feed_body(&pool, 1, &far, "hash:y").await.unwrap();
+        assert_eq!(out.upserted, 2, "a 2099 event is still the feed's to tell us about");
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE calendar_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, 2);
     }
 }

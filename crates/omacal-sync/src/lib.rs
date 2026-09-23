@@ -37,6 +37,54 @@ enum Change {
 
 /// Syncs one calendar, following pagination and recovering from a stale token.
 ///
+/// Whether the sliding window has moved past the one this calendar last
+/// fetched, measured in whole days.
+///
+/// **A cursor answers "what changed?", never "what has come into range?"** An
+/// event beyond the horizon is not a *change* when the horizon later reaches
+/// it, so a calendar that is otherwise quiet would never fetch it: Google's
+/// syncToken, CalDAV's ctag and a feed's ETag all share that blind spot. Add
+/// next year's conference from a phone, 400 days out; five weeks later it is
+/// inside the window, but nothing on that calendar has changed, so nothing
+/// fetches it. It appears only when something unrelated does.
+///
+/// **Quantised to the day on purpose.** `synced_window` is `now ± N days` and
+/// slides with every tick, so an exact comparison is true on every sync and
+/// would turn each one into a full fetch — precisely what the cursor exists to
+/// avoid. A day makes it true once per calendar per day, staggered by when
+/// each last synced rather than all at once at midnight.
+///
+/// A calendar with no recorded window fetches one: either it has never synced,
+/// or it is a feed, which has no window and is handled by fetching the file
+/// whole (see `webcal_feed`).
+///
+/// A read failure answers `false`. Forcing a full fetch on every tick because
+/// the database is unreadable would be a worse failure than the gap this
+/// closes, and a sync whose store cannot be read is about to fail anyway.
+pub async fn window_advanced_a_day(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    window_end_ms: i64,
+) -> bool {
+    const DAY: i64 = 24 * 3_600_000;
+    let stored: Option<i64> =
+        match sqlx::query_scalar("SELECT window_end FROM sync_state WHERE calendar_id = ?1")
+            .bind(calendar_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row.flatten(),
+            Err(e) => {
+                tracing::warn!(calendar_id, %e, "could not read the fetched window");
+                return false;
+            }
+        };
+    match stored {
+        None => true,
+        Some(end) => end.div_euclid(DAY) < window_end_ms.div_euclid(DAY),
+    }
+}
+
 /// Uses the stored `sync_token` when present. On `410 GONE` the token is
 /// discarded and a full windowed sync runs instead — expected behaviour, not an
 /// error (spec §5).
@@ -65,8 +113,21 @@ pub async fn sync_calendar(
             .await?
             .flatten();
 
-    let mut token = stored_token;
-    let mut did_full_resync = false;
+    // The window has reached events the cursor will never mention: drop the
+    // token and take the full-fetch path this already has for a rejected one.
+    //
+    // **And say that a full resync happened**, because it has. The flag gates
+    // the sweep of rows the refetch no longer returned; a full fetch that did
+    // not set it would pull everything and still leave a row deleted upstream
+    // sitting in the store. Only when a token was actually discarded: a first
+    // sync has no token and no local rows for the sweep to find.
+    let dropped_for_window =
+        stored_token.is_some() && window_advanced_a_day(pool, calendar_id, window_end_ms).await;
+    if dropped_for_window {
+        tracing::info!(calendar_id, "window advanced a day; full fetch rather than incremental");
+    }
+    let mut token = if dropped_for_window { None } else { stored_token };
+    let mut did_full_resync = dropped_for_window;
 
     loop {
         match drain(client, calendar_id, google_id, &cal_tz,
@@ -379,6 +440,45 @@ mod tests {
     }
 
     /// The recovery path from spec §5. A stale token must not be fatal.
+    /// The rule itself, without HTTP. A cursor answers "what changed?", so a
+    /// calendar that is quiet while the horizon advances over an event would
+    /// never fetch it — the quantisation is what keeps that from costing a
+    /// full fetch on every one of the day's ~288 ticks.
+    #[tokio::test]
+    async fn the_window_forces_a_fetch_once_a_day_and_not_once_a_tick() {
+        const DAY: i64 = 24 * 3_600_000;
+        let pool = seeded_pool().await;
+
+        // Never synced: there is no fetched window, so fetch one.
+        assert!(window_advanced_a_day(&pool, 1, 10 * DAY).await);
+
+        sqlx::query(
+            "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+             VALUES (1, 'tok', 0, ?1)",
+        )
+        .bind(10 * DAY + 3_600_000)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Later the same day — the window slides with every tick, and answering
+        // yes here would turn each sync into a full one.
+        assert!(!window_advanced_a_day(&pool, 1, 10 * DAY + 7_200_000).await);
+        assert!(!window_advanced_a_day(&pool, 1, 10 * DAY + 23 * 3_600_000).await);
+
+        // The next day, once.
+        assert!(window_advanced_a_day(&pool, 1, 11 * DAY).await);
+
+        // A feed records no window at all (migration 0017 made the columns
+        // nullable); it fetches its file whole, so the answer is moot but must
+        // not be "no".
+        sqlx::query("UPDATE sync_state SET window_end = NULL WHERE calendar_id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(window_advanced_a_day(&pool, 1, 10 * DAY).await);
+    }
+
     #[tokio::test]
     async fn a_410_triggers_a_full_resync() {
         let server = MockServer::start().await;
@@ -472,8 +572,13 @@ mod tests {
 
         let pool = seeded_pool().await;
         sqlx::query(
+            // The stored window must match the one synced below, or
+            // `window_advanced_a_day` reads this as decades of drift, drops the
+            // token and takes the full path — which is a different test. The
+            // column was a placeholder when it was written; it means something
+            // now.
             "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
-             VALUES (1, 'tok-1', 0, 0)")
+             VALUES (1, 'tok-1', 0, 9_999_999_999_999)")
             .execute(&pool).await.unwrap();
         omacal_store::upsert_event(&pool, &stored("untouched", 3_000_000, 3_100_000))
             .await.unwrap();
