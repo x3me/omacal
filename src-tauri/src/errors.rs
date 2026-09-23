@@ -28,6 +28,12 @@ const SAFE_PREFIXES: &[&str] = &[
     // directory (os error 2)"); fires before any secret is ever read off disk,
     // so "client_secret" here can only ever be the literal key name.
     "no config at ",
+    // src-tauri/src/tasks.rs — `list_name`'s collision refusal, which appends
+    // the name of the list already using it. Variable and benign: a list name
+    // the user typed or their CalDAV server published, read back to them in
+    // their own window. Nothing wraps it in further context — `create_task_list`
+    // and `rename_task_list` map it straight through `user_facing`.
+    crate::tasks::LIST_NAME_TAKEN,
     // src-tauri/src/events.rs — `split_series`' refusal to strand materialised
     // exceptions in the tail of a series it is about to split. A prefix rather
     // than an exact entry because it genuinely has a variable part: the number
@@ -249,6 +255,39 @@ const SAFE_EXACT: &[&str] = &[
     crate::tasks::TASK_NOT_MOVED,
     crate::tasks::TASK_ON_BOTH_LISTS,
     crate::tasks::TASK_CHANGED_ON_SERVER,
+    // src-tauri/src/tasks.rs — the task verbs' own refusals, each a fixed
+    // literal raised with `bail!`/`anyhow!` before any write and reaching the
+    // user through the command's `.map_err(user_facing)` with no `.context(..)`
+    // on the way. None interpolates anything.
+    //
+    // Allow-listed together with the fix that made them reachable at all: until
+    // 2026-09-23 `set_task_completed`, `create_task` and `delete_task_cmd`
+    // ended `.map_err(|e| e.to_string())`, so no task error passed through here
+    // — the raw `anyhow` Display went to the banner, and a CalDAV failure put
+    // the DAV URL on screen (a `reqwest::Error` renders as "error sending
+    // request for url (https://host/dav/<user>/tasks/<uid>.ics)"). Routing them
+    // through `user_facing` without these entries would have traded a leak for
+    // six sync-fault reports about typos, so the two land together.
+    //
+    // `TASK_GONE` is the literal twin of "that event is no longer here", which
+    // is allow-listed above for the same reason.
+    crate::tasks::TASK_GONE,
+    crate::tasks::TASK_NEEDS_A_TITLE,
+    crate::tasks::NOT_A_TASK_LIST,
+    crate::tasks::LIST_NEEDS_A_NAME,
+    crate::tasks::LIST_NAME_TOO_LONG,
+    // src-tauri/src/caldav_write.rs and caldav_account.rs — the event write
+    // path's three refusals, fixed literals raised before anything leaves the
+    // machine and reaching the user through the command's own
+    // `.map_err(user_facing)`.
+    //
+    // `EVENT_CHANGED_ON_SERVER` is the twin of `TASK_CHANGED_ON_SERVER` above:
+    // the same 412, the same remedy. Until 2026-09-23 only the task one was
+    // listed, so a conflict told a task user to sync and left an event user
+    // with a fault report.
+    crate::caldav_write::EVENT_CHANGED_ON_SERVER,
+    crate::caldav_write::EVENT_NOT_SYNCED_YET,
+    crate::caldav_account::CALENDAR_IS_READ_ONLY,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -544,6 +583,19 @@ mod tests {
             crate::tasks::TASK_NOT_MOVED,
             crate::tasks::TASK_ON_BOTH_LISTS,
             crate::tasks::TASK_CHANGED_ON_SERVER,
+            // Checked against the same rule: six fixed literals from the task
+            // verbs, no interpolation, raised before the write and mapped by
+            // the command itself.
+            crate::tasks::TASK_GONE,
+            crate::tasks::TASK_NEEDS_A_TITLE,
+            crate::tasks::NOT_A_TASK_LIST,
+            crate::tasks::LIST_NEEDS_A_NAME,
+            crate::tasks::LIST_NAME_TOO_LONG,
+            // Checked against the same rule: the event write path's three,
+            // fixed literals raised before the write.
+            crate::caldav_write::EVENT_CHANGED_ON_SERVER,
+            crate::caldav_write::EVENT_NOT_SYNCED_YET,
+            crate::caldav_account::CALENDAR_IS_READ_ONLY,
             // The interface scale's range, a fixed literal raised before the
             // write.
             crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
@@ -592,6 +644,45 @@ mod tests {
         assert_ne!(user_facing(&raised), OPAQUE);
     }
 
+    /// A task verb's refusals reach the user, and a transport failure does
+    /// not. Until 2026-09-23 three of the four task commands ended
+    /// `.map_err(|e| e.to_string())`, which skipped this function entirely:
+    /// every refusal below arrived verbatim — and so did a `reqwest::Error`
+    /// carrying the CalDAV URL, which is what `OPAQUE` exists to withhold.
+    #[test]
+    fn a_task_refusal_is_shown_and_a_transport_error_is_not() {
+        for lit in [
+            crate::tasks::TASK_GONE,
+            crate::tasks::TASK_NEEDS_A_TITLE,
+            crate::tasks::NOT_A_TASK_LIST,
+            crate::tasks::LIST_NEEDS_A_NAME,
+            crate::tasks::LIST_NAME_TOO_LONG,
+        ] {
+            let raised = anyhow::anyhow!(lit);
+            assert_eq!(user_facing(&raised), lit, "{lit:?} no longer reaches the user");
+        }
+        // The collision refusal keeps its list name, through SAFE_PREFIXES.
+        let taken = anyhow::anyhow!("{}{}", crate::tasks::LIST_NAME_TAKEN, "Groceries");
+        assert_eq!(user_facing(&taken), "there is already a list called Groceries");
+
+        // The event write path's twins of the same refusals.
+        for lit in [
+            crate::caldav_write::EVENT_CHANGED_ON_SERVER,
+            crate::caldav_write::EVENT_NOT_SYNCED_YET,
+            crate::caldav_account::CALENDAR_IS_READ_ONLY,
+        ] {
+            let raised = anyhow::anyhow!(lit);
+            assert_eq!(user_facing(&raised), lit, "{lit:?} no longer reaches the user");
+        }
+        // The shape a failed CalDAV task write actually takes.
+        let transport = anyhow::anyhow!(
+            "error sending request for url (https://cal.example.com/dav/alice/tasks/9f3.ics)"
+        );
+        let shown = user_facing(&transport);
+        assert_eq!(shown, OPAQUE);
+        assert!(!shown.contains("cal.example.com"), "the DAV URL reached the user: {shown}");
+    }
+
     /// The same rule for a typed feed address (#142/#143). Mistyping it is
     /// the likeliest thing that happens when subscribing, and the opaque
     /// sentence names *syncing* — an operation the user did not start.
@@ -632,6 +723,9 @@ mod tests {
     fn every_prefix_the_app_relies_on_showing_is_still_allowlisted() {
         const EXPECTED: &[&str] = &[
             "no config at ",
+            // Checked against the doc-comment rule: the trailing detail is a
+            // list name, variable and benign, appended by one `bail!`.
+            crate::tasks::LIST_NAME_TAKEN,
             "some later occurrences of this series were moved or deleted on their own, and a \
              split cannot carry them across — edit all events instead, or re-create them \
              afterwards. Occurrences affected: ",

@@ -1,6 +1,7 @@
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
   import { formatDate, type DateFormat } from './datefmt';
+  import { zoneClock } from './timefmt';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -33,8 +34,20 @@
   const fraction = $derived(panel ? Math.max(0, Math.min(1, (now - range.start) / (range.end - range.start))) : 0);
   const hours = $derived(panel ? Array.from({ length: Math.ceil((range.end - range.start) / 3600000) }, (_, i) => range.start + i * 3600000) : []);
   const heading = $derived(panel ? formatDate(panel.day_start_ms, panel.date_format, { weekday: 'long', month: 'short', day: 'numeric', timeZone: panel.timezone }) : 'Today');
+  // **The app's own clock, not `Intl`'s.** `timefmt.ts` says why in full: the
+  // 12-hour side has no locale luck (`1:30 PM` / `1:30 pm` / `13:30` in a
+  // locale that ignores the flag) and a golden of this popup would then follow
+  // the ICU data of whichever machine rendered it. Asking `Intl` here also put
+  // three spellings of one instant on screen at once — this popup's, the grid's
+  // and the bar widget's.
+  //
+  // `zoneClock` takes the zone explicitly, which is what the popup needs: it
+  // draws the *feed's* zone, not this process's. The fallback is only for the
+  // heading, the one clock that renders before a feed arrives; an alias there
+  // is harmless, since the name is resolved to an offset, never displayed.
   function clock(ms: number) {
-    return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', hour12: panel?.time_format === '12h', timeZone: panel?.timezone }).format(ms);
+    const tz = panel?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zoneClock(ms, tz, panel?.time_format === '12h' ? '12h' : '24h');
   }
   function color(e: Event) { return /^#[0-9a-f]{6}$/i.test(e.color ?? '') ? e.color! : 'var(--accent)'; }
   function date(ms: number) {

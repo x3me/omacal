@@ -177,6 +177,11 @@ pub(crate) fn client_for(
 /// The client (and collection URL) behind one CalDAV calendar, with the
 /// read-only refusal every write path shares. Errors when the calendar does
 /// not belong to a CalDAV account at all.
+/// Every CalDAV create, update and delete passes through `client_for_calendar`,
+/// so this is what a write to a subscribed or shared read-only collection
+/// reports. A fixed literal, raised before anything leaves the machine.
+pub(crate) const CALENDAR_IS_READ_ONLY: &str = "this calendar is read-only";
+
 pub(crate) async fn client_for_calendar(
     state: &crate::AppState,
     calendar_id: i64,
@@ -192,7 +197,7 @@ pub(crate) async fn client_for_calendar(
     .await?
     .ok_or_else(|| anyhow::anyhow!("that calendar is not on a CalDAV account"))?;
     if access_role == "reader" {
-        anyhow::bail!("this calendar is read-only");
+        anyhow::bail!(CALENDAR_IS_READ_ONLY);
     }
     let client = client_for(&email, server_url.as_deref(), username.as_deref())?;
     Ok((client, collection_url))

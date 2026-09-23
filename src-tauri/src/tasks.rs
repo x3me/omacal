@@ -154,7 +154,7 @@ pub async fn set_task_completed(
     on: bool,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    set_completed_impl(&state, id, on).await.map_err(|e| e.to_string())?;
+    set_completed_impl(&state, id, on).await.map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
 }
 
@@ -507,6 +507,19 @@ pub(crate) const TASK_ON_BOTH_LISTS: &str =
     "The task is now on the list you chose, but OmaCal could not take it off the \
      old one — it is on both. Delete the copy on the old list.";
 pub(crate) const TASK_GONE: &str = "that task is no longer here";
+/// `list_name`'s three refusals. Named so they can be allow-listed: each
+/// says what to do about a name the user just typed, and OPAQUE for a
+/// 61-character list name would report a sync fault for a typo.
+///
+/// **The collision one names the list**, and so is a `SAFE_PREFIXES` entry
+/// rather than an exact one: the trailing detail is a list name the user or
+/// their server chose, which is the "variable, benign" case that list is for.
+/// Naming it was deliberate — `lists_on_this_device_are_created_renamed_and_
+/// deleted` asserts the name appears — and two lists whose collision is with
+/// one the user cannot see is exactly when the name earns its place.
+pub(crate) const LIST_NEEDS_A_NAME: &str = "a list needs a name";
+pub(crate) const LIST_NAME_TOO_LONG: &str = "a list name can be up to 60 characters";
+pub(crate) const LIST_NAME_TAKEN: &str = "there is already a list called ";
 pub(crate) const NOT_A_TASK_LIST: &str =
     "that is not a task list you can add to — `omacal tasks` names the lists in each row";
 
@@ -524,7 +537,7 @@ pub async fn create_task(
     crate::demo_sync_guard(state.demo)?;
     create_impl(&state, calendar_id, &summary, due_ms, due_all_day.unwrap_or(true))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
 }
 
@@ -618,14 +631,14 @@ pub async fn delete_task_cmd(
     id: i64,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    delete_impl(&state, id).await.map_err(|e| e.to_string())?;
+    delete_impl(&state, id).await.map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
 }
 
 async fn delete_impl(state: &AppState, id: i64) -> anyhow::Result<()> {
     let task = omacal_store::task_by_id(&state.pool, id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("that task is no longer here"))?;
+        .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     if let TaskHome::Server(client, _) = task_home(state, task.calendar_id).await? {
         let href = task.caldav_href.as_deref()
             .ok_or_else(|| anyhow::anyhow!("task has no href"))?;
@@ -788,14 +801,14 @@ fn next_list_colour(lists: &[TaskListVm]) -> &'static str {
 fn list_name(name: &str, lists: &[TaskListVm], except: Option<i64>) -> anyhow::Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        anyhow::bail!("a list needs a name");
+        anyhow::bail!(LIST_NEEDS_A_NAME);
     }
     if name.chars().count() > 60 {
-        anyhow::bail!("a list name can be up to 60 characters");
+        anyhow::bail!(LIST_NAME_TOO_LONG);
     }
     let lower = name.to_lowercase();
     if lists.iter().any(|l| Some(l.calendar_id) != except && l.name.to_lowercase() == lower) {
-        anyhow::bail!("there is already a list called {name}");
+        anyhow::bail!("{LIST_NAME_TAKEN}{name}");
     }
     Ok(name.to_string())
 }

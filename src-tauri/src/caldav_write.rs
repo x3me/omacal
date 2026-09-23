@@ -101,7 +101,7 @@ async fn resource_of(state: &AppState, master_id: i64) -> anyhow::Result<(String
     let (href, raw) = row.ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
     match (href, raw) {
         (Some(h), Some(r)) => Ok((h, r)),
-        _ => anyhow::bail!("this event has not finished syncing; try again in a moment"),
+        _ => anyhow::bail!(EVENT_NOT_SYNCED_YET),
     }
 }
 
@@ -210,11 +210,21 @@ fn now_ts() -> jiff::Timestamp {
     jiff::Timestamp::from_millisecond(crate::now_ms()).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
 }
 
+/// The 412 an etag-guarded write answers with, worded as its task twin
+/// `tasks::TASK_CHANGED_ON_SERVER` is. Both name the one fix there is —
+/// sync, then save again — and until 2026-09-23 only the task one was
+/// allow-listed, so the same conflict told a task user what to do and left
+/// an event user reading "Sync failed. See the application log for details."
+pub(crate) const EVENT_CHANGED_ON_SERVER: &str =
+    "That event changed on the server since it was loaded — sync and try again";
+
+/// The write paths' two refusals before anything leaves the machine.
+pub(crate) const EVENT_NOT_SYNCED_YET: &str =
+    "this event has not finished syncing; try again in a moment";
+
 fn friendly(e: CalDavError) -> anyhow::Error {
     match e {
-        CalDavError::PreconditionFailed => {
-            anyhow::anyhow!("That event changed on the server since it was loaded — sync and try again")
-        }
+        CalDavError::PreconditionFailed => anyhow::anyhow!(EVENT_CHANGED_ON_SERVER),
         other => anyhow::Error::from(other),
     }
 }
