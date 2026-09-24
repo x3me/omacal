@@ -1164,8 +1164,8 @@
       </div>
       <p class="hint">
         {#if settings?.desktop === 'omarchy'}Automatic follows your Omarchy theme as you switch.
-        {:else}Choose Light or Dark for your preferred appearance.{/if}
-        Light and Dark replace the whole palette, including the accent, without a restart.
+        {:else}Choose Light, Dark, or one of four themes from Omarchy.{/if}
+        A chosen theme replaces the whole palette, including the accent, without a restart.
       </p>
 
       <!-- Only where there is a choice: on macOS the backend reports none,
@@ -1879,6 +1879,11 @@
         <p>
           It is made by Extreme Labs and it is open source, under the MIT
           licence. Pull requests, issues and feedback are all welcome.
+        </p>
+        <p>
+          The Tokyo Night, Catppuccin and Rosé Pine themes are their authors'
+          palettes — folke's Tokyo Night, and the Catppuccin and Rosé Pine
+          projects — used with thanks.
         </p>
         <div class="links">
           <a href="https://github.com/x3me/omacal" onclick={e => { e.preventDefault(); openLink('repository'); }}>GitHub repository</a>

@@ -60,15 +60,22 @@ export const START_ON_LOGIN_OPTIONS: ReadonlyArray<[StartOnLogin, string]> = [
 /** Which palette the app wears. `'auto'` is the desktop's — the Omarchy
  *  theme if there is one, dark if there is not — and the two others are the
  *  built-in palettes, chosen explicitly. */
-export type Appearance = 'auto' | 'light' | 'dark';
+export type Appearance =
+  | 'auto' | 'light' | 'dark'
+  | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn';
 
-/** The three rows, in the order the select offers them, and the labels the
- *  spec drives them by. Here rather than in the markup so the component and
- *  its test read one list. */
+/** The rows, in the order the select offers them, and the labels the spec
+ *  drives them by. Here rather than in the markup so the component and its
+ *  test read one list. The four named themes are Omarchy's own most used,
+ *  for a desktop with no Omarchy theme to follow (`theme::Palette::named`). */
 export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
   ['auto', 'Follow the desktop theme'],
   ['light', 'Light'],
   ['dark', 'Dark'],
+  ['tokyo-night', 'Tokyo Night'],
+  ['catppuccin-mocha', 'Catppuccin Mocha'],
+  ['catppuccin-latte', 'Catppuccin Latte'],
+  ['rose-pine-dawn', 'Rosé Pine Dawn'],
 ];
 
 /** Whether the window draws a title bar. `'auto'` is no frame where a tiling

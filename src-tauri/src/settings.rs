@@ -1128,11 +1128,11 @@ pub(crate) async fn photon_places(pool: &SqlitePool) -> bool {
 /// Absent, garbage and a spelling a future version writes all resolve to
 /// `Auto` — the behaviour every installed copy already has.
 pub(crate) async fn appearance(pool: &SqlitePool) -> crate::theme::Appearance {
-    match read(pool, APPEARANCE_KEY).await.as_deref() {
-        Some("light") => crate::theme::Appearance::Light,
-        Some("dark") => crate::theme::Appearance::Dark,
-        _ => crate::theme::Appearance::Auto,
-    }
+    read(pool, APPEARANCE_KEY)
+        .await
+        .as_deref()
+        .and_then(crate::theme::Appearance::parse)
+        .unwrap_or(crate::theme::Appearance::Auto)
 }
 
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s

@@ -2635,6 +2635,7 @@ test.describe('App', () => {
     await expect(select).toHaveValue('auto');
     await expect(select.locator('option')).toHaveText([
       'Follow the desktop theme', 'Light', 'Dark',
+      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn',
     ]);
 
     await select.selectOption('light');
@@ -2648,6 +2649,26 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
     await expect(modal.locator('#appearance')).toHaveValue('light');
+  });
+
+  /** The named themes, for a desktop with no Omarchy theme to follow — macOS
+   *  above all, where the choice was Light or a grey Dark. Stored as Omarchy
+   *  spells the theme, and the stored choice is what a reopened pane shows. */
+  test('a named theme is chosen, stored as Omarchy spells it, and kept', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.locator('#appearance').selectOption({ label: 'Rosé Pine Dawn' });
+    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['rose-pine-dawn']);
+
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await expect(modal.locator('#appearance')).toHaveValue('rose-pine-dawn');
   });
 
   /**

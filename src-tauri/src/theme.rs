@@ -58,6 +58,43 @@ impl Palette {
             is_dark: false,
         }
     }
+
+    /// A named theme's palette, for a desktop that has no Omarchy theme to
+    /// follow — macOS above all, where the choice was Light or our own grey
+    /// Dark. Two dark and two light, the most used of Omarchy's own themes.
+    ///
+    /// The backgrounds are Omarchy's own theme files', so a Tokyo Night chosen
+    /// on a Mac looks like Tokyo Night on Omarchy, and so are the dark themes'
+    /// surfaces ([`parse_colors`]'s shift). The rest is **contrast-led**, as
+    /// the built-in two are, and every text colour is from the theme's
+    /// official palette:
+    ///
+    /// - Tokyo Night takes its `fg`/`fg_dark` pair for text and muted: the
+    ///   theme file resolves muted *brighter* than text, which inverts them.
+    /// - Catppuccin takes **mauve**, its own default accent, in both flavours:
+    ///   Latte's blue measures 4.3:1 on its background and 4.0:1 on a card.
+    /// - Rosé Pine Dawn takes **pine**: foam, which the theme file names,
+    ///   measures 3.1:1.
+    /// - The light themes' cards sit a shade nearer their background than the
+    ///   shift would put them (1.05:1, not 1.07:1): at the shifted shade,
+    ///   Latte's mauve and Dawn's muted grey fell just under 4.5:1 on a card,
+    ///   and neither palette has a darker colour to trade them for.
+    ///
+    /// Every text colour clears 4.5:1 on `bg` and on `surface`
+    /// (`every_named_palette_is_legible` measures all of it).
+    pub fn named(theme: Appearance) -> Option<Self> {
+        let p = |bg: &str, surface: &str, text: &str, muted: &str, accent: &str, is_dark| Self {
+            bg: bg.into(), surface: surface.into(), text: text.into(),
+            muted: muted.into(), accent: accent.into(), is_dark,
+        };
+        Some(match theme {
+            Appearance::TokyoNight => p("#1a1b26", "#21222d", "#c0caf5", "#a9b1d6", "#7aa2f7", true),
+            Appearance::CatppuccinMocha => p("#1e1e2e", "#252535", "#cdd6f4", "#a6adc8", "#cba6f7", true),
+            Appearance::CatppuccinLatte => p("#eff1f5", "#e9ebef", "#4c4f69", "#5c5f77", "#8839ef", false),
+            Appearance::RosePineDawn => p("#faf4ed", "#f5efe8", "#575279", "#6e6a86", "#286983", false),
+            Appearance::Auto | Appearance::Light | Appearance::Dark => return None,
+        })
+    }
 }
 
 /// Which palette the app wears.
@@ -72,12 +109,23 @@ impl Palette {
 /// obligation to be legible on white (Omarchy ships pale yellows and washed
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
+///
+/// The four named themes are the same kind of choice — see
+/// [`Palette::named`] — spelled as Omarchy spells its themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
     Auto,
     Light,
     Dark,
+    #[serde(rename = "tokyo-night")]
+    TokyoNight,
+    #[serde(rename = "catppuccin-mocha")]
+    CatppuccinMocha,
+    #[serde(rename = "catppuccin-latte")]
+    CatppuccinLatte,
+    #[serde(rename = "rose-pine-dawn")]
+    RosePineDawn,
 }
 
 impl Appearance {
@@ -88,7 +136,22 @@ impl Appearance {
             Appearance::Auto => "auto",
             Appearance::Light => "light",
             Appearance::Dark => "dark",
+            Appearance::TokyoNight => "tokyo-night",
+            Appearance::CatppuccinMocha => "catppuccin-mocha",
+            Appearance::CatppuccinLatte => "catppuccin-latte",
+            Appearance::RosePineDawn => "rose-pine-dawn",
         }
+    }
+
+    /// The stored spelling read back: `as_str`'s inverse, and `None` for
+    /// anything this version did not write.
+    pub fn parse(stored: &str) -> Option<Self> {
+        [
+            Appearance::Auto, Appearance::Light, Appearance::Dark, Appearance::TokyoNight,
+            Appearance::CatppuccinMocha, Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+        ]
+        .into_iter()
+        .find(|a| a.as_str() == stored)
     }
 
     /// Whether this choice is the user's own rather than the desktop's — the
@@ -357,6 +420,7 @@ pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance) -> Palette {
         Appearance::Light => return Palette::fallback_light(),
         Appearance::Dark => return Palette::fallback_dark(),
         Appearance::Auto => {}
+        named => return Palette::named(named).expect("every other variant is a named theme"),
     }
     let Some(dir) = theme_dir else {
         return Palette::fallback_dark();
@@ -667,7 +731,56 @@ light_foreground = "#adb5c4"
         // And with no Omarchy at all — the case issue #30 is about.
         assert_eq!(resolve(None, Appearance::Light), Palette::fallback_light());
         assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        // A named theme outranks the installed one exactly as Light does.
+        assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn).bg, "#faf4ed");
+        assert_eq!(resolve(None, Appearance::TokyoNight).bg, "#1a1b26");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const NAMED: [Appearance; 4] = [
+        Appearance::TokyoNight, Appearance::CatppuccinMocha,
+        Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+    ];
+
+    /// WCAG contrast of two `#rrggbb` colours.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let lum = |h: &str| {
+            let c = |i: usize| {
+                let x = f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()) / 255.0;
+                if x <= 0.039_28 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * c(1) + 0.7152 * c(3) + 0.0722 * c(5)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Small text needs 4.5:1, and text lands on `bg` and on `surface` both.
+    #[test]
+    fn every_named_palette_is_legible() {
+        for theme in NAMED {
+            let p = Palette::named(theme).unwrap();
+            for (role, c) in [("text", &p.text), ("muted", &p.muted), ("accent", &p.accent)] {
+                assert!(contrast(c, &p.bg) >= 4.5, "{theme:?} {role} on bg: {:.2}", contrast(c, &p.bg));
+                assert!(contrast(c, &p.surface) >= 4.5, "{theme:?} {role} on surface: {:.2}", contrast(c, &p.surface));
+            }
+            // Muted is the quieter of the two, which the theme file inverted.
+            assert!(contrast(&p.muted, &p.bg) < contrast(&p.text, &p.bg), "{theme:?} muted outshouts text");
+            assert_eq!(p.is_dark, contrast("#000000", &p.bg) < contrast("#ffffff", &p.bg), "{theme:?} is_dark");
+        }
+    }
+
+    /// Stored as Omarchy spells the theme, sent as the same string, and read
+    /// back through one table — so the settings row, the wire and the parse
+    /// cannot drift apart.
+    #[test]
+    fn a_named_theme_round_trips_its_spelling() {
+        for theme in NAMED.into_iter().chain([Appearance::Auto, Appearance::Light, Appearance::Dark]) {
+            assert_eq!(Appearance::parse(theme.as_str()), Some(theme));
+            assert_eq!(serde_json::to_value(theme).unwrap(), serde_json::json!(theme.as_str()));
+            assert!(theme == Appearance::Auto || theme.is_pinned());
+        }
+        assert_eq!(Appearance::parse("solarized"), None);
     }
 
     /// Pre-Omarchy-4 and custom themes may have no `light_foreground`. Preserve
