@@ -177,6 +177,9 @@ export type AppSettings = {
   weekViewDays: WeekViewDays;
   visibleStartHour: number;
   visibleEndHour: number;
+  /** Whether Saturday and Sunday columns are dropped from Week and Day
+   *  view. Month, Year and Big Year are unaffected. */
+  hideWeekends: boolean;
   /** Whether the system tray icon is shown. On by default — the tray is where
    *  Quit lives. Turning it off is for setups where something else carries
    *  those actions, like Omarchy 4's bar widget. */
@@ -313,6 +316,7 @@ export type SettingValues = {
   weekStartsToday: boolean;
   weekViewDays: WeekViewDays;
   visibleHours: { start: number; end: number };
+  hideWeekends: boolean;
   combineIdenticalEvents: boolean;
   /** Also leaves "Last view" mode. */
   defaultView: View;
