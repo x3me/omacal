@@ -910,8 +910,15 @@ export function installTauriStub(scenario: string): Harness {
    *  floor are `sync_loop`'s own `DEFAULT_INTERVAL_MS`/`MIN_INTERVAL_MS`. */
   let settings = loadSettings();
 
+  // Canned answers a page can arrive with, keyed by command — set before the
+  // app mounts (`page.addInitScript`), since the app reads on mount. Used by
+  // `ui/showcase` to render the website's screenshots from payloads the real
+  // backend produced; no spec sets it.
+  const canned: Record<string, unknown> = (window as any).__canned ?? {};
+
   const invoke = async (cmd: string, args: Record<string, any> = {}): Promise<unknown> => {
     harness.calls.push({ cmd, args });
+    if (cmd in canned) return structuredClone(canned[cmd]);
     switch (cmd) {
       case 'plugin:event|listen': {
         const fn = callbacks.get(args.handler);

@@ -1794,6 +1794,72 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    /// **Not a test: the website's screenshot source.** Seeds the demo data
+    /// into a memory database at a fixed moment and writes what the read
+    /// commands would answer, so `ui/showcase` can render the real interface
+    /// from real payloads — lanes, overflow and all computed here, not by
+    /// hand. Run it through `ui/showcase/dump.sh`, which fixes the zone:
+    ///
+    ///   OMACAL_SHOWCASE_OUT=dir OMACAL_SHOWCASE_NOW=ms TZ=Europe/Berlin \
+    ///     cargo test -p omacal --lib showcase_payloads -- --ignored
+    #[tokio::test]
+    #[ignore = "writes the website's screenshot payloads; run by ui/showcase/dump.sh"]
+    async fn showcase_payloads() {
+        let out = std::path::PathBuf::from(std::env::var("OMACAL_SHOWCASE_OUT").expect("OMACAL_SHOWCASE_OUT"));
+        let now: i64 = std::env::var("OMACAL_SHOWCASE_NOW").expect("OMACAL_SHOWCASE_NOW").parse().unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let pool = omacal_store::connect_memory().await.unwrap();
+        fixtures::seed_demo(&pool, now).await.unwrap();
+        let tz = display_tz(&pool);
+        let week_start = settings::read_settings(&pool).await.week_start;
+        let write = |name: &str, v: serde_json::Value| {
+            std::fs::write(out.join(format!("{name}.json")), serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        };
+
+        let zoned = jiff::Timestamp::from_millisecond(now).unwrap().to_zoned(jiff::tz::TimeZone::get(&tz).unwrap());
+        let today = zoned.date();
+        let monday = today.checked_sub(jiff::Span::new().days(i64::from(today.weekday().to_monday_zero_offset()))).unwrap();
+        let ms = |d: jiff::civil::Date| d.to_zoned(jiff::tz::TimeZone::get(&tz).unwrap()).unwrap().timestamp().as_millisecond();
+        write("week", serde_json::to_value(get_days_impl(&pool, ms(monday), 7, 0).await.unwrap()).unwrap());
+        write("day", serde_json::to_value(get_days_impl(&pool, ms(today), 1, 0).await.unwrap()).unwrap());
+
+        let (year, month) = (i32::from(today.year()), today.month() as u32);
+        let grid_start = commands::month_grid_start_ms(year, month, &tz, week_start);
+        const DAY: i64 = 24 * 3_600_000;
+        let events = omacal_store::events_in_window(&pool, grid_start - DAY, grid_start + 43 * DAY).await.unwrap();
+        write("month", serde_json::to_value(commands::assemble_month(&events, year, month, &tz, week_start)).unwrap());
+        write("bigyear", serde_json::to_value(get_big_year_impl(&pool, year, &tz, now, week_start).await.unwrap()).unwrap());
+
+        write("calendars", serde_json::to_value(omacal_store::list_calendars(&pool).await.unwrap()).unwrap());
+        // Writable, as a signed-in user's lists are: demo mode greys the boxes.
+        let rows = omacal_store::tasks_for_ui(&pool, now - 7 * DAY).await.unwrap();
+        write("tasks", serde_json::to_value(rows.iter().map(|r| tasks::to_vm(r, false)).collect::<Vec<_>>()).unwrap());
+        // One event's popover: the one the seed gives guests and a link.
+        let id: i64 = sqlx::query_scalar("SELECT id FROM events WHERE summary = 'Excitel weekly'")
+            .fetch_one(&pool).await.unwrap();
+        let state = AppState {
+            pool: pool.clone(), demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+        };
+        write("event_detail", serde_json::to_value(events::event_detail_impl(&state, id).await.unwrap()).unwrap());
+
+        // The palettes of whichever Omarchy themes are named, read by the
+        // app's own resolver from the themes' own files.
+        if let (Ok(root), Ok(names)) = (std::env::var("OMACAL_SHOWCASE_THEME_ROOT"), std::env::var("OMACAL_SHOWCASE_THEMES")) {
+            let palettes: serde_json::Map<String, serde_json::Value> = names
+                .split(',')
+                .map(|name| {
+                    let dir = std::path::Path::new(&root).join(name);
+                    let palette = theme::resolve(Some(&dir), theme::Appearance::Auto);
+                    (name.to_string(), serde_json::to_value(palette).unwrap())
+                })
+                .collect();
+            write("palettes", serde_json::Value::Object(palettes));
+        }
+        write("meta", serde_json::json!({ "now": now, "tz": tz, "weekStart": ms(monday), "year": year, "month": month }));
+    }
+
     /// The hook's value goes, a person's stays, and outside an AppImage the
     /// environment is not touched at all — a `GTK_THEME` there is somebody's
     /// own choice, whatever it says.

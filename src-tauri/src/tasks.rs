@@ -82,7 +82,7 @@ fn stored_due_ms(due: &omacal_caldav::TodoDue, cal_tz: &str) -> Option<i64> {
     }
 }
 
-fn to_vm(row: &omacal_store::TaskRow, demo: bool) -> TaskVm {
+pub(crate) fn to_vm(row: &omacal_store::TaskRow, demo: bool) -> TaskVm {
     TaskVm {
         id: row.task.id,
         calendar_id: row.task.calendar_id,

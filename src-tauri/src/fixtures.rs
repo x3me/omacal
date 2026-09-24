@@ -271,7 +271,9 @@ pub async fn seed_demo(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<usize> 
                 original_start_utc: None,
                 status: "confirmed".into(),
                 self_response: Some(sp.response.to_string()),
-                conference_uri: None,
+                // The same event carries the popover's Join button.
+                conference_uri: (sp.title == "Excitel weekly")
+                    .then(|| "https://meet.google.com/abc-defg-hij".to_string()),
                 color_hex: None,
                 // Joined in from `calendars` on read, so this write is inert;
                 // every demo calendar above is seeded with 'UTC' anyway.
@@ -290,7 +292,92 @@ pub async fn seed_demo(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<usize> 
         written += 1;
     }
 
+    seed_demo_tasks(pool, account_id, week_start, offset_ms, now_ms).await?;
     Ok(written)
+}
+
+/// A task in the demo week. `day`/`at_min` as in [`Spec`]; `at_min` of
+/// `None` is a due *date* (all-day), and `day` of `None` is no due date.
+struct TaskSpec {
+    list: usize,
+    title: &'static str,
+    day: Option<i64>,
+    at_min: Option<i64>,
+    done: bool,
+}
+
+/// Two task lists and a week of tasks, because the pane and the grid are half
+/// of what OmaCal draws and the demo showed neither. Chosen to reach every
+/// state a task can be seen in: due at an hour (drawn on the grid among the
+/// meetings), due on a day, overdue, done this week, and undated.
+fn task_specs() -> Vec<TaskSpec> {
+    let t = |list, title, day, at_min, done| TaskSpec { list, title, day, at_min, done };
+    vec![
+        t(0, "Reply to Niki about the offsite", Some(0), Some(10 * 60), false),
+        t(0, "Renew the domain", Some(1), Some(12 * 60), true),
+        t(0, "Send the board deck", Some(2), Some(13 * 60), false),
+        t(0, "Book flights to Sofia", Some(3), Some(12 * 60), false),
+        t(0, "Submit expenses", Some(4), Some(16 * 60), false),
+        t(1, "Pay the electricity bill", Some(2), None, false),
+        t(1, "Pick up dry cleaning", Some(4), None, false),
+        t(1, "Call the accountant", None, None, false),
+        t(1, "Order a birthday gift for Maya", None, None, false),
+    ]
+}
+
+async fn seed_demo_tasks(
+    pool: &SqlitePool,
+    account_id: i64,
+    week_start: i64,
+    offset_ms: i64,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let mut list_ids = Vec::new();
+    for (gid, summary, colour) in [("demo-tasks", "Tasks", "#e2a03f"), ("demo-home", "Home", "#c678dd")] {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO calendars
+                 (account_id, google_id, summary, color_hex, timezone, access_role, is_primary,
+                  supports_events, supports_tasks)
+             VALUES (?1, ?2, ?3, ?4, 'UTC', 'owner', 0, 0, 1) RETURNING id",
+        )
+        .bind(account_id)
+        .bind(gid)
+        .bind(summary)
+        .bind(colour)
+        .fetch_one(pool)
+        .await?;
+        list_ids.push(id);
+    }
+    for (i, t) in task_specs().iter().enumerate() {
+        // A due *date* is stored as that date's UTC midnight, the way a
+        // `DUE;VALUE=DATE` is read back; a due *time* is the local instant.
+        let due = t.day.map(|d| match t.at_min {
+            Some(at) => week_start + d * DAY_MS + at * MIN,
+            None => week_start + offset_ms + d * DAY_MS,
+        });
+        omacal_store::upsert_task(
+            pool,
+            &omacal_store::StoredTask {
+                id: 0,
+                calendar_id: list_ids[t.list],
+                uid: format!("demo-task-{i}"),
+                etag: None,
+                caldav_href: None,
+                summary: Some(t.title.to_string()),
+                description: None,
+                due_utc: due,
+                due_tz: due.map(|_| "UTC".to_string()),
+                due_all_day: due.is_some() && t.at_min.is_none(),
+                status: if t.done { "completed" } else { "needs-action" }.to_string(),
+                completed_utc: t.done.then_some(now_ms - DAY_MS),
+                priority: 0,
+                updated_at: now_ms,
+                raw_ics: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -314,6 +401,20 @@ mod tests {
         let cals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM calendars")
             .fetch_one(&pool).await.unwrap();
         assert!(cals >= 2, "need multiple calendars to exercise per-calendar colour");
+    }
+
+    /// The pane and the grid both have something to draw, in every state.
+    #[tokio::test]
+    async fn seeding_includes_tasks_in_each_state() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        seed_demo(&pool, MON + 3 * DAY).await.unwrap();
+        seed_demo(&pool, MON + 3 * DAY).await.unwrap();
+        let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
+        assert_eq!(rows.len(), task_specs().len(), "a reseed duplicated tasks");
+        assert!(rows.iter().any(|r| r.task.status == "completed"));
+        assert!(rows.iter().any(|r| r.task.due_utc.is_none()));
+        assert!(rows.iter().any(|r| r.task.due_all_day));
+        assert!(rows.iter().any(|r| r.task.due_utc.is_some() && !r.task.due_all_day));
     }
 
     #[tokio::test]
