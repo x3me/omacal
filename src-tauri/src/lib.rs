@@ -1834,6 +1834,10 @@ mod tests {
         // Writable, as a signed-in user's lists are: demo mode greys the boxes.
         let rows = omacal_store::tasks_for_ui(&pool, now - 7 * DAY).await.unwrap();
         write("tasks", serde_json::to_value(rows.iter().map(|r| tasks::to_vm(r, false)).collect::<Vec<_>>()).unwrap());
+        // What the Omarchy bar widget reads, for the one shot taken on the
+        // real desktop (`showcase/bar-feed.sh` seeds at the real now).
+        write("upcoming", serde_json::to_value(upcoming::current(&pool, now).await.unwrap()).unwrap());
+
         // One event's popover: the one the seed gives guests and a link.
         let id: i64 = sqlx::query_scalar("SELECT id FROM events WHERE summary = 'Excitel weekly'")
             .fetch_one(&pool).await.unwrap();
