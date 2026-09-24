@@ -36,6 +36,8 @@ Colours follow your Omarchy theme live. Installing also installs the
 `omacal.upcoming` bar widget: what is running now, today's remaining
 meetings, due tasks.
 
+<p align="center"><img src="docs/images/omacal-bar.webp" alt="The Omarchy bar showing the current meeting's countdown, with OmaCal's popup open: now, upcoming, tomorrow and due tasks" width="300"></p>
+
 ## Invitations cannot slip past you
 
 A new invitation notifies you and **stays on screen until you deal with
@@ -53,6 +55,8 @@ brings none there are lists that live on this machine. A task due at a *time*
 is drawn **at that hour, among the meetings** — drag it to another hour or
 another day, tick it off where it sits. One due on a date sits in the day's
 row above the grid instead.
+
+![The Week view with the Tasks pane open: overdue, today, tomorrow, this week and undated tasks, and the same tasks drawn on the grid at their due times](docs/images/omacal-tasks.webp)
 
 A task with a time **announces itself when it is due**, at the lead your phone
 set if it carries one. The Tasks pane holds the rest: what is outstanding,
@@ -96,7 +100,9 @@ package; AppImage managers update in place through the published `.zsync`.
 
 ## The rest, briefly
 
-Five views, Day to a whole-year ribbon; a week that can start today and
+Five views, Day to a whole-year ribbon; quick add from one typed line
+(`q`), shown as a receipt before anything is created; the weather in every
+day's header; a week that can start today and
 show the next three, five or seven days; keyboard-first, with `?` showing
 every key; a list mode that leaves empty days out; search that resolves a
 repeating event to one result; several accounts, with colours that stay
