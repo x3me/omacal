@@ -29,6 +29,10 @@
     try { settings = await setSetting('visibleHours', { start, end }); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
   }
+  async function changeHideWeekends(on: boolean) {
+    try { settings = await setSetting('hideWeekends', on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; }
+  }
 
   /** The interface scale while the slider moves (#138). Applied only on
    *  release: zooming under a dragging hand would move the slider itself. */
@@ -1244,6 +1248,16 @@
           Week, Month, Year and Big Year all start their rows on this day.
         </p>
       {/if}
+
+      <label class="check">
+        <input type="checkbox" checked={settings?.hideWeekends ?? false} disabled={!settings}
+          onchange={(e) => changeHideWeekends(e.currentTarget.checked)} />
+        Hide weekends
+      </label>
+      <p class="hint">
+        Saturday and Sunday drop out of Week and Day view entirely. Month,
+        Year and Big Year still show them.
+      </p>
 
       <!-- The canvas can only fade where the window can be seen through, and
            macOS's cannot (AppSettings.transparentWindow); a slider that moved

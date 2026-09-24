@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 import type { WeekPayload } from '../src/lib/api';
 import {
-  FLING_MIN_V, FLING_TAU_MS, packBandLanes, padFor, panCommit, settleTarget, sliceWeek, springAt, springPlan,
-  velocityOf, visibleIndex, windowHeld,
+  FLING_MIN_V, FLING_TAU_MS, filterWeekends, packBandLanes, padFor, panCommit, settleTarget, skipWeekendStart,
+  sliceWeek, springAt, springPlan, velocityOf, visibleIndex, windowHeld,
 } from '../src/lib/weekwindow';
 
 const DAY = 86_400_000;
@@ -254,5 +254,60 @@ test.describe('the window on a padded week', () => {
     const away = springPlan(0.3, 0, 0.01);
     expect(away.v0).toBe(0);
     expect(springAt(away, 0).v).toBeCloseTo(0, 9);
+  });
+});
+
+test.describe('hiding weekends', () => {
+  // 2026-09-21 is a Monday, built through local Y/M/D fields rather than an
+  // epoch-day multiple — `weekstart.spec.ts`'s reason: the weekday a `Date`
+  // reports depends on the reader's zone, and constructing from local fields
+  // is the one way to make it agree with itself wherever the suite runs.
+  const local = (d: number) => new Date(2026, 8, d).getTime();
+  const tenDays = Array.from({ length: 10 }, (_, i) =>
+    ({ start_ms: local(21 + i), end_ms: local(22 + i), events: [], placed: [] }));
+  // Mon 21, Tue 22, Wed 23, Thu 24, Fri 25, Sat 26, Sun 27, Mon 28, Tue 29, Wed 30.
+
+  test('Saturday and Sunday columns are dropped, and the rest stay in order', () => {
+    const week: WeekPayload = { days: tenDays, all_day: [], all_day_events: [], overflow: [] };
+    const w = filterWeekends(week);
+    expect(w.days.map((d) => d.start_ms)).toEqual(
+      [21, 22, 23, 24, 25, 28, 29, 30].map((d) => local(d)),
+    );
+  });
+
+  test('a payload with no weekend in it is returned as is', () => {
+    const week: WeekPayload = { days: tenDays.slice(0, 5), all_day: [], all_day_events: [], overflow: [] };
+    expect(filterWeekends(week)).toBe(week);
+  });
+
+  test('a lane crossing the weekend keeps its edges, now adjacent columns', () => {
+    // Thu(3)..Sun(6): after Sat/Sun drop, Thu and Fri survive as the new 3
+    // and 4 (Mon..Fri keep their old indices; nothing before them moved).
+    const week: WeekPayload = {
+      days: tenDays, all_day: [lane(3, 6, 0)], all_day_events: [], overflow: [],
+    };
+    expect(filterWeekends(week).all_day).toEqual([lane(3, 4, 0)]);
+  });
+
+  test('a lane that falls entirely on the weekend is dropped', () => {
+    const week: WeekPayload = {
+      days: tenDays, all_day: [lane(5, 6, 0), lane(2, 3, 1)], all_day_events: [], overflow: [],
+    };
+    expect(filterWeekends(week).all_day).toEqual([lane(2, 3, 1)]);
+  });
+
+  test('an anchor on the weekend advances to the Monday after it', () => {
+    expect(skipWeekendStart(tenDays, local(26))).toBe(local(28)); // Saturday
+    expect(skipWeekendStart(tenDays, local(27))).toBe(local(28)); // Sunday
+  });
+
+  test('a weekday anchor, or one the payload does not hold, is unchanged', () => {
+    expect(skipWeekendStart(tenDays, local(24))).toBe(local(24));
+    expect(skipWeekendStart(tenDays, local(50))).toBe(local(50));
+  });
+
+  test('a weekend anchor with no weekday left in the payload is unchanged', () => {
+    const friSat = tenDays.slice(4, 6); // Fri 25, Sat 26
+    expect(skipWeekendStart(friSat, local(26))).toBe(local(26));
   });
 });
