@@ -97,8 +97,12 @@
   // zero read as "no guests" — a claim we cannot make.
   const meta = $derived(locationLabel(event.location));
 
-  const width = $derived(100 / placed.columns);
-  const left = $derived(placed.column * width);
+  // The packed lane, except while dragged: a lane — second of two beside a
+  // meeting it overlapped — belongs to the slot the block is leaving, and
+  // carried along it drew a half-width sliver in a free slot on another day.
+  // Dragged, the block spans its column, as it would land in free time.
+  const width = $derived(preview ? 100 : 100 / placed.columns);
+  const left = $derived(preview ? 0 : placed.column * (100 / placed.columns));
 
   const calendarName = $derived(calendars.find(c => c.id === event.calendar_id)?.summary);
 

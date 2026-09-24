@@ -16,7 +16,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
-  APP_ALLDAY_ID,
+  APP_ALLDAY_ID, appWritableWeek,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -1050,6 +1050,45 @@ test.describe('App', () => {
       await page.mouse.up();
       return { cx, cy };
     };
+
+    /**
+     * **A dragged block is drawn as it would land, not as it was packed.**
+     * Its lane — second of two, say, beside a meeting it overlapped — belongs
+     * to the slot it left. Carried along, a block dragged into a free slot on
+     * another day stayed a half-width sliver there (Plamen, 2026-09-24). The
+     * same-day drag only looked right because hover widens a block across its
+     * own day, and hover does not follow the pointer into the next one.
+     */
+    test('a block dragged out of a shared slot spans the column it is dragged into', async ({ page }) => {
+      await writable(page);
+      const w = appWritableWeek();
+      // 'Standup' and 'Board prep' side by side, as an overlap packs them.
+      w.days[0].placed = [
+        { idx: 0, column: 1, columns: 2, top: 0.10, height: 0.02 },
+        { idx: 1, column: 0, columns: 2, top: 0.10, height: 0.04 },
+        { idx: 2, column: 0, columns: 1, top: 0.20, height: 0.02 },
+        { idx: 3, column: 0, columns: 1, top: 0.30, height: 0.02 },
+      ];
+      await page.evaluate(async (week) => {
+        window.__harness.setResponseData({ week });
+        await window.__harness.emit('sync-finished', null);
+      }, w);
+      const b = block(page, 'Standup').first();
+      await b.scrollIntoViewIfNeeded();
+      const packed = (await b.boundingBox())!;
+      const column = (await page.locator('.col').nth(1).boundingBox())!;
+      expect(packed.width).toBeLessThan(column.width / 2 + 1);
+
+      await page.mouse.move(packed.x + packed.width / 2, packed.y + packed.height / 2);
+      await page.mouse.down();
+      // Into Tuesday, and down into hours nothing else occupies.
+      await page.mouse.move(column.x + column.width / 2, packed.y + packed.height / 2 + 300, { steps: 6 });
+      const dragged = (await b.boundingBox())!;
+      expect(Math.abs(dragged.x - (column.x + 3))).toBeLessThan(2);
+      expect(Math.abs(dragged.width - (column.width - 6))).toBeLessThan(2);
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+    });
 
     test('the value sent is none, never all', async ({ page }) => {
       await writable(page);
