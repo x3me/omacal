@@ -41,6 +41,7 @@ mod status;
 mod sync_loop;
 mod tasks;
 mod theme;
+mod system_theme;
 mod theme_watch;
 mod tray;
 mod menubar;
@@ -171,6 +172,28 @@ async fn get_status(
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Every appearance the settings pane offers, with the palette it would
+/// paint — for the theme picker's previews, so a card is drawn in exactly the
+/// colours choosing it gives. `Auto` is previewed as it resolves right now:
+/// the Omarchy theme, or the system's light or dark.
+#[tauri::command]
+fn appearance_previews() -> Vec<AppearancePreview> {
+    use theme::Appearance as A;
+    [A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn]
+        .into_iter()
+        .map(|appearance| AppearancePreview {
+            appearance,
+            palette: theme::resolve(theme::omarchy_theme_dir().as_deref(), appearance),
+        })
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+struct AppearancePreview {
+    appearance: theme::Appearance,
+    palette: theme::Palette,
 }
 
 #[tauri::command]
@@ -1557,6 +1580,9 @@ pub fn run() {
                 open_date: std::sync::Mutex::new(open_date),
             });
             sync_loop::spawn(app.handle().clone());
+            // Before the first palette is resolved: off Omarchy, "Follow the
+            // desktop theme" follows the system's light-or-dark.
+            system_theme::init(app.handle());
             // Setup runs on the main thread, and the palette is resolved the
             // same way get_palette resolves it for the page — the two answers
             // cannot disagree on which side of dark the theme is.
@@ -1679,6 +1705,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            // macOS's appearance flipped. Only there: on Linux tao derives
+            // this from GTK's dark preference, which the app sets itself, so
+            // it would be our own hint echoing back; the portal is Linux's.
+            tauri::WindowEvent::ThemeChanged(t) if cfg!(target_os = "macos") && window.label() == "main" => {
+                system_theme::changed(window.app_handle(), system_theme::from_window_theme(*t));
+            }
             tauri::WindowEvent::Focused(false) if window.label() == "menubar" => {
                 let _ = window.hide();
             }
@@ -1758,6 +1790,7 @@ pub fn run() {
             geocode::search_places,
             settings::get_settings,
             settings::set_setting,
+            appearance_previews,
             settings::set_display_timezone,
             settings::list_timezones,
             settings::restart_app,

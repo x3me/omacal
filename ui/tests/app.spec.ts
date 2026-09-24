@@ -2631,44 +2631,67 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Settings…' }).click();
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    const select = modal.locator('#appearance');
-    await expect(select).toHaveValue('auto');
-    await expect(select.locator('option')).toHaveText([
-      'Follow the desktop theme', 'Light', 'Dark',
+    const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    await expect(themes.locator('.tname')).toHaveText([
+      'Follow the desktop', 'Light', 'Dark',
       'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn',
     ]);
+    // The chosen card's tick is drawn, not named: the names are the labels.
+    await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
 
-    await select.selectOption('light');
-    const [value] = await settingValues(page, 'appearance');
-    expect(value).toBe('light');
+    await themes.getByRole('radio', { name: 'Light', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['light']);
 
-    // Reopened, the select shows what was stored rather than its own default.
+    // Reopened, the picker shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    await expect(modal.locator('#appearance')).toHaveValue('light');
+    await expect(modal.getByRole('radio', { name: 'Light', exact: true })).toHaveAttribute('aria-checked', 'true');
   });
 
   /** The named themes, for a desktop with no Omarchy theme to follow — macOS
-   *  above all, where the choice was Light or a grey Dark. Stored as Omarchy
-   *  spells the theme, and the stored choice is what a reopened pane shows. */
-  test('a named theme is chosen, stored as Omarchy spells it, and kept', async ({ page }) => {
+   *  above all, where the choice was Light or a grey Dark. Each card is drawn
+   *  in the palette choosing it paints; the choice is stored as Omarchy spells
+   *  the theme, kept, and reachable from the keyboard as a radio group is. */
+  /** On Omarchy the named themes are one `omarchy-theme-set` away, and a
+   *  pinned one here would fight it: the picker offers the three it always did. */
+  test('on Omarchy the picker offers following the theme, Light and Dark only', async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ desktop: 'omarchy' })));
     await writable(page);
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Settings…' }).click();
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    await modal.locator('#appearance').selectOption({ label: 'Rosé Pine Dawn' });
+    await expect(modal.getByRole('radiogroup', { name: 'Theme' }).locator('.tname'))
+      .toHaveText(['Follow the desktop', 'Light', 'Dark']);
+  });
+
+  test('a named theme is chosen by its card, stored as Omarchy spells it, and kept', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const dawn = modal.getByRole('radio', { name: 'Rosé Pine Dawn' });
+    // Its miniature wears Dawn's own background, from the backend's palette.
+    await expect(dawn.locator('.mini')).toHaveCSS('background-color', 'rgb(250, 244, 237)');
+    await dawn.click();
     await expect.poll(() => settingValues(page, 'appearance')).toEqual(['rose-pine-dawn']);
+
+    // Arrows move and choose, one card at a time.
+    await expect(dawn).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(modal.getByRole('radio', { name: 'Catppuccin Latte' })).toBeFocused();
+    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['rose-pine-dawn', 'catppuccin-latte']);
 
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    await expect(modal.locator('#appearance')).toHaveValue('rose-pine-dawn');
+    await expect(modal.getByRole('radio', { name: 'Catppuccin Latte' })).toHaveAttribute('aria-checked', 'true');
   });
 
   /**

@@ -935,6 +935,19 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'get_palette':
         return PALETTE;
+      // The theme picker's cards: `appearance_previews`, with the backend's
+      // own palettes (`theme::Palette::named` and the built-in two), and Auto
+      // as this stub's own `get_palette` resolves it.
+      case 'appearance_previews':
+        return [
+          ['auto', PALETTE],
+          ['light', { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false }],
+          ['dark', { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true }],
+          ['tokyo-night', { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#7aa2f7', is_dark: true }],
+          ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
+          ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
+          ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
+        ].map(([appearance, palette]) => ({ appearance, palette }));
       // Recorded in `calls` like everything else; the real one opens a
       // browser, which a test can only assert was *asked for*.
       case 'open_latest_release':

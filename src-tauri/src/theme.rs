@@ -59,6 +59,15 @@ impl Palette {
         }
     }
 
+    /// The built-in palette a system's light-or-dark setting asks for.
+    /// No preference is dark: what every copy showed before it asked.
+    pub fn for_system(scheme: SystemScheme) -> Self {
+        match scheme {
+            SystemScheme::Light => Palette::fallback_light(),
+            SystemScheme::Dark | SystemScheme::NoPreference => Palette::fallback_dark(),
+        }
+    }
+
     /// A named theme's palette, for a desktop that has no Omarchy theme to
     /// follow — macOS above all, where the choice was Light or our own grey
     /// Dark. Two dark and two light, the most used of Omarchy's own themes.
@@ -97,11 +106,46 @@ impl Palette {
     }
 }
 
+/// The system's light-or-dark setting, for a desktop with no Omarchy theme:
+/// macOS's appearance, or the freedesktop portal's `color-scheme` (GNOME,
+/// KDE and the rest). Numbered as the portal numbers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemScheme {
+    NoPreference = 0,
+    Dark = 1,
+    Light = 2,
+}
+
+impl SystemScheme {
+    /// The portal's `org.freedesktop.appearance` `color-scheme` value.
+    /// Anything it may add later reads as no preference.
+    pub fn from_portal(value: u32) -> Self {
+        match value {
+            1 => SystemScheme::Dark,
+            2 => SystemScheme::Light,
+            _ => SystemScheme::NoPreference,
+        }
+    }
+}
+
+/// The last setting the system reported, kept by `system_theme`'s watchers
+/// and read by [`resolve`]. Process-wide because the answer is: every
+/// window, the GTK hint and the tray all wear one palette.
+static SYSTEM_SCHEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_system_scheme(scheme: SystemScheme) {
+    SYSTEM_SCHEME.store(scheme as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn system_scheme() -> SystemScheme {
+    SystemScheme::from_portal(u32::from(SYSTEM_SCHEME.load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 /// Which palette the app wears.
 ///
-/// `Auto` is what omacal has always done and stays the default, so no
-/// installed copy changes under its user: the Omarchy theme if there is one,
-/// and the dark fallback if there is not.
+/// `Auto` stays the default: the Omarchy theme if there is one, and
+/// otherwise the system's own light-or-dark ([`SystemScheme`]) — which until
+/// 2026-09-24 it never asked, so every Mac on `Auto` was dark for good.
 ///
 /// `Light` and `Dark` are the user overruling that, and they take the built-in
 /// palette **whole** — including on Omarchy, where the theme's own accent is
@@ -423,7 +467,9 @@ pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance) -> Palette {
         named => return Palette::named(named).expect("every other variant is a named theme"),
     }
     let Some(dir) = theme_dir else {
-        return Palette::fallback_dark();
+        // No Omarchy theme: follow the system's light-or-dark instead, which
+        // is what "Follow the desktop theme" says it does.
+        return Palette::for_system(system_scheme());
     };
     let colors_src = std::fs::read_to_string(dir.join("colors.toml")).ok();
 
@@ -735,6 +781,19 @@ light_foreground = "#adb5c4"
         assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn).bg, "#faf4ed");
         assert_eq!(resolve(None, Appearance::TokyoNight).bg, "#1a1b26");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With no Omarchy theme, Auto is the system's choice; no preference is
+    /// dark, as it always was.
+    #[test]
+    fn auto_without_omarchy_follows_the_system() {
+        assert_eq!(Palette::for_system(SystemScheme::Light), Palette::fallback_light());
+        assert_eq!(Palette::for_system(SystemScheme::Dark), Palette::fallback_dark());
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference), Palette::fallback_dark());
+        assert_eq!(SystemScheme::from_portal(0), SystemScheme::NoPreference);
+        assert_eq!(SystemScheme::from_portal(1), SystemScheme::Dark);
+        assert_eq!(SystemScheme::from_portal(2), SystemScheme::Light);
+        assert_eq!(SystemScheme::from_portal(7), SystemScheme::NoPreference);
     }
 
     const NAMED: [Appearance; 4] = [

@@ -22,6 +22,9 @@
     type StartOnLogin, type WeekViewDays, type WindowFrame,
   } from './settings';
   import { formatClock, type TimeFormat } from './timefmt';
+  import ThemePicker from './ThemePicker.svelte';
+  import { appearancePreviews } from './settings';
+  import type { Palette } from './theme';
   import type { TemperatureUnit } from './temperature';
   import type { WeekStartDay } from './weekstart';
 
@@ -775,6 +778,25 @@
    *  backend's answer replaces `settings`. The repaint is not this function's
    *  business — the backend emits `theme-changed` and `App`'s existing
    *  listener applies it, the same path an Omarchy theme switch takes. */
+  /** The four named themes are for a desktop with no theme of its own to
+   *  follow: on Omarchy they are one `omarchy-theme-set` away, and a pinned
+   *  choice here would fight it. */
+  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn']);
+  const themeOptions = $derived(
+    settings?.desktop === 'omarchy'
+      ? APPEARANCE_OPTIONS.filter(([id]) => !NAMED_THEMES.has(id))
+      : APPEARANCE_OPTIONS,
+  );
+  /** Each card's colours, fetched when the pane opens: the backend resolves
+   *  them, and "Follow the desktop" is whatever the desktop is right now. */
+  let themePreviews = $state<ReadonlyMap<Appearance, Palette>>(new Map());
+  $effect(() => {
+    if (tab !== 'Appearance') return;
+    appearancePreviews()
+      .then((list) => { themePreviews = new Map(list.map((p) => [p.appearance, p.palette])); })
+      .catch(() => { /* cards draw in the app's own colours without it */ });
+  });
+
   async function saveAppearance(appearance: Appearance) {
     note = null;
     try {
@@ -1146,26 +1168,20 @@
       </p>
 
     {:else if pane === 'Appearance'}
-      <div class="row">
-        <label class="lab" for="appearance">Theme</label>
-        <div class="inline">
-          <select
-            id="appearance"
-            disabled={!settings}
-            value={settings?.appearance ?? 'auto'}
-            onchange={(e) =>
-              saveAppearance((e.currentTarget as HTMLSelectElement).value as Appearance)}
-          >
-            {#each APPEARANCE_OPTIONS as [id, label] (id)}
-              <option value={id}>{label}</option>
-            {/each}
-          </select>
-        </div>
+      <div class="row wide">
+        <span class="lab">Theme</span>
+        <ThemePicker
+          value={settings?.appearance ?? 'auto'}
+          options={themeOptions}
+          previews={themePreviews}
+          disabled={!settings}
+          onchange={saveAppearance}
+        />
       </div>
       <p class="hint">
-        {#if settings?.desktop === 'omarchy'}Automatic follows your Omarchy theme as you switch.
-        {:else}Choose Light, Dark, or one of four themes from Omarchy.{/if}
-        A chosen theme replaces the whole palette, including the accent, without a restart.
+        {#if settings?.desktop === 'omarchy'}Following the desktop wears your Omarchy theme and follows it as you switch.
+        {:else}Following the desktop wears its light or dark setting, and follows it when that changes.{/if}
+        Any other choice replaces the whole palette, including the accent, without a restart.
       </p>
 
       <!-- Only where there is a choice: on macOS the backend reports none,
@@ -2098,6 +2114,9 @@
   .soon { font-size: 12px; color: var(--muted); margin: 0; }
 
   .row { display: flex; flex-direction: column; gap: 8px; }
+  /* The pane lays rows out at their content's width; the theme cards need
+     the pane's, to wrap into as many columns as fit. */
+  .row.wide { align-self: stretch; }
   .pane-content > .hint + .row, .pane-content > .hint + .check { margin-top: 8px; }
   .pane-content > .section-start, .pane-content > .hint + .section-start { margin-top: 24px; }
   .pane-content > .row, .pane-content > .check, .pane-content > .hint, .appearance-section { flex-shrink: 0; }

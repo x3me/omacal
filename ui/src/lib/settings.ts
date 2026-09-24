@@ -69,7 +69,7 @@ export type Appearance =
  *  test read one list. The four named themes are Omarchy's own most used,
  *  for a desktop with no Omarchy theme to follow (`theme::Palette::named`). */
 export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
-  ['auto', 'Follow the desktop theme'],
+  ['auto', 'Follow the desktop'],
   ['light', 'Light'],
   ['dark', 'Dark'],
   ['tokyo-night', 'Tokyo Night'],
@@ -253,6 +253,10 @@ export type AppSettings = {
 };
 
 export const getSettings = () => invoke<AppSettings>('get_settings');
+
+/** Every appearance with the palette it would paint, for the theme picker. */
+export const appearancePreviews = () =>
+  invoke<{ appearance: Appearance; palette: import('./theme').Palette }[]>('appearance_previews');
 
 /**
  * Everything `setSetting` stores, keyed as the backend's `settings::Setting`
