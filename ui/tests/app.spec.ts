@@ -5408,6 +5408,65 @@ test.describe('App: the first day of the week', () => {
   });
 });
 
+/**
+ * "I use OmaCal at work and don't need to see Saturday and Sunday" — Week
+ * view drops the two columns entirely, and Day view's ‹/› arrows step past
+ * them rather than landing on one. Month, Year and Big Year are untouched:
+ * their rows would misalign if two of seven columns vanished.
+ */
+test.describe('App: hiding weekends', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW); // noon, Monday 29 Jan 2024
+  });
+
+  const openApp = async (page: Page) => {
+    await page.goto(app());
+    await expect(page.locator('.vswitch button.active')).toBeVisible();
+  };
+
+  const setHideWeekends = async (page: Page, on: boolean) => {
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const checkbox = modal.getByRole('checkbox', { name: 'Hide weekends' });
+    if ((await checkbox.isChecked()) !== on) await checkbox.click();
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+  };
+
+  test('Week view drops Saturday and Sunday, keeping Monday through Friday', async ({ page }) => {
+    await openApp(page);
+    const columns = page.locator('[data-testid="week-body"] .col');
+    await expect(columns).toHaveCount(7);
+
+    await setHideWeekends(page, true);
+    await expect(columns).toHaveCount(5);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON));
+    await expect(columns.last()).toHaveAttribute('data-start-ms', String(APP_MON + 4 * 24 * 3_600_000)); // Friday
+  });
+
+  test('Day view\'s arrows step past Saturday and Sunday, landing on the weekday either side', async ({ page }) => {
+    const day = 24 * 3_600_000;
+    await openApp(page);
+    await setHideWeekends(page, true);
+    await page.keyboard.press('1'); // Day view
+
+    const col = page.locator('[data-testid="week-body"] .col');
+    await expect(col).toHaveAttribute('data-start-ms', String(APP_MON)); // Monday
+
+    const next = page.getByRole('button', { name: 'Next day' });
+    for (let i = 0; i < 4; i++) await next.click(); // Tue, Wed, Thu, Fri
+    await expect(col).toHaveAttribute('data-start-ms', String(APP_MON + 4 * day)); // Friday
+
+    await next.click(); // would be Saturday
+    await expect(col).toHaveAttribute('data-start-ms', String(APP_MON + 7 * day)); // Monday
+
+    await page.getByRole('button', { name: 'Previous day' }).click(); // would be Sunday
+    await expect(col).toHaveAttribute('data-start-ms', String(APP_MON + 4 * day)); // back to Friday
+  });
+});
+
 test.describe('App: zooming the hours', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(APP_NOW);

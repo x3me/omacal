@@ -2,6 +2,7 @@
 <script lang="ts">
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
+  import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
   import { formatDate } from './lib/datefmt';
   import { dateFormat } from './lib/date.svelte';
@@ -862,6 +863,7 @@
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
         setClockFormat(s.timeFormat);
         applyVisibleHours(s.visibleStartHour, s.visibleEndHour);
+        applyHideWeekends(s.hideWeekends);
         setDateFormat(s.dateFormat);
         setSecondZone(s.secondTimezone);
         setZoneName(s.effectiveTimezone);
@@ -1256,7 +1258,12 @@
       return;
     }
     const d = new Date(anchorMs);
-    if (view === 'day') d.setDate(d.getDate() + dir);
+    if (view === 'day') {
+      d.setDate(d.getDate() + dir);
+      // Weekends are off the grid entirely, so a step onto one carries
+      // straight through it rather than landing on a day nothing shows.
+      while (hideWeekends() && (d.getDay() === 0 || d.getDay() === 6)) d.setDate(d.getDate() + dir);
+    }
     else if (view === 'week') {
       d.setDate(d.getDate() + dir * (weekStartsToday ? weekViewDays : 7));
     }
@@ -2177,6 +2184,7 @@
       defaultEventDurationMinutes = s.defaultEventDurationMinutes;
       setClockFormat(s.timeFormat);
       applyVisibleHours(s.visibleStartHour, s.visibleEndHour);
+      applyHideWeekends(s.hideWeekends);
       setDateFormat(s.dateFormat);
       setSecondZone(s.secondTimezone);
       setZoneName(s.effectiveTimezone);

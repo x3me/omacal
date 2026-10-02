@@ -8,7 +8,7 @@
 // is about *what is on screen* reads the window; only the grid's track ever
 // draws the padding. Pure, so `weekwindow.spec.ts` pins each rule.
 
-import type { Lane, WeekPayload } from './api';
+import type { DayColumn, Lane, WeekPayload } from './api';
 
 /** Days of padding either side of a window of `visible` days: the window's
  *  own width plus two, so a strong swipe can page a whole window (the ‹ / ›
@@ -60,6 +60,61 @@ export function sliceWeek(
     // backend could not position is added, so a count is never short.
     overflow: [...hidden, ...week.overflow],
   };
+}
+
+/**
+ * The payload with Saturday and Sunday columns dropped, and every all-day
+ * lane re-clipped to what survives.
+ *
+ * Column removal, not a window: the surviving days keep their relative
+ * order, so they land on new, still-contiguous indices with no sparse
+ * mapping for a caller to carry. A lane that crossed a weekend keeps both
+ * edges, now adjacent columns — it draws as one unbroken bar over the
+ * (invisible) gap, the same simplification the grid itself makes by never
+ * drawing those columns. One that fell wholly on a dropped day is dropped
+ * with it, uncounted: the day it lived on is not merely folded away, it
+ * is gone, so there is nothing left for a "+N more" to point at.
+ */
+export function filterWeekends(week: WeekPayload): WeekPayload {
+  const keep = week.days.map((d) => {
+    const day = new Date(d.start_ms).getDay();
+    return day !== 0 && day !== 6;
+  });
+  if (keep.every(Boolean)) return week;
+  const newIndex = new Map<number, number>();
+  const days: DayColumn[] = [];
+  week.days.forEach((d, i) => {
+    if (keep[i]) { newIndex.set(i, days.length); days.push(d); }
+  });
+  const all_day: Lane[] = [];
+  for (const l of week.all_day) {
+    let start_col = -1, end_col = -1;
+    for (let i = l.start_col; i <= l.end_col; i++) {
+      const mapped = newIndex.get(i);
+      if (mapped === undefined) continue;
+      if (start_col === -1) start_col = mapped;
+      end_col = mapped;
+    }
+    if (start_col === -1) continue;
+    all_day.push({ ...l, start_col, end_col });
+  }
+  return { ...week, days, all_day };
+}
+
+/**
+ * `ms`, or — when it names a Saturday or Sunday in `days` — the next day in
+ * `days` that isn't one. Unchanged when `ms` isn't in `days` at all (a stale
+ * anchor is `visibleIndex`'s problem, not this one's) or when nothing after
+ * it survives the weekend.
+ */
+export function skipWeekendStart(days: { start_ms: number }[], ms: number): number {
+  const idx = days.findIndex((d) => d.start_ms === ms);
+  if (idx < 0) return ms;
+  for (let i = idx; i < days.length; i++) {
+    const day = new Date(days[i].start_ms).getDay();
+    if (day !== 0 && day !== 6) return days[i].start_ms;
+  }
+  return ms;
 }
 
 /** How many rows of chips the band shows before folding the rest behind

@@ -82,6 +82,7 @@ const LAST_VIEW_KEY: &str = "last_view";
 const WEEK_START_KEY: &str = "week_start";
 const WEEK_STARTS_TODAY_KEY: &str = "week_starts_today";
 const WEEK_VIEW_DAYS_KEY: &str = "week_view_days";
+const HIDE_WEEKENDS_KEY: &str = "hide_weekends";
 const TRAY_ICON_KEY: &str = "tray_icon";
 const QUIT_ON_CLOSE_KEY: &str = "quit_on_close";
 const AUTOSTART_KEY: &str = "autostart";
@@ -686,6 +687,10 @@ pub struct AppSettings {
     pub week_view_days: u8,
     pub visible_start_hour: u8,
     pub visible_end_hour: u8,
+    /// Whether Saturday and Sunday columns are dropped from Week and Day
+    /// view. Month, Year and Big Year are unaffected, for `week_starts_today`'s
+    /// reason: those grids need every weekday to keep their rows aligned.
+    pub hide_weekends: bool,
     /// The IANA zone every time in the app is read in, or `None` for the
     /// system's. Applied by exporting `TZ` before the webview starts — the
     /// one mechanism that keeps the browser, Rust, notifications and the
@@ -952,6 +957,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // return to the old seven-day shape.
         visible_start_hour,
         visible_end_hour,
+        hide_weekends: read(pool, HIDE_WEEKENDS_KEY).await.map(|v| v == "1").unwrap_or(false),
         week_view_days: match read(pool, WEEK_VIEW_DAYS_KEY).await.as_deref() {
             Some("3") => 3,
             Some("5") => 5,
@@ -1434,6 +1440,7 @@ pub enum Setting {
     /// invoke from asking for an arbitrary number of day columns.
     WeekViewDays(u8),
     VisibleHours { start: u8, end: u8 },
+    HideWeekends(bool),
     CombineIdenticalEvents(bool),
     /// Also leaves "Last view" mode, in the same write — `WeekStart`'s shape.
     DefaultView(DefaultView),
@@ -1681,6 +1688,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             }
             write(pool, VISIBLE_HOURS_KEY, &format!("{start},{end}")).await?;
         }
+        S::HideWeekends(on) => write(pool, HIDE_WEEKENDS_KEY, flag(*on)).await?,
         S::CombineIdenticalEvents(on) => write(pool, COMBINE_IDENTICAL_EVENTS_KEY, flag(*on)).await?,
         S::DefaultView(view) => {
             write_all(pool, &[(DEFAULT_VIEW_KEY, view.as_str()), (DEFAULT_VIEW_FOLLOWS_LAST_KEY, "0")])
@@ -1772,6 +1780,7 @@ mod tests {
             Setting::MenubarSections { tomorrow: true, days_ahead: 2, .. }
         ));
         assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
+        assert!(matches!(read(json!({"key": "hideWeekends", "value": true})), Setting::HideWeekends(true)));
         assert!(matches!(
             read(json!({"key": "menubarDateFormat", "value": {"format": "custom", "custom": "%-d"}})),
             Setting::MenubarDateFormat { .. }
@@ -2732,6 +2741,22 @@ mod tests {
         assert!(!read_settings(&p).await.show_date);
         write(&p, SHOW_DATE_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.show_date);
+    }
+
+    /// The hide-weekends switch round-trips through `Setting`, and a fresh
+    /// install keeps Saturday and Sunday — the same polarity as `list_mode`,
+    /// for the same reason: a hand-edited row must not change the app's face.
+    #[tokio::test]
+    async fn the_hide_weekends_switch_is_stored_and_read_back() {
+        let p = pool().await;
+        assert!(!read_settings(&p).await.hide_weekends, "a fresh install keeps weekends visible");
+        let s = set(&p, Setting::HideWeekends(true)).await.unwrap();
+        assert!(s.hide_weekends);
+        assert_eq!(read(&p, HIDE_WEEKENDS_KEY).await.as_deref(), Some("1"));
+        let s = set(&p, Setting::HideWeekends(false)).await.unwrap();
+        assert!(!s.hide_weekends);
+        write(&p, HIDE_WEEKENDS_KEY, "yes").await.unwrap();
+        assert!(!read_settings(&p).await.hide_weekends, "a stray value must not change the app's face");
     }
 
     /// The hour height round-trips, and a stored value the gesture could
