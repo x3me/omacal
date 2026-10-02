@@ -293,6 +293,16 @@ const SAFE_EXACT: &[&str] = &[
     crate::caldav_write::EVENT_CHANGED_ON_SERVER,
     crate::caldav_write::EVENT_NOT_SYNCED_YET,
     crate::caldav_account::CALENDAR_IS_READ_ONLY,
+    // src-tauri/src/zoom.rs — fixed, secret-free refusals from the Zoom OAuth
+    // and create path. Endpoint status/error detail is logged separately and
+    // never interpolated into these strings; each reaches `connect_zoom` or an
+    // event command through a bare `?` and exact `user_facing` match.
+    crate::zoom::NOT_CONFIGURED,
+    crate::zoom::RECONNECT,
+    crate::zoom::AUTH_FAILED,
+    crate::zoom::CREATE_FAILED,
+    crate::zoom::ALL_DAY_UNSUPPORTED,
+    crate::zoom::TOO_LONG,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -594,6 +604,12 @@ mod tests {
             crate::caldav_write::EVENT_CHANGED_ON_SERVER,
             crate::caldav_write::EVENT_NOT_SYNCED_YET,
             crate::caldav_account::CALENDAR_IS_READ_ONLY,
+            crate::zoom::NOT_CONFIGURED,
+            crate::zoom::RECONNECT,
+            crate::zoom::AUTH_FAILED,
+            crate::zoom::CREATE_FAILED,
+            crate::zoom::ALL_DAY_UNSUPPORTED,
+            crate::zoom::TOO_LONG,
         ];
         for expected in EXPECTED {
             assert!(
