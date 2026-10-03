@@ -6,6 +6,7 @@ import type { TimeFormat } from './timefmt';
 import type { WeekStartDay } from './weekstart';
 import type { EventCornerStyle } from './appearance';
 import type { View } from './views';
+import type { TaskSort } from './tasks';
 
 /** A `View`, plus `'last'` — "wherever the switcher was most recently,"
  *  which is `defaultViewFollowsLast`, not a sixth `View` value: `View` also
@@ -164,6 +165,10 @@ export type AppSettings = {
    *  `defaultViewFollowsLast` so turning that mode on opens on a real
    *  memory. `'week'` until anything has been recorded. */
   lastView: View;
+  /** How the Tasks pane orders the rows within a group: `'date'` (due, then
+   *  priority) or `'priority'` (priority with none last, then due). `'date'`
+   *  until chosen — the order the pane always used. */
+  taskSort: TaskSort;
   menubarDateFormat: DateFormat | 'general' | 'custom';
   menubarDateCustom: string;
   menubarLabelFormat: string;
@@ -318,6 +323,7 @@ export type SettingValues = {
   defaultView: View;
   defaultViewFollowsLast: boolean;
   lastView: View;
+  taskSort: TaskSort;
 };
 
 /** Stores one setting and answers with the settings now in force. */

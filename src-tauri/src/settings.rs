@@ -77,6 +77,7 @@ pub(crate) fn appearance_baseline(omarchy: bool) -> u8 {
 }
 const TIME_FORMAT_KEY: &str = "time_format";
 const DEFAULT_VIEW_KEY: &str = "default_view";
+const TASK_SORT_KEY: &str = "task_sort";
 const DEFAULT_VIEW_FOLLOWS_LAST_KEY: &str = "default_view_follows_last";
 const LAST_VIEW_KEY: &str = "last_view";
 const WEEK_START_KEY: &str = "week_start";
@@ -160,6 +161,35 @@ impl TimeFormat {
 /// An enum for [`TimeFormat`]'s reason: the set is closed and mirrors the
 /// switcher's own five buttons exactly, so [`Setting::DefaultView`] needs no
 /// refusal path — a sixth value cannot be sent.
+/// How the Tasks pane orders the rows *within* a group: by due date (the
+/// order the pane has always used) or by priority. Closed set, so
+/// [`Setting::TaskSort`] needs no refusal path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskSort {
+    #[serde(rename = "date")]
+    Date,
+    #[serde(rename = "priority")]
+    Priority,
+}
+
+impl TaskSort {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TaskSort::Date => "date",
+            TaskSort::Priority => "priority",
+        }
+    }
+}
+
+/// Absent, garbage or a future spelling lands on the order every install
+/// already has: by date.
+fn parse_task_sort(stored: Option<&str>) -> TaskSort {
+    match stored {
+        Some("priority") => TaskSort::Priority,
+        _ => TaskSort::Date,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefaultView {
     #[serde(rename = "day")]
@@ -667,6 +697,8 @@ pub struct AppSettings {
     /// opens on a real memory rather than a blank one. Week until anything
     /// has been recorded.
     pub last_view: DefaultView,
+    /// How the Tasks pane orders rows within a group. Date until chosen.
+    pub task_sort: TaskSort,
     pub menubar_date_format: String,
     pub menubar_date_custom: String,
     pub menubar_label_format: String,
@@ -932,6 +964,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // been recorded yet reads as the view every install already opens
         // on, not as an error.
         last_view: parse_default_view(read(pool, LAST_VIEW_KEY).await.as_deref()),
+        task_sort: parse_task_sort(read(pool, TASK_SORT_KEY).await.as_deref()),
         // Same polarity rule as its two neighbours: only the two spellings
         // this version writes move the setting, and everything else — absent,
         // hand-edited, or written by a version that learned a fourth day —
@@ -1437,6 +1470,9 @@ pub enum Setting {
     CombineIdenticalEvents(bool),
     /// Also leaves "Last view" mode, in the same write — `WeekStart`'s shape.
     DefaultView(DefaultView),
+    /// The Tasks pane's within-group order. View-only, so it needs no reboot
+    /// and shows on no menu surface.
+    TaskSort(TaskSort),
     /// `default_view` is set aside, not discarded — `WeekStartsToday`'s shape.
     DefaultViewFollowsLast(bool),
     /// Sent on every view switch regardless of mode.
@@ -1688,6 +1724,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         }
         S::DefaultViewFollowsLast(on) => write(pool, DEFAULT_VIEW_FOLLOWS_LAST_KEY, flag(*on)).await?,
         S::LastView(view) => write(pool, LAST_VIEW_KEY, view.as_str()).await?,
+        S::TaskSort(sort) => write(pool, TASK_SORT_KEY, sort.as_str()).await?,
     }
     Ok(())
 }
@@ -2503,6 +2540,21 @@ mod tests {
         assert!(s.default_view_follows_last);
         assert_eq!(s.default_view, DefaultView::Month);
         assert_eq!(s.last_view, DefaultView::Year);
+    }
+
+    /// The Tasks sort round-trips, and an absent or garbage value lands on
+    /// date — the order every install already has — rather than an error.
+    #[tokio::test]
+    async fn task_sort_round_trips_and_defaults_to_date() {
+        let p = pool().await;
+        assert_eq!(read_settings(&p).await.task_sort, TaskSort::Date, "date until chosen");
+
+        let s = set(&p, Setting::TaskSort(TaskSort::Priority)).await.unwrap();
+        assert_eq!(s.task_sort, TaskSort::Priority);
+        assert_eq!(read(&p, TASK_SORT_KEY).await.as_deref(), Some("priority"));
+
+        write(&p, TASK_SORT_KEY, "sideways").await.unwrap();
+        assert_eq!(read_settings(&p).await.task_sort, TaskSort::Date, "garbage lands on date");
     }
 
     /// Both directions, `the_time_format_round_trips_both_ways`'s reason.

@@ -46,6 +46,41 @@ pub(crate) fn resolve_list(
     }
 }
 
+/// `--priority`'s four words. Words, not numbers: the RFC's `1` is the
+/// *highest* priority, which reads as "first/low" to most people, so a bare
+/// integer is a trap. `None` is the word for clearing, not an absent flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PriorityArg {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl PriorityArg {
+    /// The raw wire integer the app stores: the three levels' values from
+    /// [`omacal_caldav::TaskPriority`], and `0` for no priority.
+    fn wire(self) -> i64 {
+        match self {
+            PriorityArg::None => 0,
+            PriorityArg::Low => omacal_caldav::TaskPriority::Low.wire(),
+            PriorityArg::Medium => omacal_caldav::TaskPriority::Medium.wire(),
+            PriorityArg::High => omacal_caldav::TaskPriority::High.wire(),
+        }
+    }
+}
+
+/// `--priority none|low|medium|high`, case-insensitive.
+fn priority_of(word: &str) -> Result<PriorityArg, String> {
+    match word.to_ascii_lowercase().as_str() {
+        "none" => Ok(PriorityArg::None),
+        "low" => Ok(PriorityArg::Low),
+        "medium" => Ok(PriorityArg::Medium),
+        "high" => Ok(PriorityArg::High),
+        other => Err(format!("--priority takes none, low, medium or high, not \"{other}\"")),
+    }
+}
+
 /// One change to a task, as the CLI parses it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TaskCmd {
@@ -55,6 +90,7 @@ pub(crate) enum TaskCmd {
         list: Option<ListRef>,
         due: Option<String>,
         at: Option<String>,
+        priority: Option<PriorityArg>,
     },
     /// `done` and `reopen` are one verb with a flag on the wire; two words
     /// here because "mark it not-done" is not a thing anyone types.
@@ -66,6 +102,9 @@ pub(crate) enum TaskCmd {
         due: Option<Option<String>>,
         at: Option<Option<String>>,
         notes: Option<Option<String>>,
+        /// Absent (`None`) leaves the task's priority alone; the word `none`
+        /// is [`PriorityArg::None`], which clears it.
+        priority: Option<PriorityArg>,
     },
 }
 
@@ -147,28 +186,37 @@ pub(crate) fn parse(rest: &[&String]) -> Option<Result<TaskCmd, String>> {
         match verb {
             "add" => {
                 let summary = positional()
-                    .ok_or_else(|| "usage: omacal tasks add \"a title\" [--list ID|NAME] [--due YYYY-MM-DD] [--at HH:MM]".to_string())?;
+                    .ok_or_else(|| "usage: omacal tasks add \"a title\" [--list ID|NAME] [--due YYYY-MM-DD] [--at HH:MM] [--priority none|low|medium|high]".to_string())?;
                 let list = take("--list")?.map(|v| match v.parse::<i64>() {
                     Ok(id) => ListRef::Id(id),
                     Err(_) => ListRef::Name(v),
                 });
-                Ok(TaskCmd::Add { summary, list, due: take("--due")?, at: take("--at")? })
+                let priority = match take("--priority")? {
+                    Some(w) => Some(priority_of(&w)?),
+                    None => None,
+                };
+                Ok(TaskCmd::Add { summary, list, due: take("--due")?, at: take("--at")?, priority })
             }
             "done" => Ok(TaskCmd::Complete { id: id_of("done")?, done: true }),
             "reopen" => Ok(TaskCmd::Complete { id: id_of("reopen")?, done: false }),
             "edit" => {
                 let id = id_of("edit")?;
+                let priority = match take("--priority")? {
+                    Some(w) => Some(priority_of(&w)?),
+                    None => None,
+                };
                 let cmd = TaskCmd::Edit {
                     id,
                     title: take("--title")?,
                     due: clearable(take("--due")?),
                     at: clearable(take("--at")?),
                     notes: clearable(take("--notes")?),
+                    priority,
                 };
-                let TaskCmd::Edit { title, due, at, notes, .. } = &cmd else { unreachable!() };
-                if title.is_none() && due.is_none() && at.is_none() && notes.is_none() {
+                let TaskCmd::Edit { title, due, at, notes, priority, .. } = &cmd else { unreachable!() };
+                if title.is_none() && due.is_none() && at.is_none() && notes.is_none() && priority.is_none() {
                     return Err(
-                        "omacal tasks edit ID needs something to change: --title, --due, --at or --notes \
+                        "omacal tasks edit ID needs something to change: --title, --due, --at, --notes or --priority \
                          (--due none clears the date)"
                             .into(),
                     );
@@ -194,7 +242,7 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
     let refuse = |m: &str| fail(json, "usage", m, EXIT_USAGE);
 
     let (request, done_word) = match cmd {
-        TaskCmd::Add { summary, list, due, at } => {
+        TaskCmd::Add { summary, list, due, at, priority } => {
             if summary.trim().is_empty() {
                 return refuse("a task needs a title");
             }
@@ -212,12 +260,13 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 },
                 other => resolve_list(other, &[]).unwrap_or(None),
             };
-            (create_request(list, summary, due_ms, all_day), "Added")
+            // 0 and absent both mean "no priority" on a create.
+            (create_request(list, summary, due_ms, all_day, priority.map(PriorityArg::wire)), "Added")
         }
         TaskCmd::Complete { id, done } => {
             (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" })
         }
-        TaskCmd::Edit { id, title, due, at, notes } => {
+        TaskCmd::Edit { id, title, due, at, notes, priority } => {
             let task = match omacal_store::task_by_id(pool, *id).await {
                 Ok(Some(t)) => t,
                 Ok(None) => return refuse("no task with that id — `omacal tasks` prints them"),
@@ -239,7 +288,13 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 Ok(v) => v,
                 Err(m) => return refuse(&m),
             };
-            (update_request(*id, &summary, due_ms, all_day, notes.as_deref()), "Saved")
+            // Naming nothing leaves the value: the CLI sends the task's own
+            // raw value through; a named word sets or clears.
+            let priority = match priority {
+                Some(word) => Some(word.wire()),
+                None => Some(task.priority),
+            };
+            (update_request(*id, &summary, due_ms, all_day, notes.as_deref(), priority), "Saved")
         }
     };
 
@@ -258,6 +313,7 @@ pub(crate) fn create_request(
     summary: &str,
     due_ms: Option<i64>,
     due_all_day: bool,
+    priority: Option<i64>,
 ) -> serde_json::Value {
     serde_json::json!({
         "v": crate::ipc::PROTOCOL_VERSION,
@@ -266,6 +322,7 @@ pub(crate) fn create_request(
         "summary": summary,
         "due_ms": due_ms,
         "due_all_day": due_all_day,
+        "priority": priority,
     })
 }
 
@@ -284,6 +341,7 @@ pub(crate) fn update_request(
     due_ms: Option<i64>,
     due_all_day: bool,
     notes: Option<&str>,
+    priority: Option<i64>,
 ) -> serde_json::Value {
     serde_json::json!({
         "v": crate::ipc::PROTOCOL_VERSION,
@@ -293,6 +351,7 @@ pub(crate) fn update_request(
         "due_ms": due_ms,
         "due_all_day": due_all_day,
         "notes": notes,
+        "priority": priority,
     })
 }
 
@@ -369,6 +428,7 @@ mod tests {
                 list: None,
                 due: Some("2026-09-11".into()),
                 at: Some("18:00".into()),
+                priority: None,
             })
         );
         assert_eq!(p("done 41"), Ok(TaskCmd::Complete { id: 41, done: true }));
@@ -383,8 +443,47 @@ mod tests {
                 due: Some(None),
                 at: None,
                 notes: Some(Some("hello".into())),
+                priority: None,
             })
         );
+
+        // `--priority` is words, case-insensitive, and `none` clears.
+        assert_eq!(
+            p("add Thing --priority high"),
+            Ok(TaskCmd::Add {
+                summary: "Thing".into(),
+                list: None,
+                due: None,
+                at: None,
+                priority: Some(PriorityArg::High),
+            })
+        );
+        assert_eq!(
+            p("edit 41 --priority none"),
+            Ok(TaskCmd::Edit {
+                id: 41,
+                title: None,
+                due: None,
+                at: None,
+                notes: None,
+                priority: Some(PriorityArg::None),
+            })
+        );
+        // Every word maps to its level, in any case.
+        for (word, level) in [
+            ("low", PriorityArg::Low),
+            ("medium", PriorityArg::Medium),
+            ("HIGH", PriorityArg::High),
+        ] {
+            assert_eq!(
+                p(&format!("edit 41 --priority {word}")),
+                Ok(TaskCmd::Edit {
+                    id: 41, title: None, due: None, at: None, notes: None, priority: Some(level),
+                }),
+                "--priority {word}"
+            );
+        }
+        assert!(p("add Thing --priority urgent").unwrap_err().contains("none, low, medium or high"));
 
         assert!(p("add").is_err(), "a title is not optional");
         assert!(p("done").is_err(), "an id is not optional");
@@ -507,12 +606,13 @@ mod tests {
     /// ever reaches a user's terminal.
     #[test]
     fn every_request_this_module_builds_parses_on_the_sockets_own_terms() {
-        match crate::ipc::parse_request(&create_request(Some(3), "Water plants", Some(1_000), false).to_string()) {
-            Ok(crate::ipc::Request::TaskCreate { calendar_id, summary, due_ms, due_all_day }) => {
+        match crate::ipc::parse_request(&create_request(Some(3), "Water plants", Some(1_000), false, Some(1)).to_string()) {
+            Ok(crate::ipc::Request::TaskCreate { calendar_id, summary, due_ms, due_all_day, priority }) => {
                 assert_eq!(calendar_id, Some(3));
                 assert_eq!(summary, "Water plants");
                 assert_eq!(due_ms, Some(1_000));
                 assert!(!due_all_day);
+                assert_eq!(priority, Some(1), "the priority rides the create");
             }
             other => panic!("create_request did not parse as TaskCreate: {other:?}"),
         }
@@ -526,16 +626,47 @@ mod tests {
         }
 
         match crate::ipc::parse_request(
-            &update_request(41, "Water plants twice", None, true, Some("weekly")).to_string(),
+            &update_request(41, "Water plants twice", None, true, Some("weekly"), Some(5)).to_string(),
         ) {
-            Ok(crate::ipc::Request::TaskUpdate { id, summary, due_ms, due_all_day, notes }) => {
+            Ok(crate::ipc::Request::TaskUpdate { id, summary, due_ms, due_all_day, notes, priority }) => {
                 assert_eq!(id, 41);
                 assert_eq!(summary, "Water plants twice");
                 assert_eq!(due_ms, None);
                 assert!(due_all_day);
                 assert_eq!(notes.as_deref(), Some("weekly"));
+                assert_eq!(priority, Some(5), "the priority rides the update");
             }
             other => panic!("update_request did not parse as TaskUpdate: {other:?}"),
+        }
+
+        // The tri-state, on the wire: absent leaves, an explicit 0 clears.
+        let absent = serde_json::json!({
+            "v": crate::ipc::PROTOCOL_VERSION, "cmd": "tasks-update",
+            "id": 41, "summary": "x", "due_all_day": true,
+        }).to_string();
+        match crate::ipc::parse_request(&absent) {
+            Ok(crate::ipc::Request::TaskUpdate { priority, .. }) => {
+                assert_eq!(priority, None, "absent leaves the priority alone");
+            }
+            other => panic!("an absent priority must still parse: {other:?}"),
+        }
+        let clear = serde_json::json!({
+            "v": crate::ipc::PROTOCOL_VERSION, "cmd": "tasks-update",
+            "id": 41, "summary": "x", "due_all_day": true, "priority": 0,
+        }).to_string();
+        match crate::ipc::parse_request(&clear) {
+            Ok(crate::ipc::Request::TaskUpdate { priority, .. }) => {
+                assert_eq!(priority, Some(0), "an explicit 0 is a clear, not an absence");
+            }
+            other => panic!("an explicit 0 must parse: {other:?}"),
+        }
+        // A create with no priority at all parses too, as no priority.
+        let create_absent = serde_json::json!({
+            "v": crate::ipc::PROTOCOL_VERSION, "cmd": "tasks-create", "summary": "x",
+        }).to_string();
+        match crate::ipc::parse_request(&create_absent) {
+            Ok(crate::ipc::Request::TaskCreate { priority, .. }) => assert_eq!(priority, None),
+            other => panic!("a create with no priority must parse: {other:?}"),
         }
     }
 }

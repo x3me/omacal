@@ -63,10 +63,61 @@ export const deleteTaskList = (id: number) => invoke<TaskList[]>('delete_task_li
 export const setTaskCompleted = (id: number, on: boolean) =>
   invoke<Task[]>('set_task_completed', { id, on });
 
+/** The Tasks pane's within-group order. */
+export type TaskSort = 'date' | 'priority';
+
+/** The four levels the editor offers, with their raw wire values (RFC 5545
+ *  §3.8.1.9: 1 highest, 5 normal, 9 lowest; 0 = none). */
+export const PRIORITY_CHOICES: { value: number; label: string }[] = [
+  { value: 0, label: 'None' },
+  { value: 1, label: 'High' },
+  { value: 5, label: 'Medium' },
+  { value: 9, label: 'Low' },
+];
+
+/** The word for a stored integer, by the RFC's read bands: 1–4 high,
+ *  5 medium, 6–9 low, and 0/absent `null`. A server's non-canonical 7 reads
+ *  as Low, but its raw value is what is written back if untouched. */
+export const priorityLabel = (raw: number): 'High' | 'Medium' | 'Low' | null =>
+  raw >= 1 && raw <= 4 ? 'High'
+  : raw === 5 ? 'Medium'
+  : raw >= 6 && raw <= 9 ? 'Low'
+  : null;
+
+/** The option the editor should *show* for a stored integer: the value itself
+ *  when it is one of the four, else the band's canonical level — so a server's
+ *  non-canonical 7 shows as Low rather than falling back to None. Display
+ *  only: an untouched save still sends the raw value. */
+export const priorityOption = (raw: number): number =>
+  raw === 0 ? 0
+  : raw >= 1 && raw <= 4 ? 1
+  : raw === 5 ? 5
+  : raw >= 6 && raw <= 9 ? 9
+  : 0;
+
+/** Orders rows within a group. `date`: due (undated last), then priority
+ *  (none last), then title — the order the pane always used. `priority`:
+ *  priority (none last), then due, then title. Pure, so it is tested
+ *  directly. */
+export function sortTasks<T extends { dueMs: number | null; priority: number; summary: string }>(
+  rows: T[],
+  mode: TaskSort,
+): T[] {
+  const rank = (p: number) => (p === 0 ? 10 : p);
+  const due = (t: T) => t.dueMs ?? Infinity;
+  const title = (a: T, b: T) => a.summary.localeCompare(b.summary);
+  return [...rows].sort((a, b) =>
+    mode === 'priority'
+      ? rank(a.priority) - rank(b.priority) || due(a) - due(b) || title(a, b)
+      : due(a) - due(b) || rank(a.priority) - rank(b.priority) || title(a, b),
+  );
+}
+
 /** A new task on a list. `dueAllDay` is `updateTask`'s: a date, or the hour
- *  `dueMs` names on it. */
-export const createTask = (calendarId: number, summary: string, dueMs: number | null, dueAllDay = true) =>
-  invoke<Task[]>('create_task', { calendarId, summary, dueMs, dueAllDay });
+ *  `dueMs` names on it. `priority` is the raw wire integer, 0 for none. */
+export const createTask = (
+  calendarId: number, summary: string, dueMs: number | null, dueAllDay = true, priority = 0,
+) => invoke<Task[]>('create_task', { calendarId, summary, dueMs, dueAllDay, priority });
 
 export const deleteTask = (id: number) => invoke<Task[]>('delete_task_cmd', { id });
 
@@ -85,7 +136,8 @@ export const updateTask = (
   dueAllDay: boolean,
   notes: string | null,
   calendarId: number | null = null,
-) => invoke<Task[]>('update_task', { id, summary, dueMs, dueAllDay, notes, calendarId });
+  priority = 0,
+) => invoke<Task[]>('update_task', { id, summary, dueMs, dueAllDay, notes, calendarId, priority });
 
 /** Connects an iCloud or generic CalDAV account. Resolves to the account's
  *  display email once discovery has accepted the credentials. */

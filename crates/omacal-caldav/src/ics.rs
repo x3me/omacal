@@ -724,11 +724,53 @@ where
 /// a change to apply: the editor always knows the complete state, and a
 /// "leave this alone" third state would be one more thing for a caller to
 /// get wrong. `None` on an optional field means the property goes.
+/// The priority levels OmaCal authors, with their RFC 5545 §3.8.1.9 wire
+/// values. "No priority" is `None` at the call site, never a variant, so it
+/// cannot be mistaken for the lowest level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPriority {
+    High = 1,
+    Medium = 5,
+    Low = 9,
+}
+
+impl TaskPriority {
+    pub fn wire(self) -> i64 {
+        self as i64
+    }
+
+    /// The level a stored integer reads as, by the RFC's bands: 1–4 high,
+    /// 5 medium, 6–9 low. Anything else — `0`, or out of range — is no level.
+    pub fn from_wire(n: i64) -> Option<TaskPriority> {
+        match n {
+            1..=4 => Some(TaskPriority::High),
+            5 => Some(TaskPriority::Medium),
+            6..=9 => Some(TaskPriority::Low),
+            _ => None,
+        }
+    }
+}
+
+/// The `PRIORITY` value to write for an integer the caller named: `1..=9`
+/// as-is, and everything else — `0`, or out of range — means the property is
+/// omitted. The **one** place an integer becomes a writable priority, so the
+/// create and edit paths cannot drift apart on what "no priority" is. It
+/// keeps a valid non-canonical value (a server's `7`) exactly as given; only
+/// the *authored* values come from [`TaskPriority`], at 1/5/9.
+pub fn priority_to_write(raw: i64) -> Option<i64> {
+    (1..=9).contains(&raw).then_some(raw)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TodoEdit<'a> {
     pub summary: &'a str,
     pub due: Option<TodoDue>,
     pub description: Option<&'a str>,
+    /// `None` clears the `PRIORITY` property; `Some(1..=9)` writes it. Held as
+    /// the raw wire integer rather than a [`TaskPriority`] so a server's
+    /// non-canonical value — a `7` — passes through an unrelated edit
+    /// untouched; only a deliberate choice writes 1/5/9.
+    pub priority: Option<i64>,
 }
 
 /// When a task is due: a bare date, or an instant.
@@ -882,6 +924,8 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
                     || u.starts_with("DUE;")
                     || u.starts_with("DESCRIPTION:")
                     || u.starts_with("DESCRIPTION;")
+                    || u.starts_with("PRIORITY:")
+                    || u.starts_with("PRIORITY;")
                     || u.starts_with("SEQUENCE:")
                     || u.starts_with("LAST-MODIFIED:")
                     || u.starts_with("DTSTAMP:")
@@ -898,6 +942,9 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
         }
         if let Some(text) = edit.description {
             kept.push(format!("DESCRIPTION:{}", escape(text)));
+        }
+        if let Some(priority) = edit.priority {
+            kept.push(format!("PRIORITY:{priority}"));
         }
         kept.push(format!("SEQUENCE:{}", sequence + 1));
         kept.push(format!("DTSTAMP:{}", fmt_utc(now)));
@@ -1006,7 +1053,13 @@ pub fn todo_alarm_lead_minutes(raw: &str, uid: &str) -> Option<i64> {
 /// [`TodoDue::mirrored_start`] for why: a `DUE` iCloud is handed without a
 /// matching `DTSTART` round-trips with its time silently dropped, and a
 /// brand-new task is exactly as exposed to that as an edited one.
-pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timestamp) -> String {
+pub fn new_todo_ics(
+    uid: &str,
+    summary: &str,
+    due: Option<&IcsTime>,
+    priority: Option<i64>,
+    now: Timestamp,
+) -> String {
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
         "VERSION:2.0".to_string(),
@@ -1017,6 +1070,11 @@ pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timest
         format!("SUMMARY:{}", escape(summary)),
         "STATUS:NEEDS-ACTION".to_string(),
     ];
+    // Omitted when there is no priority, never `PRIORITY:0`: the two are
+    // equivalent to the RFC, but `0` churns against the clients that omit it.
+    if let Some(priority) = priority {
+        lines.push(format!("PRIORITY:{priority}"));
+    }
     if let Some(due) = due {
         match due {
             IcsTime::Date(d) => lines.push(format!(
@@ -1918,6 +1976,11 @@ mod tests {
             summary: "New title",
             due: Some(TodoDue::At("2026-09-11T12:30:00Z".parse().unwrap())),
             description: Some("new note"),
+            // Named explicitly, because priority is a modelled field now: the
+            // caller passes the stored value through to keep it. The other
+            // lines below — CATEGORIES, VALARM, STATUS — stay unmodelled and
+            // are preserved by the surgery alone.
+            priority: Some(5),
         };
         let out = patch_todo_fields(raw, "t-9", &edit, "Europe/Sofia", now).unwrap();
 
@@ -1955,6 +2018,7 @@ mod tests {
             summary: "Call",
             due: Some(TodoDue::At("2026-09-18T21:55:00Z".parse().unwrap())),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(raw, "t-8", &edit, "America/Denver", now).unwrap();
         assert_eq!(out.matches("BEGIN:VALARM").count(), 1, "{out}");
@@ -1979,6 +2043,7 @@ mod tests {
             summary: "Call it",
             due: Some(TodoDue::Date(Date::new(2026, 9, 19).unwrap())),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(raw, "t-7", &edit, "America/Denver", now).unwrap();
         assert!(!out.contains("VALARM"), "{out}");
@@ -2003,7 +2068,7 @@ mod tests {
         let now: Timestamp = "2026-09-07T09:00:00Z".parse().unwrap();
         let out = patch_todo_fields(
             raw, "t-1",
-            &TodoEdit { summary: "Thing", due: None, description: None },
+            &TodoEdit { summary: "Thing", due: None, description: None, priority: None },
             "Europe/Sofia", now,
         ).unwrap();
         assert!(!out.contains("DUE"), "{out}");
@@ -2023,6 +2088,7 @@ mod tests {
                 summary: "Thing",
                 due: Some(TodoDue::Date(jiff::civil::date(2026, 9, 10))),
                 description: None,
+                priority: None,
             },
             "Europe/Sofia", now,
         ).unwrap();
@@ -2049,6 +2115,7 @@ mod tests {
             summary: "Buy stamps",
             due: Some(TodoDue::At("2026-09-11T12:30:00Z".parse().unwrap())),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(raw, "t-2", &edit, "Europe/Sofia", now).unwrap();
 
@@ -2073,6 +2140,7 @@ mod tests {
             summary: "Trip",
             due: Some(TodoDue::Date(jiff::civil::date(2026, 9, 12))),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(raw, "t-3", &edit, "Europe/Sofia", now).unwrap();
         assert!(out.contains("DTSTART;VALUE=DATE:20260910"), "{out}");
@@ -2092,6 +2160,7 @@ mod tests {
             // 15:30 Sofia, before the 18:00 start.
             due: Some(TodoDue::At("2026-09-11T12:30:00Z".parse().unwrap())),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(raw, "t-4", &edit, "Europe/Sofia", now).unwrap();
         assert!(!out.contains("180000"), "the stale 18:00 start is gone: {out}");
@@ -2107,7 +2176,7 @@ mod tests {
         let due: Timestamp = "2026-09-11T12:30:00Z".parse().unwrap();
         let out = patch_todo_fields(
             raw, "t-5",
-            &TodoEdit { summary: "Call", due: Some(TodoDue::At(due)), description: None },
+            &TodoEdit { summary: "Call", due: Some(TodoDue::At(due)), description: None, priority: None },
             "Australia/Brisbane", now,
         ).unwrap();
 
@@ -2124,7 +2193,7 @@ mod tests {
         let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:a\r\nSUMMARY:First\r\nEND:VTODO\r\n\
             BEGIN:VTODO\r\nUID:b\r\nSUMMARY:Second\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         let now: Timestamp = "2026-09-07T09:00:00Z".parse().unwrap();
-        let edit = TodoEdit { summary: "Renamed", due: None, description: None };
+        let edit = TodoEdit { summary: "Renamed", due: None, description: None, priority: None };
         let out = patch_todo_fields(raw, "b", &edit, "Europe/Sofia", now).unwrap();
         assert!(out.contains("SUMMARY:First"), "{out}");
         assert!(out.contains("SUMMARY:Renamed"));
@@ -2325,6 +2394,7 @@ END:VEVENT\r\nEND:VCALENDAR";
             summary: "Pay the rent",
             due: Some(TodoDue::At("2026-09-19T12:00:00Z".parse().unwrap())),
             description: Some("to the landlord"),
+            priority: None,
         };
         let out = patch_todo_fields(FOLDED, "abc", &edit, "Europe/Sofia", now).unwrap();
         let (todo, vtodo) = read_back(&out);
@@ -2501,11 +2571,59 @@ END:VEVENT\r\nEND:VCALENDAR";
     fn a_new_todo_serializes_and_reparses() {
         let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
         let due = IcsTime::Date(Date::new(2026, 8, 20).unwrap());
-        let ics = new_todo_ics("new-1", "Fix; the, thing", Some(&due), now);
+        let ics = new_todo_ics("new-1", "Fix; the, thing", Some(&due), None, now);
         let t = &todos_in(&parse(&ics).unwrap())[0];
         assert_eq!(t.uid, "new-1");
         assert_eq!(t.summary.as_deref(), Some("Fix; the, thing"), "escaping round-trips");
         assert!(matches!(t.due, Some(IcsTime::Date(_))));
+    }
+
+    #[test]
+    fn a_new_todo_carries_the_priority_it_was_given() {
+        let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
+        let ics = new_todo_ics("p-1", "File the return", None, Some(TaskPriority::High.wire()), now);
+        assert!(ics.contains("PRIORITY:1"), "{ics}");
+        assert_eq!(todos_in(&parse(&ics).unwrap())[0].priority, 1);
+
+        let none = new_todo_ics("p-2", "Someday", None, None, now);
+        assert!(!none.contains("PRIORITY"), "no priority writes no line: {none}");
+    }
+
+    #[test]
+    fn an_edit_sets_clears_and_preserves_priority() {
+        let now: Timestamp = "2026-09-07T09:00:00Z".parse().unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-p\r\nSUMMARY:Task\r\n\
+                   PRIORITY:5\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let edit = |priority| TodoEdit { summary: "Task", due: None, description: None, priority };
+
+        // A deliberate choice rewrites it, without doubling the line.
+        let set = patch_todo_fields(raw, "t-p", &edit(Some(TaskPriority::Low.wire())), "UTC", now).unwrap();
+        assert!(set.contains("PRIORITY:9"), "{set}");
+        assert_eq!(set.matches("PRIORITY").count(), 1, "never doubled: {set}");
+
+        // Clearing removes the line entirely.
+        let cleared = patch_todo_fields(raw, "t-p", &edit(None), "UTC", now).unwrap();
+        assert!(!cleared.contains("PRIORITY"), "{cleared}");
+
+        // A value the caller passes through is kept as-is: a server's
+        // non-canonical 7 is not normalised to the 9 that no-one asked for.
+        let raw7 = raw.replace("PRIORITY:5", "PRIORITY:7");
+        let kept = patch_todo_fields(&raw7, "t-p", &edit(Some(7)), "UTC", now).unwrap();
+        assert!(kept.contains("PRIORITY:7"), "{kept}");
+    }
+
+    #[test]
+    fn task_priority_reads_the_rfc_bands() {
+        assert_eq!(TaskPriority::from_wire(0), None);
+        assert_eq!(TaskPriority::from_wire(1), Some(TaskPriority::High));
+        assert_eq!(TaskPriority::from_wire(4), Some(TaskPriority::High));
+        assert_eq!(TaskPriority::from_wire(5), Some(TaskPriority::Medium));
+        assert_eq!(TaskPriority::from_wire(6), Some(TaskPriority::Low));
+        assert_eq!(TaskPriority::from_wire(9), Some(TaskPriority::Low));
+        assert_eq!(TaskPriority::from_wire(10), None);
+        assert_eq!(TaskPriority::High.wire(), 1);
+        assert_eq!(TaskPriority::Medium.wire(), 5);
+        assert_eq!(TaskPriority::Low.wire(), 9);
     }
 
     /// A task created with a time, not just a date, needs the same mirrored
@@ -2518,7 +2636,7 @@ END:VEVENT\r\nEND:VCALENDAR";
             dt: jiff::civil::date(2026, 9, 11).at(15, 30, 0, 0),
             tzid: "Europe/Sofia".to_string(),
         };
-        let ics = new_todo_ics("new-2", "Call", Some(&due), now);
+        let ics = new_todo_ics("new-2", "Call", Some(&due), None, now);
         assert!(ics.contains("DUE;TZID=Europe/Sofia:20260911T153000"), "{ics}");
         assert!(ics.contains("DTSTART;TZID=Europe/Sofia:20260911T153000"), "{ics}");
 
@@ -2542,7 +2660,7 @@ END:VEVENT\r\nEND:VCALENDAR";
             dt: jiff::civil::date(2026, 9, 11).at(15, 30, 0, 0),
             tzid: "Europe/Sofia".to_string(),
         };
-        let ics = new_todo_ics("new-3", "Call", Some(&due), now);
+        let ics = new_todo_ics("new-3", "Call", Some(&due), None, now);
         assert!(ics.contains("BEGIN:VALARM"), "{ics}");
         assert!(ics.contains("ACTION:DISPLAY"), "{ics}");
         assert!(ics.contains("TRIGGER:PT0M"), "{ics}");
@@ -2555,7 +2673,7 @@ END:VEVENT\r\nEND:VCALENDAR";
     fn a_new_todo_with_only_a_date_gets_no_valarm() {
         let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
         let due = IcsTime::Date(Date::new(2026, 8, 20).unwrap());
-        let ics = new_todo_ics("new-4", "Fix the thing", Some(&due), now);
+        let ics = new_todo_ics("new-4", "Fix the thing", Some(&due), None, now);
         assert!(!ics.contains("VALARM"), "{ics}");
     }
 
@@ -2733,6 +2851,7 @@ END:VEVENT\r\nEND:VCALENDAR";
             summary: "Call",
             due: Some(TodoDue::Date(Date::new(2026, 9, 19).unwrap())),
             description: None,
+            priority: None,
         };
 
         let out = patch_todo_fields(&timed(relative), "t-9", &to_date, "Europe/Sofia", now).unwrap();
@@ -2743,7 +2862,7 @@ END:VEVENT\r\nEND:VCALENDAR";
         assert!(out.contains("TRIGGER;VALUE=DATE-TIME:20260918T120000Z"), "the user's own: {out}");
 
         // Clearing the due entirely does the same.
-        let cleared = TodoEdit { summary: "Call", due: None, description: None };
+        let cleared = TodoEdit { summary: "Call", due: None, description: None, priority: None };
         let out = patch_todo_fields(&timed(relative), "t-9", &cleared, "Europe/Sofia", now).unwrap();
         assert!(!out.contains("VALARM"), "{out}");
 
@@ -2752,6 +2871,7 @@ END:VEVENT\r\nEND:VCALENDAR";
             summary: "Call",
             due: Some(TodoDue::At("2026-09-18T12:55:00Z".parse().unwrap())),
             description: None,
+            priority: None,
         };
         let out = patch_todo_fields(&timed(relative), "t-9", &keep, "Europe/Sofia", now).unwrap();
         assert_eq!(out.matches("BEGIN:VALARM").count(), 1);

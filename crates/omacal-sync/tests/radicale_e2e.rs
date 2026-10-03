@@ -454,6 +454,10 @@ async fn a_folded_task_is_edited_completed_and_reopened_in_a_row() {
         summary: "Pay the rent",
         due: Some(omacal_caldav::TodoDue::Date(jiff::civil::date(2026, 9, 19))),
         description: Some("to the landlord"),
+        // This edit names no priority (which, per `TodoEdit`'s contract,
+        // clears it). The caller passes the stored value through when it
+        // means to keep one.
+        priority: None,
     };
     let edited = omacal_caldav::patch_todo_fields(&raw, "e2e-folded", &edit, "Europe/Sofia", now).expect("edit patch");
     let etag = client.put(&href, &edited, Some(&asked)).await.expect("edit PUT");
@@ -487,6 +491,47 @@ async fn a_folded_task_is_edited_completed_and_reopened_in_a_row() {
 
     // A replace with no etag known is not a create, and does not 412.
     client.put_unguarded(&href, &reopened).await.expect("unguarded replace of an existing task");
+}
+
+/// Priority, the whole way: a task written with `PRIORITY:1` lands as a real
+/// resource on the server, reads back as the level, and clears to no line at
+/// all. The unit tests assert the bytes; this asserts the bytes survive a real
+/// CalDAV round trip (and leaves a `.ics` in Radicale's store to look at).
+#[tokio::test]
+#[ignore = "needs a live Radicale on 127.0.0.1:5232"]
+async fn a_priority_round_trips_through_a_real_server() {
+    let base = base_url();
+    let user = format!("omacal-e2e-prio-{}", std::process::id());
+    mkcalendar(&base, &user, "prio", "VTODO").await;
+
+    let client = CalDavClient::new(&base, &user, "pw").expect("client");
+    let now = jiff::Timestamp::from_millisecond(1_790_000_000_000).unwrap();
+    let ics = omacal_caldav::new_todo_ics("prio-1", "File the return", None, Some(1), now);
+    let href = format!("{base}/{user}/prio/prio-1.ics");
+    client.put(&href, &ics, None).await.expect("PUT with a priority");
+
+    // The server's own copy carries the line...
+    let prio = client.discover().await.expect("discovery").into_iter()
+        .find(|c| c.display_name == "prio").expect("prio found");
+    let resources = client.todos(&prio.url).await.expect("REPORT");
+    let raw = resources.iter().find(|r| r.url.ends_with("prio-1.ics"))
+        .expect("the task").ics.clone();
+    assert!(raw.contains("PRIORITY:1"), "the server kept the priority: {raw}");
+
+    // ...and the app's parser reads it back as the level.
+    let parsed = omacal_caldav::todos_in(&omacal_caldav::parse(&raw).unwrap());
+    assert_eq!(parsed[0].priority, 1);
+
+    // Clearing writes no `PRIORITY` line at all — never `PRIORITY:0`.
+    let edit = omacal_caldav::TodoEdit {
+        summary: "File the return",
+        due: None,
+        description: None,
+        priority: None,
+    };
+    let cleared = omacal_caldav::patch_todo_fields(&raw, "prio-1", &edit, "UTC", now)
+        .expect("clear patch");
+    assert!(!cleared.contains("PRIORITY"), "cleared means omitted: {cleared}");
 }
 
 #[tokio::test]

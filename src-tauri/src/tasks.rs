@@ -209,6 +209,9 @@ async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Resu
 ///
 /// `calendar_id` moves the task to another list in the same save; `None`
 /// (or its own list) leaves it where it is. See [`move_resource`].
+// A Tauri command takes flat arguments, so the whole-state bundle is wide;
+// `update_impl` carries the same allow for the same reason.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn update_task(
     state: tauri::State<'_, AppState>,
@@ -218,9 +221,12 @@ pub async fn update_task(
     due_all_day: bool,
     notes: Option<String>,
     calendar_id: Option<i64>,
+    // The raw stored integer the window passed back (0 = none); passing an
+    // untouched value straight through keeps a server's non-canonical `7`.
+    priority: i64,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    update_impl(&state, id, &summary, due_ms, due_all_day, notes.as_deref(), calendar_id)
+    update_impl(&state, id, &summary, due_ms, due_all_day, notes.as_deref(), calendar_id, Some(priority))
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
@@ -235,6 +241,7 @@ async fn update_impl(
     due_all_day: bool,
     notes: Option<&str>,
     to_list: Option<i64>,
+    priority: Option<i64>,
 ) -> anyhow::Result<()> {
     let summary = summary.trim();
     if summary.is_empty() {
@@ -245,6 +252,14 @@ async fn update_impl(
     let task = omacal_store::task_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
+    // Absent (`None`) leaves the stored value — the passthrough that keeps a
+    // server's non-canonical `7`; `Some(0)` clears. `priority_to_write` is the
+    // one rule for what is writable, so an untouched `0` writes no
+    // `PRIORITY:0`.
+    let priority = match priority {
+        None => omacal_caldav::priority_to_write(task.priority),
+        Some(raw) => omacal_caldav::priority_to_write(raw),
+    };
     let raw = task.raw_ics.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     let to_list = to_list.filter(|&to| to != task.calendar_id);
     // The same refusal a create gets: only a list the window would offer.
@@ -263,7 +278,7 @@ async fn update_impl(
 
     let due = due_for(due_ms, due_all_day, &jiff::tz::TimeZone::system())?;
     let now = jiff::Timestamp::from_millisecond(crate::now_ms())?;
-    let edit = omacal_caldav::TodoEdit { summary, due, description: notes };
+    let edit = omacal_caldav::TodoEdit { summary, due, description: notes, priority };
     let patched = omacal_caldav::patch_todo_fields(raw, &task.uid, &edit, &cal_tz, now)
         .ok_or_else(|| anyhow::anyhow!("could not rewrite the task's resource"))?;
     let due_utc = due.as_ref().and_then(|d| stored_due_ms(d, &cal_tz));
@@ -284,6 +299,7 @@ async fn update_impl(
                 due_utc,
                 due_tz: due_tz.map(str::to_string),
                 due_all_day,
+                priority: priority.unwrap_or(0),
                 updated_at: crate::now_ms(),
                 raw_ics: Some(patched),
                 ..task
@@ -310,6 +326,7 @@ async fn update_impl(
         due_utc,
         due_tz,
         due_all_day,
+        priority.unwrap_or(0),
         new_etag.as_deref(),
         &patched,
         crate::now_ms(),
@@ -455,9 +472,10 @@ pub(crate) async fn create_body(
     summary: &str,
     due_ms: Option<i64>,
     due_all_day: bool,
+    priority: i64,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    create_impl(state, calendar_id, summary, due_ms, due_all_day)
+    create_impl(state, calendar_id, summary, due_ms, due_all_day, priority)
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(list_body(state).await)
@@ -478,9 +496,10 @@ pub(crate) async fn update_body(
     due_ms: Option<i64>,
     due_all_day: bool,
     notes: Option<&str>,
+    priority: Option<i64>,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    update_impl(state, id, summary, due_ms, due_all_day, notes, None)
+    update_impl(state, id, summary, due_ms, due_all_day, notes, None, priority)
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(list_body(state).await)
@@ -533,9 +552,10 @@ pub async fn create_task(
     summary: String,
     due_ms: Option<i64>,
     due_all_day: Option<bool>,
+    priority: Option<i64>,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    create_impl(&state, calendar_id, &summary, due_ms, due_all_day.unwrap_or(true))
+    create_impl(&state, calendar_id, &summary, due_ms, due_all_day.unwrap_or(true), priority.unwrap_or(0))
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
@@ -547,6 +567,7 @@ async fn create_impl(
     summary: &str,
     due_ms: Option<i64>,
     all_day: bool,
+    priority: i64,
 ) -> anyhow::Result<()> {
     // Only a list the window would offer: the socket names a list by id, and
     // an id that is an events-only collection, a hidden list or a read-only
@@ -582,7 +603,8 @@ async fn create_impl(
             omacal_caldav::IcsTime::Zoned { dt: z.datetime(), tzid: cal_tz.clone() }
         }
     });
-    let ics = omacal_caldav::new_todo_ics(&uid, summary, due_time.as_ref(), now);
+    let priority = omacal_caldav::priority_to_write(priority);
+    let ics = omacal_caldav::new_todo_ics(&uid, summary, due_time.as_ref(), priority, now);
 
     // On this device there is no resource to address, so the row carries no
     // href — which is also what every write above reads it as.
@@ -615,7 +637,7 @@ async fn create_impl(
             due_all_day: due.as_ref().is_some_and(|(_, _, date)| *date),
             status: "needs-action".into(),
             completed_utc: None,
-            priority: 0,
+            priority: priority.unwrap_or(0),
             updated_at: now_ms,
             raw_ics: Some(ics),
         },
@@ -916,7 +938,7 @@ mod tests {
                 .unwrap();
         let state = local_state(pool.clone());
 
-        create_impl(&state, list, "Water the plants", None, true).await.unwrap();
+        create_impl(&state, list, "Water the plants", None, true, 0).await.unwrap();
         let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
         assert_eq!(rows.len(), 1, "the pane shows it, like any other list's task");
         let task = &rows[0].task;
@@ -930,7 +952,7 @@ mod tests {
 
         // A due date, a note and a new title, in one write.
         let due: i64 = "2026-09-18T00:00:00+03:00".parse::<jiff::Timestamp>().unwrap().as_millisecond();
-        update_impl(&state, id, "Water the plants twice", Some(due), true, Some("the big one"), None)
+        update_impl(&state, id, "Water the plants twice", Some(due), true, Some("the big one"), None, None)
             .await
             .unwrap();
         let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
@@ -1012,7 +1034,7 @@ mod tests {
             omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
         let state = local_state(pool.clone());
         for title in ["Pay rent", "Call the bank", "Book flights", "Call mum", "Today's one"] {
-            create_impl(&state, list, title, None, true).await.unwrap();
+            create_impl(&state, list, title, None, true, 0).await.unwrap();
         }
         // Completed a day apart, in the order created; the last one "today".
         let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
@@ -1054,18 +1076,18 @@ mod tests {
         let state = local_state(pool.clone());
         let refused = |e: anyhow::Error| e.to_string() == NOT_A_TASK_LIST;
 
-        assert!(create_impl(&state, 9_999, "Nowhere", None, true).await.is_err_and(refused), "no such list");
+        assert!(create_impl(&state, 9_999, "Nowhere", None, true, 0).await.is_err_and(refused), "no such list");
         for (setting, undo) in [
             ("UPDATE calendars SET supports_tasks = 0 WHERE id = ?1", "UPDATE calendars SET supports_tasks = 1 WHERE id = ?1"),
             ("UPDATE calendars SET selected = 0 WHERE id = ?1", "UPDATE calendars SET selected = 1 WHERE id = ?1"),
             ("UPDATE calendars SET access_role = 'reader' WHERE id = ?1", "UPDATE calendars SET access_role = 'owner' WHERE id = ?1"),
         ] {
             sqlx::query(setting).bind(list).execute(&pool).await.unwrap();
-            assert!(create_impl(&state, list, "Hidden", None, true).await.is_err_and(refused), "{setting}");
+            assert!(create_impl(&state, list, "Hidden", None, true, 0).await.is_err_and(refused), "{setting}");
             sqlx::query(undo).bind(list).execute(&pool).await.unwrap();
         }
         assert!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().is_empty(), "nothing was written");
-        create_impl(&state, list, "Here", None, true).await.unwrap();
+        create_impl(&state, list, "Here", None, true, 0).await.unwrap();
     }
 
     /// "New list" on this device: named, coloured apart, renamed and deleted
@@ -1102,7 +1124,7 @@ mod tests {
         assert!(rename_list_impl(&state, id, "Books").await.is_err());
 
         // A task on it goes with it.
-        create_impl(&state, id, "Milk", None, true).await.unwrap();
+        create_impl(&state, id, "Milk", None, true, 0).await.unwrap();
         let lists = delete_list_impl(&state, id).await.unwrap();
         assert!(!lists.iter().any(|l| l.calendar_id == id));
         assert!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().is_empty());
@@ -1196,11 +1218,46 @@ mod tests {
             .unwrap();
         let state = local_state(pool.clone());
         let at: i64 = "2026-09-18T07:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
-        create_impl(&state, list, "Call the bank", Some(at), false).await.unwrap();
+        create_impl(&state, list, "Call the bank", Some(at), false, 0).await.unwrap();
         let row = &omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task;
         assert!(!row.due_all_day, "an hour was given, so it is not all-day");
         assert_eq!(row.due_utc, Some(at));
         assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("DUE;TZID=Europe/Sofia:20260918T100000")));
+    }
+
+    /// Priority authored in the app lands in the resource and the row; an
+    /// unrelated edit leaves it alone; a choice rewrites it; clearing omits
+    /// the line rather than writing `PRIORITY:0`.
+    #[tokio::test]
+    async fn priority_is_written_read_back_preserved_and_cleared() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list =
+            omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
+        let state = local_state(pool.clone());
+
+        create_impl(&state, list, "File the return", None, true, 1).await.unwrap();
+        let row = omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task.clone();
+        let id = row.id;
+        assert_eq!(row.priority, 1, "the create stored the level");
+        assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("PRIORITY:1")));
+
+        // An edit that says nothing about priority leaves it byte-for-byte.
+        update_impl(&state, id, "File the return", None, true, None, None, None).await.unwrap();
+        let row = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.priority, 1, "untouched priority survives an unrelated edit");
+        assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("PRIORITY:1")));
+
+        // A named level rewrites it.
+        update_impl(&state, id, "File the return", None, true, None, None, Some(9)).await.unwrap();
+        let row = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.priority, 9);
+        assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("PRIORITY:9")));
+
+        // Clearing removes the line; it never becomes PRIORITY:0.
+        update_impl(&state, id, "File the return", None, true, None, None, Some(0)).await.unwrap();
+        let row = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.priority, 0);
+        assert!(!row.raw_ics.as_deref().unwrap().contains("PRIORITY"), "cleared means omitted");
     }
 
     /// **A task moves to another list in the save that edits it** (Plamen,
@@ -1217,12 +1274,12 @@ mod tests {
             .await
             .unwrap();
         let state = local_state(pool.clone());
-        create_impl(&state, home, "Buy stamps", None, true).await.unwrap();
+        create_impl(&state, home, "Buy stamps", None, true, 0).await.unwrap();
         let id = omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task.id;
 
         let due: i64 = "2026-09-24T12:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
         let day = jiff::Timestamp::from_millisecond(due).unwrap().to_zoned(jiff::tz::TimeZone::system()).date();
-        update_impl(&state, id, "Buy stamps", Some(due), true, Some("two books"), Some(errands))
+        update_impl(&state, id, "Buy stamps", Some(due), true, Some("two books"), Some(errands), None)
             .await
             .unwrap();
         let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
@@ -1234,7 +1291,7 @@ mod tests {
         assert_eq!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().len(), 1, "moved, not copied");
 
         // A list that is not one is refused, and the task stays put.
-        let refused = update_impl(&state, id, "Buy stamps", None, true, None, Some(9_999)).await.unwrap_err();
+        let refused = update_impl(&state, id, "Buy stamps", None, true, None, Some(9_999), None).await.unwrap_err();
         assert_eq!(refused.to_string(), NOT_A_TASK_LIST);
         assert_eq!(omacal_store::task_by_id(&pool, id).await.unwrap().unwrap().calendar_id, errands);
     }

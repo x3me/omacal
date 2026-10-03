@@ -5922,6 +5922,44 @@ test.describe('the tasks sidebar', () => {
     await expect(side.locator('.due', { hasText: /^Tomorrow$/ })).toHaveCount(1);
   });
 
+  /** Priority: the editor sets it, the row shows the word (not just a
+   *  colour), and the choice rides the same whole-state save. */
+  test('a task takes a priority, and the row shows the word', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Buy milk' }).click();
+    await side.getByLabel('Priority').selectOption('1');
+    await side.getByRole('button', { name: 'Save' }).click();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: 'Buy milk', priority: 1 });
+    await expect(side.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  /** The chip must not make the pane scroll sideways, however long the title
+   *  — the row keeps `flex: 1; min-width: 0` so the title ellipsises instead. */
+  test('a priority chip never widens the pane', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Answer the issue' }).click();
+    await side.getByRole('textbox', { name: 'Task title', exact: true })
+      .fill('Answer the issue about the quarterly reconciliation and the invoices');
+    await side.getByLabel('Priority').selectOption('1');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect(side.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+    const overflow = await side.locator('.rows').evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(overflow, 'nothing in the row is wider than the pane').toBeLessThanOrEqual(0);
+  });
+
+  /** The order switch is a view choice: it repaints at once and persists. */
+  test('the tasks order switches between date and priority, and is kept', async ({ page }) => {
+    const side = await openTasks(page);
+    await expect(side.getByRole('button', { name: 'Date', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await side.getByRole('button', { name: 'Priority', exact: true }).click();
+    await expect(side.getByRole('button', { name: 'Priority', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => page.evaluate(() => (window as any).__harness.settingValues('taskSort')))
+      .toEqual(['priority']);
+  });
+
   test('a due date can be cleared again', async ({ page }) => {
     const side = await openTasks(page);
     await side.getByRole('button', { name: 'Ship the release' }).click();
@@ -6030,7 +6068,7 @@ test.describe('the tasks sidebar', () => {
     await line.press('Enter');
 
     await expect.poll(() => lastCall(page, 'create_task'))
-      .toEqual({ calendarId: 2, summary: 'Tag 4.6.0', dueMs: null, dueAllDay: true });
+      .toEqual({ calendarId: 2, summary: 'Tag 4.6.0', dueMs: null, dueAllDay: true, priority: 0 });
     await expect(side.locator('.head', { hasText: 'Work' }).locator('.count')).toHaveText('3');
     await expect(line).toHaveValue('');
     await expect(line).toBeFocused();
@@ -6079,6 +6117,7 @@ test.describe('the tasks sidebar', () => {
 
     await expect.poll(() => lastCall(page, 'create_task')).toEqual({
       calendarId: 1, summary: 'Call the accountant', dueMs: APP_MON + 34 * 3_600_000, dueAllDay: false,
+      priority: 0,
     });
   });
 

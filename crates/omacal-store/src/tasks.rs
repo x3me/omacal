@@ -268,13 +268,14 @@ pub async fn update_task_fields(
     due_utc: Option<i64>,
     due_tz: Option<&str>,
     due_all_day: bool,
+    priority: i64,
     etag: Option<&str>,
     raw_ics: &str,
     updated_at: i64,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE tasks SET summary = ?2, description = ?3, due_utc = ?4, due_tz = ?5,
-            due_all_day = ?6, etag = ?7, raw_ics = ?8, updated_at = ?9
+            due_all_day = ?6, priority = ?7, etag = ?8, raw_ics = ?9, updated_at = ?10
          WHERE id = ?1",
     )
     .bind(id)
@@ -283,6 +284,7 @@ pub async fn update_task_fields(
     .bind(due_utc)
     .bind(due_tz)
     .bind(due_all_day)
+    .bind(priority)
     .bind(etag)
     .bind(raw_ics)
     .bind(updated_at)
@@ -508,6 +510,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_edit_stores_the_priority_it_was_given() {
+        let (pool, _) = seeded().await;
+        let id = upsert_task(&pool, &task("p", Some(1_000))).await.unwrap();
+
+        update_task_fields(
+            &pool, id, "Water plants", None, Some(1_000), Some("Europe/Sofia"),
+            false, 9, Some("\"2\""), "BEGIN:VCALENDAR...", 2,
+        )
+        .await
+        .unwrap();
+
+        let got = task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(got.priority, 9, "the edit writes priority, not only the sync");
+    }
+
+    #[tokio::test]
     async fn reconciliation_deletes_what_the_server_dropped() {
         let (pool, _) = seeded().await;
         upsert_task(&pool, &task("keep", None)).await.unwrap();
@@ -544,6 +562,26 @@ mod tests {
         let uids: Vec<&str> = rows.iter().map(|r| r.task.uid.as_str()).collect();
         assert_eq!(uids, vec!["soon", "later", "undated", "done"], "cancelled never shows");
         assert_eq!(rows[0].calendar_summary, "Chores");
+    }
+
+    /// Same due date, different priorities: the smaller number (higher) first,
+    /// and a task with none last. The order the pane reads off the store.
+    #[tokio::test]
+    async fn the_ui_ordering_breaks_a_due_tie_by_priority() {
+        let (pool, _) = seeded().await;
+        let mut low = task("low", Some(1_000));
+        low.priority = 9;
+        let mut high = task("high", Some(1_000));
+        high.priority = 1;
+        let mut none = task("none", Some(1_000));
+        none.priority = 0;
+        for t in [&low, &none, &high] {
+            upsert_task(&pool, t).await.unwrap();
+        }
+
+        let rows = tasks_for_ui(&pool, 0).await.unwrap();
+        let uids: Vec<&str> = rows.iter().map(|r| r.task.uid.as_str()).collect();
+        assert_eq!(uids, vec!["high", "low", "none"], "priority breaks the tie, none last");
     }
 
     #[tokio::test]

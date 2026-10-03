@@ -24,11 +24,12 @@ pub use client::{
 pub use vcard::{parse_cards, Contact};
 pub use ics::{
     escape, events_in, exclude_occurrence, new_event_ics, new_todo_ics, parse, parse_time,
-    patch_todo_fields, patch_todo_status, resolve, respond_all, respond_occurrence,
+    patch_todo_fields, patch_todo_status, priority_to_write, resolve, respond_all, respond_occurrence,
     rewrite_master, todo_alarm_lead_minutes, todos_in, truncate_series, unescape,
     upsert_exception, AttendeeWrite,
     CalAttendee,
-    CalEvent, CalTodo, Component, EventWrite, IcsTime, Property, TodoDue, TodoEdit, WriteTime,
+    CalEvent, CalTodo, Component, EventWrite, IcsTime, Property, TaskPriority, TodoDue, TodoEdit,
+    WriteTime,
 };
 
 /// The fixed discovery address that makes "iCloud" a one-field sign-in.

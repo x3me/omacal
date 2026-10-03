@@ -25,7 +25,7 @@ omacal calendars --json              # every calendar with ids
 omacal weather --json                # the app's forecast (v2.2+): place +
                                      # how it was decided, now, eight days
 omacal tasks --json                  # what still needs doing (v2.3+), with
-                                     # due dates, ids and which list
+                                     # due dates, ids, priority and list
 omacal tasks --all --json            # including recently completed
 omacal tasks lists --json            # the lists a task can go on (v4.5+):
                                      # id, name, onThisDevice, open count
@@ -68,9 +68,11 @@ omacal tasks add "Renew the domain" --due 2026-09-11 --json
 omacal tasks add "Call the bank" --due 2026-09-11 --at 10:00 --list 3 --json
 omacal tasks add "Milk" --list Groceries --json   # a list by name (v4.5+)
 omacal tasks done 41 --json          # and `reopen 41` to put it back
+omacal tasks add "Call the bank" --priority high --json
 omacal tasks edit 41 --due 2026-09-14 --json
 omacal tasks edit 41 --due none --json     # clears the date; `--at none` keeps
                                            # the day and drops the hour
+omacal tasks edit 41 --priority none --json  # clears the priority; absent leaves it
 ```
 
 
@@ -182,6 +184,10 @@ When showing the calendar to the user (not piping into a script):
   `omacal tasks lists` — the only place an empty list shows up, since
   `omacal tasks` names lists beside their tasks. A name matching no list,
   or two, is refused; ask the user rather than guessing another list.
+  `priority` is `0` (none) or `1`–`9` with `1` the *highest*; the CLI takes
+  the words `--priority none|low|medium|high` (mapping to 0/9/5/1), `none`
+  clears and an absent flag leaves it on `edit`. It is meaningful only on
+  CalDAV/iCloud and on-device lists — Google keeps no task priority.
 - Weather can be stale: `fetched_at` is when the app last reached the
   forecast, and it keeps the last good answer when offline. Check it before
   answering — past about six hours say so ("the forecast is from yesterday

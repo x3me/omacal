@@ -81,6 +81,10 @@ pub(crate) enum Request {
         due_ms: Option<i64>,
         #[serde(default = "yes")]
         due_all_day: bool,
+        /// The raw wire integer, or absent for no priority. Optional so an
+        /// older client's create still parses.
+        #[serde(default)]
+        priority: Option<i64>,
     },
     #[serde(rename = "tasks-complete")]
     TaskComplete { id: i64, done: bool },
@@ -93,6 +97,10 @@ pub(crate) enum Request {
         due_all_day: bool,
         #[serde(default)]
         notes: Option<String>,
+        /// Three states, unlike create: absent (`None`) leaves it, `Some(0)`
+        /// clears it, `Some(1..=9)` sets it.
+        #[serde(default)]
+        priority: Option<i64>,
     },
 }
 
@@ -207,7 +215,7 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                 Err(m) => fail_env("refused", &m),
             }
         }
-        Request::TaskCreate { calendar_id, summary, due_ms, due_all_day } => {
+        Request::TaskCreate { calendar_id, summary, due_ms, due_all_day, priority } => {
             let calendar_id = match calendar_id {
                 Some(id) => id,
                 None => match crate::tasks::first_writable_list(&state.pool).await {
@@ -220,7 +228,11 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                     }
                 },
             };
-            match crate::tasks::create_body(state, calendar_id, &summary, due_ms, due_all_day).await {
+            match crate::tasks::create_body(
+                state, calendar_id, &summary, due_ms, due_all_day, priority.unwrap_or(0),
+            )
+            .await
+            {
                 Ok(tasks) => ok_env(serde_json::json!(tasks)),
                 Err(m) => fail_env("refused", &m),
             }
@@ -231,9 +243,11 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                 Err(m) => fail_env("refused", &m),
             }
         }
-        Request::TaskUpdate { id, summary, due_ms, due_all_day, notes } => {
-            match crate::tasks::update_body(state, id, &summary, due_ms, due_all_day, notes.as_deref())
-                .await
+        Request::TaskUpdate { id, summary, due_ms, due_all_day, notes, priority } => {
+            match crate::tasks::update_body(
+                state, id, &summary, due_ms, due_all_day, notes.as_deref(), priority,
+            )
+            .await
             {
                 Ok(tasks) => ok_env(serde_json::json!(tasks)),
                 Err(m) => fail_env("refused", &m),
