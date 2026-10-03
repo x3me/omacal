@@ -95,6 +95,43 @@ fn enclosing_app_bundle(exe: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
+/// The initial GUI launch has the same macOS ownership rule as a restart:
+/// an executable entered directly through `Contents/MacOS` is not a
+/// LaunchServices app. CLI invocations exit before this decision is reached,
+/// so only an unregistered GUI process is handed back to its bundle.
+pub(crate) fn initial_gui_launch_target(
+    current_exe: Option<PathBuf>,
+    is_macos: bool,
+    bundle_registered: bool,
+) -> Option<PathBuf> {
+    if is_macos && !bundle_registered {
+        return current_exe.as_deref().and_then(enclosing_app_bundle);
+    }
+    None
+}
+
+/// Reopen a macOS GUI launch through LaunchServices when the app binary was
+/// invoked directly. Keep running if `open` fails so a broken association
+/// never turns a usable app launch into a silent exit.
+pub(crate) fn relaunch_initial_macos_gui_if_unregistered() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::NSBundle;
+
+        let bundle_registered = NSBundle::mainBundle().bundleIdentifier().is_some();
+        if let Some(bundle) = initial_gui_launch_target(
+            std::env::current_exe().ok(),
+            true,
+            bundle_registered,
+        ) {
+            match std::process::Command::new("/usr/bin/open").arg(&bundle).spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => eprintln!("omacal: could not reopen bundled app: {e}"),
+            }
+        }
+    }
+}
+
 /// Spawns the fresh instance and leaves without teardown. Never returns.
 ///
 /// The 400ms callers sleep before invoking this (the "reply must reach the
@@ -357,6 +394,54 @@ mod tests {
                 true,
             ),
             Some(Restart::Bundle(PathBuf::from("/Applications/omacal.app")))
+        );
+    }
+
+    #[test]
+    fn unregistered_macos_gui_launch_reopens_the_bundle() {
+        assert_eq!(
+            initial_gui_launch_target(
+                Some(PathBuf::from("/Applications/OmaCal.app/Contents/MacOS/omacal")),
+                true,
+                false,
+            ),
+            Some(PathBuf::from("/Applications/OmaCal.app"))
+        );
+    }
+
+    #[test]
+    fn registered_macos_gui_launch_stays_in_the_bundle_process() {
+        assert_eq!(
+            initial_gui_launch_target(
+                Some(PathBuf::from("/Applications/OmaCal.app/Contents/MacOS/omacal")),
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn non_macos_gui_launch_stays_direct_even_without_bundle_registration() {
+        assert_eq!(
+            initial_gui_launch_target(
+                Some(PathBuf::from("/Applications/OmaCal.app/Contents/MacOS/omacal")),
+                false,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn macos_gui_launch_outside_a_bundle_stays_direct() {
+        assert_eq!(
+            initial_gui_launch_target(
+                Some(PathBuf::from("/Users/u/omacal/target/debug/omacal")),
+                true,
+                false,
+            ),
+            None
         );
     }
 
