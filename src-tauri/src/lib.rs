@@ -1397,6 +1397,11 @@ pub fn run() {
     // else falls straight through to the app omacal has always been.
     cli::maybe_run_and_exit();
 
+    // A macOS GUI process entered through the raw Mach-O has no LaunchServices
+    // identity. Reopen its bundle before Tauri constructs windows; CLI calls
+    // have already exited above and keep their direct-binary behavior.
+    restart::relaunch_initial_macos_gui_if_unregistered();
+
     logging::init();
 
     // Before the builder is even assembled: GTK and WebKit read the
