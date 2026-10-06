@@ -16,6 +16,9 @@
   import { connectCaldav } from './tasks';
   import { listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
+    connectZoom, disconnectZoom, getZoomStatus, type ZoomStatus,
+  } from './zoomaccount';
+  import {
     getSettings, setSetting, setDisplayTimezone, setWeatherLocation, listTimezones,
     minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, APPEARANCE_OPTIONS,
     WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings, type Appearance,
@@ -650,12 +653,47 @@
   /** The account whose Sign out is one click from happening. */
   let confirmingSignOut = $state<number | null>(null);
   let signingOut = $state(false);
+  /** Zoom authenticates independently of calendar accounts, but lives on the
+   * same tab because this is where a user manages external connections. */
+  let zoomConnection = $state<ZoomStatus | null>(null);
+  let zoomBusy = $state(false);
 
   $effect(() => {
     listAccounts()
       .then((rows) => (accountRows = rows))
       .catch(() => (accountRows = null));
+    getZoomStatus()
+      .then((status) => (zoomConnection = status))
+      .catch((e) => (note = { text: String(e), kind: 'error' }));
   });
+
+  async function doConnectZoom() {
+    if (zoomBusy) return;
+    note = null;
+    zoomBusy = true;
+    try {
+      zoomConnection = await connectZoom();
+      note = { text: 'Zoom connected. New events can now create a unique Zoom meeting.', kind: 'info' };
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+    } finally {
+      zoomBusy = false;
+    }
+  }
+
+  async function doDisconnectZoom() {
+    if (zoomBusy) return;
+    note = null;
+    zoomBusy = true;
+    try {
+      zoomConnection = await disconnectZoom();
+      note = { text: 'Zoom disconnected. Existing meeting links are unchanged.', kind: 'info' };
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+    } finally {
+      zoomBusy = false;
+    }
+  }
 
   async function doSignOut(row: Account) {
     if (signingOut) return;
@@ -1898,6 +1936,37 @@
         {/if}
       </div>
 
+      <div class="zoom-account" role="group" aria-label="Zoom connection">
+        <div class="account-row">
+          <span class="acct-email">Zoom meetings</span>
+          <span class="acct-prov">Zoom</span>
+          {#if zoomConnection?.connected}
+            <button type="button" disabled={zoomBusy} onclick={doDisconnectZoom}>
+              {zoomBusy ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+          {:else}
+            <button
+              type="button"
+              disabled={zoomBusy || zoomConnection === null || !zoomConnection.configured}
+              onclick={doConnectZoom}
+            >{zoomBusy ? 'Connecting…' : 'Connect Zoom'}</button>
+          {/if}
+        </div>
+        {#if zoomConnection && !zoomConnection.configured}
+          <p class="hint">
+            Add <code>zoom_public_client_id</code> to config.toml, then restart omacal.
+          </p>
+        {:else if zoomConnection?.connected}
+          <p class="hint">
+            Connected with Zoom’s native PKCE sign-in. Omacal stores the rotating token in your OS keyring.
+          </p>
+        {:else}
+          <p class="hint">
+            Connect once to let omacal create meetings. Existing pasted Zoom links never require access.
+          </p>
+        {/if}
+      </div>
+
     {:else if pane === 'About'}
       <div class="about">
         <!-- The app icon (#128), drawn inline rather than as an <img>: Vite
@@ -2198,6 +2267,11 @@
   .acct-prov { color: var(--muted); font-size: 11px; letter-spacing: 0.04em;
     text-transform: uppercase; }
   .account-row .danger { color: var(--danger, #e66); border-color: var(--danger, #e66); }
+
+  .zoom-account { align-self: stretch; min-width: 0; display: flex; flex-direction: column; gap: 8px; margin-top: 16px;
+    padding-top: 16px; border-top: 1px solid var(--hairline); }
+  .zoom-account .account-row { padding: 0; }
+  .zoom-account code { color: var(--text); }
 
   .caldav { align-self: stretch; min-width: 0; display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
   .caldav.empty { display: none; }

@@ -110,6 +110,12 @@ local; reminders that mirror what your phone fires; the same meeting held on
 two calendars drawn as one block, if you turn it on; and an interface scale
 for a screen whose own scaling never reaches the app.
 
+**Video calls:** Add Video Call creates Google Meet through the target
+calendar or a unique scheduled Zoom meeting after a one-time Zoom
+connection in Settings → Accounts. The attendee link is attached before
+invitations go out; pasting an existing Zoom link remains a no-login
+fallback.
+
 Building from source: [`docs/running-on-omarchy.md`](docs/running-on-omarchy.md) ·
 [`docs/running-on-macos.md`](docs/running-on-macos.md). The design record
 lives under [`docs/superpowers/`](docs/superpowers/).
