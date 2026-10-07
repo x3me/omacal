@@ -2036,6 +2036,19 @@ mod tests {
         assert!(cached_is_usable(Some(&cached(NOW + 60_000)), NOW));
     }
 
+    /// The vector icon every Linux package installs (`bundle.linux.*.files`
+    /// in tauri.conf.json; the Flatpak copies it). Desktops choose an image
+    /// loader by content, and shared-mime-info recognises SVG only from
+    /// `<svg` within the first 256 bytes. The icon used to open with a
+    /// 944-byte comment, so it read as text/html, the icon theme still chose
+    /// it, and Ubuntu's dock drew no OmaCal icon at all (2026-10-07).
+    #[test]
+    fn the_installed_svg_icon_is_recognisable_from_its_first_bytes() {
+        let svg = include_str!("../icons/icon.svg");
+        let at = svg.find("<svg").expect("an <svg> element");
+        assert!(at < 256, "<svg starts at byte {at}, past content sniffing's 256");
+    }
+
     #[test]
     fn an_expired_entry_is_not_usable() {
         assert!(!cached_is_usable(Some(&cached(NOW - 1)), NOW));

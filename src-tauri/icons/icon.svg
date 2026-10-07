@@ -1,3 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 <!-- The OmaCal app icon: the mark on its tile, as vector.
 
      The rasters beside this file were generated on 2026-08-14 from a 512px
@@ -13,7 +14,6 @@
      Regenerate every raster from here, never from a PNG:
        cargo tauri icon src-tauri/icons/icon.svg -o src-tauri/icons
        rsvg-convert -w 512 -h 512 icon.svg -o icon.png   (if only the PNG) -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <rect x="16" y="16" width="480" height="480" rx="112" fill="#0F1420"/>
   <rect x="112" y="150" width="288" height="48" rx="24" fill="#8DA9F0"/>
   <circle cx="136" cy="256" r="24" fill="#F97316"/>
