@@ -88,6 +88,8 @@ const HIDE_WEEKENDS_KEY: &str = "hide_weekends";
 const TRAY_ICON_KEY: &str = "tray_icon";
 const QUIT_ON_CLOSE_KEY: &str = "quit_on_close";
 const AUTOSTART_KEY: &str = "autostart";
+/// "1" once the user has answered how OmaCal starts at login (migration 0018).
+const AUTOSTART_ASKED_KEY: &str = "autostart_asked";
 const WEATHER_KEY: &str = "weather_enabled";
 const PHOTON_PLACES_KEY: &str = "photon_places";
 const APPEARANCE_KEY: &str = "appearance";
@@ -659,6 +661,10 @@ pub struct AppSettings {
     /// than a second switch because "do not start" and "start without a
     /// window" are answers to one question.
     pub start_on_login: StartOnLogin,
+    /// Whether the user has answered how OmaCal starts at login, from the
+    /// first-run card or from Settings (2026-10-08). Until they have, the app
+    /// asks once: users objected to a login entry nobody agreed to.
+    pub start_on_login_asked: bool,
     /// Whether the day headers carry the forecast — an icon and the high,
     /// from the same sources the Omarchy bar widget reads (`weather.rs`).
     /// On by default: the data is decoration and the cost is one keyless
@@ -1028,6 +1034,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // would change what their machine does at the next login, which is
         // precisely the silent change this setting exists to stop.
         start_on_login: start_on_login(pool).await,
+        start_on_login_asked: read(pool, AUTOSTART_ASKED_KEY).await.as_deref() == Some("1"),
         // `notifications_enabled`'s polarity and reasoning: on unless
         // somebody turned it off.
         weather_enabled: weather_enabled(pool).await,
@@ -1223,9 +1230,12 @@ pub(crate) async fn quit_on_close(pool: &SqlitePool) -> bool {
 /// reverting) is not worth the two lines saved.
 pub(crate) async fn start_on_login(pool: &SqlitePool) -> StartOnLogin {
     match read(pool, AUTOSTART_KEY).await.as_deref() {
-        Some("off" | "0") => StartOnLogin::Off,
+        Some("open" | "1") => StartOnLogin::Open,
         Some("background") => StartOnLogin::Background,
-        _ => StartOnLogin::Open,
+        // Off when absent, and for anything unrecognised: nothing goes into a
+        // login without a yes. Installs from before the question were given
+        // an explicit value by migration 0018, so absent is a fresh install.
+        _ => StartOnLogin::Off,
     }
 }
 
@@ -1601,7 +1611,11 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         S::Appearance(a) => write(pool, APPEARANCE_KEY, a.as_str()).await?,
         S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
         S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
-        S::StartOnLogin(mode) => write(pool, AUTOSTART_KEY, mode.as_str()).await?,
+        // The answer and the fact of having answered, in one write: whatever
+        // the mode, the first-run card has been answered.
+        S::StartOnLogin(mode) => {
+            write_all(pool, &[(AUTOSTART_KEY, mode.as_str()), (AUTOSTART_ASKED_KEY, "1")]).await?
+        }
         S::FallbackReminderMinutes(minutes) => {
             let as_input = crate::write::RemindersInput {
                 use_default: false,
@@ -1993,11 +2007,11 @@ mod tests {
         assert_eq!(s.week_view_days, 7, "the old Week view has seven columns");
         assert_eq!(
             s.start_on_login,
-            StartOnLogin::Open,
-            "absent is every install that predates this setting, and they all have the launch \
-             entry already — landing anywhere else changes what their machine does at the \
-             next login, without anybody asking for it"
+            StartOnLogin::Off,
+            "nothing goes into a login without a yes; installs that predate the question were \
+             given an explicit answer by migration 0018, so absent is a fresh install"
         );
+        assert!(!s.start_on_login_asked, "and the question has not been put yet");
         assert_eq!(
             s.temperature_unit,
             TemperatureUnit::Celsius,
@@ -2048,7 +2062,7 @@ mod tests {
     #[tokio::test]
     async fn the_login_choice_round_trips_and_defaults_forgivingly() {
         let p = pool().await;
-        assert_eq!(start_on_login(&p).await, StartOnLogin::Open, "before anybody writes anything");
+        assert_eq!(start_on_login(&p).await, StartOnLogin::Off, "before anybody writes anything");
 
         for mode in [StartOnLogin::Off, StartOnLogin::Background, StartOnLogin::Open] {
             write(&p, AUTOSTART_KEY, mode.as_str()).await.unwrap();
@@ -2064,7 +2078,61 @@ mod tests {
         // Garbage, and a spelling some future version might write, both land
         // on the default rather than on the state that changes the machine.
         write(&p, AUTOSTART_KEY, "yes-please").await.unwrap();
-        assert_eq!(start_on_login(&p).await, StartOnLogin::Open);
+        assert_eq!(start_on_login(&p).await, StartOnLogin::Off);
+    }
+
+    /// An answer, from the first-run card or from Settings, is the consent
+    /// the login entry waits for: the mode and "asked" land together.
+    #[tokio::test]
+    async fn answering_how_to_start_on_login_counts_as_asked() {
+        let p = pool().await;
+        let s = set(&p, Setting::StartOnLogin(StartOnLogin::Background)).await.unwrap();
+        assert_eq!(s.start_on_login, StartOnLogin::Background);
+        assert!(s.start_on_login_asked);
+
+        // "Don't start it" is an answer too, not a reason to ask again.
+        let s = set(&p, Setting::StartOnLogin(StartOnLogin::Off)).await.unwrap();
+        assert_eq!(s.start_on_login, StartOnLogin::Off);
+        assert!(s.start_on_login_asked);
+    }
+
+    /// Migration 0018, replayed against the three kinds of database it meets
+    /// at the first launch of the version that asks.
+    #[tokio::test]
+    async fn migration_0018_turns_assumed_consent_into_a_question() {
+        const SQL: &str =
+            include_str!("../../crates/omacal-store/migrations/0018_start_on_login_is_asked.sql");
+        async fn replay(p: SqlitePool) -> SqlitePool {
+            sqlx::raw_sql(SQL).execute(&p).await.unwrap();
+            p
+        }
+
+        // Chose in Settings before: that was an answer, so nobody is asked again.
+        let p = pool().await;
+        write(&p, AUTOSTART_KEY, "open").await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(start_on_login(&p).await, StartOnLogin::Open, "their choice stands");
+        assert!(read_settings(&p).await.start_on_login_asked);
+
+        // In use, never chose: still starts at login, so reminders survive the
+        // update, but in the background, and the question is still to come.
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&p).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
+        )
+        .execute(&p).await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(start_on_login(&p).await, StartOnLogin::Background);
+        assert!(!read_settings(&p).await.start_on_login_asked);
+
+        // Fresh: nothing written, so nothing registered until they say yes.
+        let p = replay(pool().await).await;
+        assert_eq!(read(&p, AUTOSTART_KEY).await, None);
+        assert_eq!(start_on_login(&p).await, StartOnLogin::Off);
+        assert!(!read_settings(&p).await.start_on_login_asked);
     }
 
     /// The two questions the mode answers, which are deliberately not the

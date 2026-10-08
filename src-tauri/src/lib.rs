@@ -1550,10 +1550,10 @@ pub fn run() {
             // and the widget install before anything appeared on screen.
             //
             // Every way this can go wrong lands on *showing* the window: an
-            // unreadable setting reads as `Open`, and a launch with no login
-            // flag opens regardless of the setting. The failure mode is a
-            // window somebody did not want, never an omacal that cannot be
-            // opened at all.
+            // unreadable setting reads as `Off`, which still opens on any
+            // launch that happens, and a launch with no login flag opens
+            // regardless of the setting. The failure mode is a window somebody
+            // did not want, never an omacal that cannot be opened at all.
             let start_on_login = tauri::async_runtime::block_on(settings::start_on_login(&pool));
             if tray::opens_window(&std::env::args().collect::<Vec<_>>(), start_on_login) {
                 tray::show_main_window(app.handle());
@@ -1640,11 +1640,12 @@ pub fn run() {
                 }
             }
 
-            // Start on login (§2.6) — never in demo mode, and only when the
-            // user has not turned it off. Read from the database rather than
-            // assumed: this call used to be an unconditional `enable()`, so
-            // an entry the user deleted by hand came straight back on the
-            // next launch (issue #22, reported 2026-08-31).
+            // Start on login (§2.6) — never in demo mode, and only once the
+            // user has said yes (2026-10-08: users objected to an entry nobody
+            // agreed to; unset now reads as off, and the first-run card asks).
+            // Read from the database rather than assumed: this call used to be
+            // an unconditional `enable()`, so an entry the user deleted by hand
+            // came straight back on the next launch (issue #22, 2026-08-31).
             //
             // `start_on_login` is the answer read above, where it decided the
             // window; the entry is the same answer's other half, and is

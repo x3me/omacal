@@ -5455,6 +5455,66 @@ test.describe('App: the first day of the week', () => {
  * them rather than landing on one. Month, Year and Big Year are untouched:
  * their rows would misalign if two of seven columns vanished.
  */
+/**
+ * Starting at login, asked rather than assumed (2026-10-08). Users objected to
+ * a login entry nobody agreed to, and on Omarchy to the window it opened,
+ * which Hyprland tiles across the whole workspace. Until the question is
+ * answered the backend registers nothing; the card asks once.
+ */
+test.describe('App: the start-on-login question', () => {
+  const seed = (page: Page, s: Record<string, unknown>) =>
+    page.addInitScript(([k, v]) => sessionStorage.setItem(k, v), ['omacal-stub-settings', JSON.stringify(s)] as const);
+  const card = (page: Page) => page.getByRole('region', { name: 'Start OmaCal when you log in?' });
+  const sent = (page: Page) => page.evaluate(() => (window as any).__harness.settingValues('startOnLogin'));
+
+  test('an answered install never sees it', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.locator('.vswitch button.active')).toBeVisible();
+    await expect(card(page)).toHaveCount(0);
+  });
+
+  for (const [button, mode] of [
+    ['In the background', 'background'], ['With its window', 'open'], ["Don't start it", 'off'],
+  ] as const) {
+    // That an answer stays answered across launches is the backend's to keep
+    // (settings::tests::answering_how_to_start_on_login_counts_as_asked).
+    test(`"${button}" saves ${mode}, and the card goes`, async ({ page }) => {
+      await seed(page, { startOnLoginAsked: false, startOnLogin: 'off' });
+      await page.goto(app());
+      await expect(card(page)).toBeVisible();
+
+      await card(page).getByRole('button', { name: button }).click();
+      await expect.poll(() => sent(page)).toEqual([mode]);
+      await expect(card(page)).toHaveCount(0);
+    });
+  }
+
+  test('on Omarchy it says the window would be tiled, elsewhere it does not', async ({ page }) => {
+    await seed(page, { startOnLoginAsked: false, desktop: 'omarchy' });
+    await page.goto(app());
+    await expect(card(page)).toContainText('Omarchy tiles it like any other');
+    await expect(card(page)).toContainText('the bar widget');
+
+    await seed(page, { startOnLoginAsked: false, desktop: 'linux' });
+    await page.reload();
+    await expect(card(page)).toBeVisible();
+    await expect(card(page)).not.toContainText('Omarchy');
+  });
+
+  test('answering in Settings answers the card too', async ({ page }) => {
+    await seed(page, { startOnLoginAsked: false, startOnLogin: 'off' });
+    await page.goto(app());
+    await expect(card(page)).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByLabel('When you log in').selectOption('background');
+    await expect.poll(() => sent(page)).toEqual(['background']);
+    await page.keyboard.press('Escape');
+    await expect(card(page)).toHaveCount(0);
+  });
+});
+
 test.describe('App: hiding weekends', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(APP_NOW); // noon, Monday 29 Jan 2024

@@ -128,11 +128,14 @@ and believing something untrue about it. (Setting this used to mean running
 `sqlite3` against the database by hand. It no longer does.)
 
 Also on General: **When you log in** — don't start omacal, start it, or start
-it **in the background**. Starting is the default, because a reminder can only
-fire while the process is running; until v0.14.0 it was also the only
-behaviour, and the app rewrote its own launch entry on every start, so
-removing that entry by hand achieved nothing. Choosing not to start
-unregisters it there and then, and leaves it off.
+it **in the background**. Nothing is registered until you answer: a fresh
+install asks once, with a small card in the corner of the window, and that
+answer and this setting are the same choice. (Until then starting was simply
+assumed, and before v0.14.0 the app even rewrote its own launch entry on
+every start. An install that never chose was moved to the background when
+the question arrived, so its reminders kept firing without a window
+appearing at login.) Choosing not to start unregisters the entry there and
+then, and leaves it off.
 
 **In the background** is the third answer: omacal starts, syncs, fires
 reminders and keeps the bar widget's feed current, and no window appears.

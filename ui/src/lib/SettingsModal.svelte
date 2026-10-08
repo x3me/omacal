@@ -847,6 +847,8 @@
     note = null;
     try {
       settings = await setSetting('startOnLogin', mode);
+      // App holds the first-run card, which this answers too.
+      onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       // Same repair as `toggleNotifications`: re-assign so the select snaps
@@ -1165,7 +1167,7 @@
           <select
             id="start-on-login"
             disabled={!settings}
-            value={settings?.startOnLogin ?? 'open'}
+            value={settings?.startOnLogin ?? 'off'}
             onchange={(e) =>
               saveStartOnLogin((e.currentTarget as HTMLSelectElement).value as StartOnLogin)}
           >

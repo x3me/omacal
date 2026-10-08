@@ -223,11 +223,15 @@ export type AppSettings = {
    *  the checkbox says so. */
   quitOnClose: boolean;
   /** What a login does about omacal: nothing, open it, or run it without a
-   *  window. `'open'` by default — a reminder can only fire while the app is
+   *  window. `'off'` until the user says otherwise (2026-10-08): nothing goes
+   *  into a login without a yes. A reminder can only fire while the app is
    *  running, and the row's hint says so, because that is the cost of `'off'`.
    *  Three states rather than two switches: "do not start" and "start without
    *  a window" are answers to one question. */
   startOnLogin: StartOnLogin;
+  /** Whether the user has answered how OmaCal starts at login, from the
+   *  first-run card or from Settings. `false` shows the card, once. */
+  startOnLoginAsked: boolean;
   /** Whether the day headers carry the forecast — an icon and the high. On
    *  by default; the hint under the toggle names the sources (Open-Meteo,
    *  the Omarchy widget's location or the IP), because this is the one

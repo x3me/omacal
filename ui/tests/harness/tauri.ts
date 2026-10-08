@@ -720,6 +720,7 @@ type StubSettings = {
   photonPlaces: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
+  startOnLoginAsked: boolean;
   quitOnClose: boolean;
   appearance: Appearance;
   // `WindowFrame | null` on the wire; the stub is Linux-shaped, so a spec
@@ -815,6 +816,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   // launch entry, so absent must land on `open` or the upgrade changes what
   // the machine does at the next login.
   startOnLogin: 'open',
+  // Answered, so the first-run card stays out of every spec that predates it;
+  // the card's own specs seed `false`.
+  startOnLoginAsked: true,
   // The backend's default: closing hides the window, because a reminder can
   // only fire while the process is alive.
   quitOnClose: false,
@@ -1214,6 +1218,11 @@ export function installTauriStub(scenario: string): Harness {
             return { ...settings };
           case 'defaultView':
             settings = saveSettings({ ...settings, defaultView: value, defaultViewFollowsLast: false });
+            return { ...settings };
+          // Any answer is an answer: the backend writes the mode and "asked"
+          // together, so the first-run card does not come back.
+          case 'startOnLogin':
+            settings = saveSettings({ ...settings, startOnLogin: value, startOnLoginAsked: true });
             return { ...settings };
         }
         if (!(key in settings)) throw new Error(`the stub has no setting called ${key}`);

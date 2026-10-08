@@ -181,6 +181,13 @@ pub async fn seed_demo(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<usize> 
         .execute(pool)
         .await?;
 
+    // The start-on-login question counts as answered here: demo mode never
+    // touches the login entry, and a first-run card would sit in every demo
+    // window and every website screenshot rendered from this data.
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('autostart_asked', '1')")
+        .execute(pool)
+        .await?;
+
     let account_id: i64 = sqlx::query_scalar(
         "INSERT INTO accounts (google_sub, email, display_name, created_at)
          VALUES (?1, ?1, 'Demo', ?2) RETURNING id",
@@ -401,6 +408,16 @@ mod tests {
         let cals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM calendars")
             .fetch_one(&pool).await.unwrap();
         assert!(cals >= 2, "need multiple calendars to exercise per-calendar colour");
+    }
+
+    /// Demo data has answered the start-on-login question, so no demo window
+    /// or website screenshot carries the first-run card.
+    #[tokio::test]
+    async fn the_demo_has_answered_how_to_start_on_login() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        assert!(!crate::settings::read_settings(&pool).await.start_on_login_asked);
+        seed_demo(&pool, MON + 3 * DAY).await.unwrap();
+        assert!(crate::settings::read_settings(&pool).await.start_on_login_asked);
     }
 
     /// The pane and the grid both have something to draw, in every state.

@@ -45,6 +45,7 @@
     dayCursor, eventAtCursor, moveDay, moveEvent, type KeyboardCursor,
   } from './lib/keyboardnav';
   import { setSetting, getSettings, type AppSettings, type WeekViewDays } from './lib/settings';
+  import LoginPrompt from './lib/LoginPrompt.svelte';
   import { TASKS_WIDTH_DEFAULT } from './lib/taskwidth';
   import { HOUR_PX_DEFAULT, hourPxStepped } from './lib/zoom';
   import { padFor, sliceWeek, stepDay, stepDays, visibleIndex, windowHeld } from './lib/weekwindow';
@@ -841,6 +842,10 @@
    *  same SettingsModal as the menu item. */
   let settingsOpen = $state(false);
   let combineIdenticalEvents = false;
+  /** Whether the start-on-login question has been answered. `true` until the
+   *  settings arrive, so the card never flashes for someone who answered. */
+  let loginAsked = $state(true);
+  let desktop = $state<AppSettings['desktop']>('linux');
 
   /** Whether the keyboard-shortcut sheet is up. A session flag and not a
    *  setting: it is a thing you look at, not a thing you configure. */
@@ -872,6 +877,8 @@
     const viewBefore = untrack(() => viewChoices);
     getSettings()
       .then((s) => {
+        loginAsked = s.startOnLoginAsked;
+        desktop = s.desktop;
         combineIdenticalEvents = s.combineIdenticalEvents;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
@@ -2183,6 +2190,11 @@
   <p class="kbd-status" aria-live="polite">{keyboardStatus}</p>
 {/if}
 
+<!-- How OmaCal starts at login, asked once rather than assumed. -->
+{#if !loginAsked}
+  <LoginPrompt {desktop} onanswered={(s) => (loginAsked = s.startOnLoginAsked)} />
+{/if}
+
 <!-- The webview's own context menu — Reload, Back, View Source — is browser
      chrome inside what presents itself as a native app, so it is suppressed
      everywhere except the places right-click genuinely works for the user:
@@ -2222,6 +2234,8 @@
       setClockFormat(s.timeFormat);
       applyVisibleHours(s.visibleStartHour, s.visibleEndHour);
       applyHideWeekends(s.hideWeekends);
+      // Answering in Settings → General is an answer too.
+      loginAsked = s.startOnLoginAsked;
       setDateFormat(s.dateFormat);
       setSecondZone(s.secondTimezone);
       setTaskSort(s.taskSort);
