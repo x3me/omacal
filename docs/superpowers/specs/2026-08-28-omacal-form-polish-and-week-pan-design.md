@@ -87,7 +87,10 @@ under `prefers-reduced-motion`.
   that is a virtualized-strip rewrite). Day-stepped panning with the
   local-DB fetch (a few ms) is the honest version of "smooth" here.
 - No pan in Month/Year/Big Year, and none in list mode — the request was
-  the Week grid; the others have no day-sized column to slide by.
+  the Week grid; the others have no day-sized column to slide by. (Month and
+  Year later gained discrete **paging** — one period per wheel or swipe, a step
+  rather than a pan; see `2026-10-06-omacal-month-year-paging-design.md`. The
+  "no pan" rule still holds.)
 - The native `<select>`s elsewhere on the form (repeat, reminders, video)
   stay native — they got their dark popups via the GTK hint (38f4805);
   replacing them wholesale is a separate decision.

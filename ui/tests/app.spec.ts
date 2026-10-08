@@ -799,7 +799,153 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Previous month' }).click();
     await page.keyboard.press('1');
     await expect(page.locator('.col'))
-      .toHaveAttribute('data-start-ms', String(Date.UTC(2024, 0, 29))); // back to 29 Jan
+       .toHaveAttribute('data-start-ms', String(Date.UTC(2024, 0, 29))); // back to 29 Jan
+  });
+
+  // Month/Year period paging (spec 2026-10-06). A wheel notch is a page; the
+  // momentum tail is not a second one; and the same guard that mutes the
+  // keyboard mutes the wheel.
+  test.describe('the wheel pages Month and Year, one period at a time', () => {
+    test('a notch pages the Month view forward, and its tail does not', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3'); // Month view, anchored Mon 29 Jan 2024
+      await expect(page.locator('h1')).toHaveText('January 2024');
+
+      const view = page.locator('.view');
+      await view.dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('February 2024');
+
+      // The tail: an immediate second notch belongs to the same gesture and is
+      // swallowed by the lock, so the month does not run away.
+      await view.dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('February 2024');
+
+      // A deliberate flick after the lock is a new gesture, and pages once.
+      await page.waitForTimeout(400);
+      await view.dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('March 2024');
+    });
+
+    test('a notch pages the Year view forward by a year', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('4'); // Year view, seeded from the anchor
+      await expect(page.locator('h1')).toHaveText('2024');
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('2025');
+    });
+
+    test('a wheel does not page while the search overlay is open', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      await page.keyboard.press('/');
+      await expect(page.getByRole('dialog', { name: 'Search' })).toBeVisible();
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('January 2024');
+    });
+
+    test('a wheel does not page in Week view', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('2'); // Week — its own pan handler, not the pager
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('January 2024');
+    });
+
+    test('reduced motion still pages exactly one period', async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('February 2024');
+    });
+
+    test('a strong touch swipe pages the Month view', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      // A finger drag, up, fast enough and far enough to be strong. The moves
+      // are paced at ~16ms so the velocity estimate sees real speed rather than
+      // three events in one tick.
+      await page.locator('.view').evaluate((view) => new Promise<void>((resolve) => {
+        const fire = (type: string, y: number) => view.dispatchEvent(new PointerEvent(type, {
+          pointerType: 'touch', pointerId: 7, clientX: 120, clientY: y, bubbles: true,
+        }));
+        let y = 400;
+        fire('pointerdown', y);
+        const step = () => {
+          y -= 40;
+          fire('pointermove', y);
+          if (y > 280) { setTimeout(step, 16); } else { fire('pointerup', y); resolve(); }
+        };
+        setTimeout(step, 16);
+      }));
+      // Finger up = forward (the sheet follows the finger).
+      await expect(page.locator('h1')).toHaveText('February 2024');
+    });
+
+    test('a clipped Month scrolls before it pages', async ({ page }) => {
+      // Short enough that the six rows no longer fit the view.
+      await page.setViewportSize({ width: 1280, height: 400 });
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      const grid = page.locator('.view .grid');
+      expect(await grid.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(10);
+      // Not at an edge: the period scrolls, so the wheel must not page.
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      // At the edge, the very same wheel pages.
+      await grid.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('February 2024');
+    });
+
+    test('Ctrl+wheel does not page', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, ctrlKey: true, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('January 2024');
+    });
+
+    test('a sync after a page refetches the shown month', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3');
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      await page.locator('.view').dispatchEvent('wheel', { deltaY: 120, cancelable: true });
+      await expect(page.locator('h1')).toHaveText('February 2024');
+      const febCalls = () => page.evaluate(() => (window as any).__harness.calls
+        .filter((c: any) => c.cmd === 'get_month' && c.args.month === 2).length);
+      const before = await febCalls();
+      await page.evaluate(() => window.__harness.emit('sync-finished', { upserted: 1 }));
+      // The sync's reload must fetch February for real, not draw the prefetch
+      // that landed us here (review 2026-10-08).
+      await expect.poll(febCalls).toBeGreaterThan(before);
+    });
+
+    test('landing on a period prefetches the next one', async ({ page }) => {
+      await page.goto(app('connected'));
+      await expect(page.locator('.vswitch button')).toHaveCount(5);
+      await page.keyboard.press('3'); // January 2024
+      await expect(page.locator('h1')).toHaveText('January 2024');
+      // February is fetched before any gesture asks for it, so the snap after a
+      // page has its target ready (ticket 04).
+      await expect.poll(() => page.evaluate(() =>
+        (window as any).__harness.calls.some(
+          (c: any) => c.cmd === 'get_month' && c.args.month === 2),
+      )).toBe(true);
+    });
   });
 
   test('H and L step by the current view\'s unit', async ({ page }) => {

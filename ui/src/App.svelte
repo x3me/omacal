@@ -49,6 +49,8 @@
   import { TASKS_WIDTH_DEFAULT } from './lib/taskwidth';
   import { HOUR_PX_DEFAULT, hourPxStepped } from './lib/zoom';
   import { padFor, sliceWeek, stepDay, stepDays, visibleIndex, windowHeld } from './lib/weekwindow';
+  import { attachPeriodPaging } from './lib/periodpaging';
+  import { PAGE_EASE, PAGE_SLIDE_MS, prefersReducedMotion } from './lib/periodscroll';
   import { setClockFormat } from './lib/clock.svelte';
   import { setSecondZone } from './lib/secondzone.svelte';
   import { setTaskSort } from './lib/tasksort.svelte';
@@ -1014,6 +1016,18 @@
   let yearReq = 0;
   let bigYearReq = 0;
 
+  // The one-period prefetch (spec 2026-10-06, ticket 04): the snap slides *to*
+  // the next period, so App keeps it fetched before the gesture needs it.
+  // Cleared whenever the view is switched, so a payload fetched for one
+  // surface is never drawn on another.
+  const monthCache = new Map<string, MonthPayload>();
+  const yearCache = new Map<number, YearPayload>();
+
+  /** Drop the prefetches. Used when the data under them may have changed (a
+   *  sync, a write) and when the view or the anchor moves to another period, so
+   *  a period fetched before the change is never drawn after it. */
+  function clearPeriodCaches() { monthCache.clear(); yearCache.clear(); }
+
   async function loadWeek(kind: 'day' | 'week' | 'range', target: number, pad: number, days?: WeekViewDays) {
     const req = ++weekReq;
     // Snapshot once: queue changes must not drive the view's fetch effect.
@@ -1036,6 +1050,15 @@
 
   async function loadMonth(year: number, monthNum: number) {
     const req = ++monthReq;
+    // A prefetched period draws with no IPC at all — the whole point of the
+    // cache (ticket 04). It serves the page *once* and is dropped: a later
+    // fetch for the same month (a sync, a write) must fall through to the
+    // store, or the month would stop updating after the page it landed on
+    // (review 2026-10-08). Still stamped, so a fetch in flight for an older
+    // period cannot land on top of it.
+    const key = `${year}-${monthNum}`;
+    const cached = monthCache.get(key);
+    if (cached) { monthCache.delete(key); month = cached; error = null; return; }
     const responseVersion = untrack(responseCheckpoint);
     try {
       const m = await getMonth(year, monthNum);
@@ -1051,6 +1074,8 @@
 
   async function loadYear(y: number) {
     const req = ++yearReq;
+    const cached = yearCache.get(y);
+    if (cached) { yearCache.delete(y); year = cached; error = null; return; }
     const responseVersion = untrack(responseCheckpoint);
     try {
       const p = await getYear(y);
@@ -1156,6 +1181,10 @@
   // `reload()` re-runs whatever `fetchPlan` currently says, so it follows the
   // view actually on screen rather than assuming Week.
   async function reload(): Promise<void> {
+    // `sync-finished` and every write path land here (through `refreshAfterWrite`
+    // / `refreshAfterResponse`), so a prefetch made before them is dropped here
+    // rather than drawn stale (review 2026-10-08).
+    clearPeriodCaches();
     await runFetchPlan(fetchPlan);
   }
 
@@ -1216,6 +1245,9 @@
   }
 
   function goToday() {
+    // The prefetch is keyed to the month we were showing; a jump to today
+    // leaves it pointing at the wrong one (ticket 04's eviction rule).
+    clearPeriodCaches();
     const today = dayStart(Date.now());
     // The pan is a peek; Today is the contract that ends it (spec §3).
     weekPanDays = 0;
@@ -1230,6 +1262,10 @@
   // through, so neither path can diverge from the other. All five slots are
   // live (spec §10) — nothing left to turn away here.
   function pick(v: View) {
+    // A prefetched period belongs to the view that fetched it; carrying it into
+    // another surface would draw the wrong calendar there (ticket 04's eviction
+    // rule).
+    clearPeriodCaches();
     // `listModeChoices`'s reason: a settings read still in flight when this
     // runs must not later overwrite whatever the switcher just chose.
     viewChoices += 1;
@@ -1308,12 +1344,108 @@
     anchorMs = d.getTime();
   }
 
+  // ---- Month/Year period paging (spec 2026-10-06) -------------------------
+  // `periodpaging.ts` owns the listeners and `periodscroll.ts` the accumulator;
+  // this is the small part that has to know App: the overlay guard, the step a
+  // page becomes, and the snap. `step` above stays the one navigation
+  // chokepoint — the wheel and a swipe enter it exactly as `‹`/`›` and `h`/`l`
+  // do.
+  let pagerEl = $state<HTMLElement | null>(null);
+  let slideDir = 0;       // set by a page, consumed when its payload lands
+  let pagerSeen = false;  // the first key is the initial draw, not a page
+
+  /** The Month grid and the Year grid page. Month's list mode is a Filmstrip
+   *  that scrolls; Day/Week pan under their own handler; Big Year is its own
+   *  bounded surface. */
+  function pagingActive(): boolean {
+    return (view === 'month' && !listMode) || view === 'year';
+  }
+
+  /** Nothing pages while an overlay owns the screen — the keyboard guard's own
+   *  predicate widened with the header's overlays (the header's picker and the
+   *  event popover are the two not in that list). */
+  function pagingBlocked(): boolean {
+    return form !== null || pendingDelete !== null || searchOpen || quickAdd !== null
+      || helpOpen || settingsOpen || pickerOpen || gridDetail !== null
+      || pendingEventMove !== null || importPath !== null;
+  }
+
+  /** The action for the view container: one set of listeners, live for Month
+   *  and Year only. */
+  function periodPaging(node: HTMLElement) {
+    const detach = attachPeriodPaging(node, {
+      active: pagingActive,
+      blocked: pagingBlocked,
+      onPage: (dir) => pagePeriod(dir),
+    });
+    return { destroy: detach };
+  }
+
+  /** The anchor's month, for the snap key and the prefetch. */
+  const shownMonth = $derived.by(() => {
+    const d = new Date(anchorMs);
+    return { year: d.getFullYear(), month: d.getMonth() + 1 };
+  });
+
+  /** One page: the buttons' own `step`, with the new period animating in from
+   *  the direction of travel. Reduced motion keeps the step and drops the
+   *  travel. */
+  function pagePeriod(dir: 1 | -1) {
+    slideDir = dir;
+    step(dir);
+    // A clamped step (Year at its bound) lands no payload and so never consumes
+    // this; drop it, or a later unrelated key change would animate for a page
+    // that never happened.
+    setTimeout(() => { if (slideDir === dir) slideDir = 0; }, 700);
+  }
+
+  // Keyed on the *payload*, not the target, so the snap plays when the new
+  // period is on screen rather than over the old one still loading.
+  const pagerKey = $derived(
+    view === 'month' && month ? `${month.year}-${month.month}`
+      : view === 'year' && year ? `y${year.year}` : '',
+  );
+  $effect(() => {
+    void pagerKey; // the dependency
+    const dir = slideDir;
+    slideDir = 0;
+    if (!pagerSeen) { pagerSeen = true; return; }
+    // Prefetch the period the *next* page will want, once this one has settled
+    // (ticket 04). Untracked: it reads state but must not re-run this effect.
+    untrack(() => { void prefetchNext(); });
+    if (!dir || !pagerEl || prefersReducedMotion() || typeof pagerEl.animate !== 'function') return;
+    const dy = (dir > 0 ? 1 : -1) * 40;
+    pagerEl.animate(
+      [{ transform: `translateY(${dy}px)`, opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
+      { duration: PAGE_SLIDE_MS, easing: PAGE_EASE },
+    );
+  });
+
+  /** Fetch the next period into the cache, so the snap after a page has its
+   *  target ready (ticket 04). A failed prefetch is not a failure — the page
+   *  that needs it just fetches as it always did. */
+  async function prefetchNext() {
+    if (!pagingActive()) return;
+    if (view === 'month') {
+      const { year: y, month: m } = shownMonth;
+      const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1;
+      const key = `${ny}-${nm}`;
+      if (monthCache.has(key)) return;
+      try { monthCache.set(key, await getMonth(ny, nm)); } catch { /* ignore */ }
+    } else {
+      const ny = yearNum + 1;
+      if (yearCache.has(ny)) return;
+      try { yearCache.set(ny, await getYear(ny)); } catch { /* ignore */ }
+    }
+  }
+
   // Asked by Month's `+N more` and its day-number click alike (`MonthGrid`
   // makes no distinction between the two — see its own `pickDay`), and by a
   // `YearGrid` date the same way. Setting `anchorMs` here is the entire
   // point of this task (spec §5): without it, Day view opens on today
   // instead of the day that was actually clicked.
   function handleDayPick(startMs: number) {
+    clearPeriodCaches();
     pendingKeyboardDay = null;
     pendingEventMove = null;
     selectKeyboard(dayCursor(startMs));
@@ -2284,7 +2416,7 @@
                     width={tasksWidth}
                     onresize={(px) => (tasksWidth = px)} />
     {/if}
-    <div class="view">
+    <div class="view" use:periodPaging>
     {#if view === 'month'}
       {#if month}
         {#if listMode}
@@ -2292,9 +2424,11 @@
                      keyboardCursor={visibleKeyboardCursor}
                      onopen={openGridEvent} />
         {:else}
-          <MonthGrid {month} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
-                     onedit={editGridEvent}
-                     ondaypick={handleDayPick} oncreate={newEventOnDay} />
+          <div class="pager" bind:this={pagerEl}>
+            <MonthGrid {month} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
+                       onedit={editGridEvent}
+                       ondaypick={handleDayPick} oncreate={newEventOnDay} />
+          </div>
         {/if}
       {/if}
     {:else if view === 'year'}
@@ -2304,7 +2438,9 @@
            a new event from Year is the one the view is for — pick the day, then
            create in it, or press `n`. -->
       {#if year}
-        <YearGrid {year} ondaypick={handleDayPick} />
+        <div class="pager" bind:this={pagerEl}>
+          <YearGrid {year} ondaypick={handleDayPick} />
+        </div>
       {/if}
     {:else if view === 'bigyear'}
       {#if bigYear}
@@ -2510,6 +2646,11 @@
      spec measuring one would find two. */
   .workspace { flex: 1; display: flex; min-height: 0; gap: 12px; }
   .view { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  /* The Month/Year pager wrapping the grid, so the grid's own `flex: 1` still
+     resolves against a full-height column, and so the page snap has one element
+     to animate. It is the same height as `.view` minus nothing — the wrapper
+     adds no chrome. */
+  .pager { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   .kbd-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
                 overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
