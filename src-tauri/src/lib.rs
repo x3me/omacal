@@ -1824,8 +1824,40 @@ pub fn run() {
             events::update_event,
             events::delete_event_cmd
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running omacal");
+        // `build` then `run` is what `Builder::run` does inside; spelled out
+        // only to hand the loop a handler for the events no plugin owns.
+        .build(tauri::generate_context!())
+        .expect("error while building omacal")
+        .run(on_run_event);
+}
+
+/// The app-level events no window or plugin handles.
+///
+/// One today, and it is macOS's: a click on the Dock icon, or Launchpad or
+/// Finder opening the app, while it is already running. A closed window only
+/// hides (see `on_window_event`), so without this the Dock click did nothing
+/// at all and OmaCal looked broken until the tray was used. It reopens as the
+/// tray's Open does, default view included, but only when the main window is
+/// actually hidden: on a visible window macOS's own activation is the whole
+/// answer, and re-applying the default view would yank the user off the
+/// period they were looking at. The main window's own visibility, not the
+/// event's `has_visible_windows`, because an open menu-bar popup counts as a
+/// visible window and would otherwise swallow the reopen.
+///
+/// `#[cfg]` rather than `cfg!` because the variant itself exists only on
+/// macOS; everything it calls is shared code the Linux build compiles.
+fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Reopen { .. } = event {
+        let hidden = app
+            .get_webview_window("main")
+            .is_some_and(|w| !w.is_visible().unwrap_or(true));
+        if hidden {
+            tray::open_plain(app);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, event);
 }
 
 #[cfg(test)]
