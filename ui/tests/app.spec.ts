@@ -16,7 +16,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
-  APP_ALLDAY_ID, appWritableWeek,
+  APP_ALLDAY_ID, appWritableWeek, APP_ONE_OFF_ID, POPOVER_DETAILS,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -1568,6 +1568,117 @@ test.describe('App', () => {
 
       expect(await topOf(), 'a failed write must leave the block where it was')
         .toBeCloseTo(before, 0);
+    });
+
+    /** Where `title`'s block sits in its column, as `offsetTop` (the frame a
+     *  drag moves it in; see the failed-write spec above for why not a box). */
+    const topOfBlock = (page: Page, title: string) => page.evaluate((t) => {
+      const e = [...document.querySelectorAll('.ev')]
+        .find((n) => n.getAttribute('aria-label')?.startsWith(`${t},`)) as HTMLElement;
+      return e.offsetTop;
+    }, title);
+
+    test.describe('a change shows at once and saves behind you', () => {
+      test('a dropped meeting stays where it lands while it saves', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        const before = await topOfBlock(page, 'Board prep');
+
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+
+        // Google has not answered yet: at the new place, marked, and counted.
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeGreaterThan(before + 20);
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+
+        await page.evaluate(() => window.__harness.releaseWrite());
+        // Saved and reloaded. (The stub's week does not apply writes, so where
+        // the block ends up afterwards says nothing; only that it is no longer
+        // pending does.)
+        await expect(block(page, 'Board prep')).not.toHaveClass(/pending/);
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'change' })).toHaveCount(0);
+      });
+
+      test('a refused move goes back where it was, with the reason', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        const before = await topOfBlock(page, 'Board prep');
+
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.rejectWrite('that event is no longer here'));
+
+        await expect(page.locator('.err')).toContainText('Could not move “Board prep”');
+        await expect(page.locator('.err')).toContainText('no longer here');
+        await expect(block(page, 'Board prep')).not.toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(before, 0);
+      });
+
+      test('a drop that asks first holds while it asks, and Cancel puts it back', async ({ page }) => {
+        await writable(page);
+        const before = await topOfBlock(page, 'Client call');
+
+        await dragBy(page, 'Client call', 60);
+        await expect(movePanel(page)).toBeVisible();
+        await expect(block(page, 'Client call')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Client call')).toBeGreaterThan(before + 20);
+        // Held, not saving: nothing has been sent.
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'change' })).toHaveCount(0);
+
+        await page.keyboard.press('Escape');
+        await expect(movePanel(page)).toBeHidden();
+        await expect(block(page, 'Client call')).not.toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Client call')).toBeCloseTo(before, 0);
+        expect(await callsTo(page, 'update_event')).toHaveLength(0);
+      });
+
+      test('a drop shows where it lands before anything is read or sent', async ({ page }) => {
+        await writable(page);
+        // The detail read the drop starts with, parked: nothing is known about
+        // the event yet, and the card must already sit where it was dropped.
+        await page.evaluate((id) => window.__harness.holdNextEventCall('event_detail', id), APP_ONE_OFF_ID);
+        const before = await topOfBlock(page, 'Board prep');
+
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeGreaterThan(before + 20);
+        expect(await callsTo(page, 'update_event')).toHaveLength(0);
+
+        await page.evaluate(([id, d]) => window.__harness.releaseEventCall('event_detail', id, d),
+          [APP_ONE_OFF_ID, POPOVER_DETAILS[APP_ONE_OFF_ID]] as const);
+        await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      });
+
+      test('a meeting still saving cannot be dragged again', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+
+        await dragBy(page, 'Board prep', 60);
+        await page.waitForTimeout(300);
+        // A second drop would queue behind the first, held write: one change
+        // saving, not two, says it was refused.
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+        await page.evaluate(() => window.__harness.releaseWrite());
+        await page.waitForTimeout(400);
+        expect(await callsTo(page, 'update_event')).toHaveLength(1);
+      });
+
+      test('a move still saving survives a week step and back', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        const moved = await topOfBlock(page, 'Board prep');
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(moved, 0);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
     });
   });
 

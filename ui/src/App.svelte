@@ -1,8 +1,10 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
-  import { pendingChanges, pendingCheckpoint, reconcilePending } from './lib/pending.svelte';
-  import { overlayWeek, overlayMonth, overlayBigYear } from './lib/pendingview';
+  import {
+    pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
+  } from './lib/pending.svelte';
+  import { overlayWeek, overlayMonth, overlayBigYear, type PendingChange } from './lib/pendingview';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
@@ -1840,6 +1842,26 @@
     }
   }
 
+  /**
+   * `refreshAfterWrite` for a queued change (spec 2026-10-09). Sync first and
+   * reload once: the reload is what clears the pending card, and a local
+   * reload before the sync could clear it with the old position still in the
+   * store (the `'this'`-on-a-bare-master case `refreshAfterWrite` describes).
+   * No `busy`: the app stays usable while this runs. If the sync fails, the
+   * card stays drawn where it landed, because Google has the change, and the
+   * next successful load clears it.
+   */
+  async function refreshAfterQueuedWrite() {
+    try {
+      await syncCalendar(true);
+      await refreshStatus();
+      await reload();
+      await refreshInvites();
+    } catch (e) {
+      error = `The change was made, but OmaCal could not refresh from Google: ${e}`;
+    }
+  }
+
   async function saveForm(result: EventFormResult) {
     const request = form;
     if (!request) return;
@@ -1931,6 +1953,8 @@
     span: { startMs: number; endMs: number };
     detail: EventDetail;
     anchor: Rect;
+    /** The drop, already drawn where it landed while the question is open. */
+    hold: symbol;
   } | null>(null);
 
   /**
@@ -1947,16 +1971,18 @@
    * choice, which is spec §3's "at most one dialog per drop".
    */
   async function moveOccurrence(event: UiEvent, span: { startMs: number; endMs: number }) {
-    busy = true;
     error = null;
+    // Drawn where it was dropped from this instant: while the detail is read,
+    // and while any question is open (spec 2026-10-09, §2.4). Held as `'this'`;
+    // the answer re-makes it with the scope chosen.
+    const hold = holdChange(moveChange(event, span, 'this'));
     let detail: EventDetail;
     try {
       detail = await getEventDetail(event.id);
     } catch (e) {
+      releaseHold(hold);
       error = String(e);
       return;
-    } finally {
-      busy = false;
     }
 
     // Anybody the move could email. None on CalDAV however many attendees
@@ -1965,12 +1991,17 @@
     const guests = detail.mails_guests ? detail.attendees.filter((a) => !a.is_self).length : 0;
     if (guests === 0 && !detail.is_recurring) {
       // Nobody to tell and one occurrence to move: nothing to ask.
-      await commitMove(event, span, { scope: 'all', sendUpdates: 'none' });
+      commitMove(event, span, { scope: 'all', sendUpdates: 'none' }, hold);
       return;
     }
 
     const anchor = gridRectFor(event);
-    pendingMove = { event, span, detail, anchor };
+    pendingMove = { event, span, detail, anchor, hold };
+  }
+
+  /** The change a drop makes, for the overlay to draw. */
+  function moveChange(event: UiEvent, span: { startMs: number; endMs: number }, scope: Scope): PendingChange {
+    return { kind: 'move', id: event.id, occurrenceStartMs: event.start_ms, scope, startMs: span.startMs, endMs: span.endMs };
   }
 
   /**
@@ -1980,51 +2011,49 @@
    * unasked drop passes `'none'` above, and the only other caller is the
    * dialog's own confirm. That is what makes `MoveConfirm`'s "Move and notify
    * guests" button the one place in this path where `'all'` can come from.
+   *
+   * Since 2026-10-09 it does not wait: the drop is already drawn where it
+   * landed (`pending.svelte.ts`), and the write runs in the queue behind it.
    */
-  async function commitMove(
+  function commitMove(
     event: UiEvent,
     span: { startMs: number; endMs: number },
     choice: { scope: Scope; sendUpdates: SendUpdates },
+    hold: symbol,
   ) {
-    busy = true;
-    error = null;
-    try {
-      const detail = await getEventDetail(event.id);
-      const value = valueFromDetail(detail, event.start_ms, event.end_ms);
-      // The source instants are carried through untouched, and that is
-      // deliberate rather than an oversight: `instantOf` passes one through
-      // only while the civil pair beside it still reads as that instant, which
-      // after a move it never does. Nulling them would be dead code here — a
-      // mutation keeping them reddened nothing — and actively wrong for the
-      // resize this grows into, where the *untouched* end should be sent as
-      // the instant it was read off rather than re-derived without its
-      // seconds.
-      const moved: EventFormValue = {
-        ...value,
-        date: dateOf(span.startMs),
-        endDate: dateOf(span.endMs),
-        start: timeOf(span.startMs),
-        end: timeOf(span.endMs),
-      };
-
-      await updateEvent(
-        event.id,
-        choice.scope,
-        event.start_ms,
-        toEventInput(moved, value, zoneName()),
-        choice.sendUpdates,
-      );
-    } catch (e) {
-      // The block is already back where it started — the grid returns it on
-      // drop and only a refresh moves it — so a failure needs no undo, just
-      // saying. §6: a drag that appears to have worked and silently did not is
-      // worse than one that visibly refuses.
-      error = String(e);
-      return;
-    } finally {
-      busy = false;
-    }
-    await refreshAfterWrite();
+    void commitChange(hold, moveChange(event, span, choice.scope), {
+      write: async () => {
+        const detail = await getEventDetail(event.id);
+        const value = valueFromDetail(detail, event.start_ms, event.end_ms);
+        // The source instants are carried through untouched, and that is
+        // deliberate rather than an oversight: `instantOf` passes one through
+        // only while the civil pair beside it still reads as that instant, which
+        // after a move it never does. Nulling them would be dead code here — a
+        // mutation keeping them reddened nothing — and actively wrong for the
+        // resize this grows into, where the *untouched* end should be sent as
+        // the instant it was read off rather than re-derived without its
+        // seconds.
+        const moved: EventFormValue = {
+          ...value,
+          date: dateOf(span.startMs),
+          endDate: dateOf(span.endMs),
+          start: timeOf(span.startMs),
+          end: timeOf(span.endMs),
+        };
+        await updateEvent(
+          event.id,
+          choice.scope,
+          event.start_ms,
+          toEventInput(moved, value, zoneName()),
+          choice.sendUpdates,
+        );
+      },
+      after: refreshAfterQueuedWrite,
+      // The drop is undone on screen the moment Google refuses it, and says
+      // why: §6's "a drag that appears to have worked and silently did not is
+      // worse than one that visibly refuses" still holds, it just holds now.
+      onfailure: (e) => { error = `Could not move “${event.title}”: ${String(e)}`; },
+    });
   }
 
   /** The dropped block's own rect, for the dialog to sit beside. Falls back to
@@ -2369,7 +2398,7 @@
 {#if pendingMove}
   <!-- One dialog per drop, never two: `MoveConfirm` carries the scope choice
        and the notify choice together when the event needs both. Cancelling
-       clears this and writes nothing — the block is already home. -->
+       releases the hold and writes nothing — the block goes back. -->
   {@const p = pendingMove}
   <MoveConfirm
     detail={p.detail}
@@ -2380,11 +2409,15 @@
       // render, so `p` follows the state it was derived from — clearing first
       // and reading `p.event` afterwards throws on null, which is precisely
       // what it did.
-      const { event, span } = p;
+      const { event, span, hold } = p;
       pendingMove = null;
-      commitMove(event, span, choice);
+      commitMove(event, span, choice, hold);
     }}
-    oncancel={() => (pendingMove = null)}
+    oncancel={() => {
+      // Nothing written: the drop goes back where it came from.
+      if (pendingMove) releaseHold(pendingMove.hold);
+      pendingMove = null;
+    }}
   />
 {/if}
 

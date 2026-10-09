@@ -8,6 +8,7 @@
   import CalendarPopover from './CalendarPopover.svelte';
   import InviteTray from './InviteTray.svelte';
   import { pendingResponseCount, unshownResponseFailures, dismissResponseFailure } from './responses.svelte';
+  import { pendingChangeCount } from './pending.svelte';
   import SettingsModal from './SettingsModal.svelte';
   import ViewSwitcher, { type View } from './ViewSwitcher.svelte';
   import type { ChangeNotice, DeclineNotice, PendingInvite } from './invites';
@@ -369,6 +370,10 @@
       {#if pendingResponseCount() > 0}
         <span class="response-status" role="status">Saving {pendingResponseCount()}
           {pendingResponseCount() === 1 ? 'response' : 'responses'}…</span>
+      {/if}
+      {#if pendingChangeCount() > 0}
+        <span class="response-status" role="status">Saving {pendingChangeCount()}
+          {pendingChangeCount() === 1 ? 'change' : 'changes'}…</span>
       {/if}
       {#if unshownResponseFailures().length}
         <div class="response-errors">
