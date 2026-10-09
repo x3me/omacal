@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import type { UiEvent, WeekPayload, MonthPayload, BigYearPayload, Lane } from '../src/lib/api';
+import type { EventDetail } from '../src/lib/eventdetail';
 import {
-  covers, locks, overlayWeek, overlayMonth, overlayBigYear, type PendingChange,
+  covers, locks, overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type EditPatch, type PendingChange,
 } from '../src/lib/pendingview';
 
 const H = 3_600_000;
@@ -177,5 +178,180 @@ test.describe('the big year, with pending deletes drawn over it', () => {
     const out = overlayBigYear(big, [del(7, MON)]);
     expect(out.rows[0].pill_events.map((e) => e.id)).toEqual([8]);
     expect(out.rows[0].pills).toEqual([lane(0, 1, 2, 3)]);
+  });
+});
+
+const edit = (
+  id: number, from: number,
+  when: { allDay: boolean; startMs: number; endMs: number } | null,
+  patch: EditPatch = {},
+  scope: PendingChange['scope'] = 'this',
+  detail: { description?: string | null; guests?: { email: string; optional: boolean }[] } = {},
+): PendingChange => ({ kind: 'edit', id, occurrenceStartMs: from, scope, when, patch, detail });
+const local = (y: number, m: number, d: number) => new Date(y, m, d).getTime(); // display-zone midnight
+
+test.describe('edits, in the week', () => {
+  test('a timed edit redraws the card with its new values and time', () => {
+    const w = overlayWeek(week(), [edit(1, MON + 9 * H, { allDay: false, startMs: MON + 13 * H, endMs: MON + 14 * H },
+      { title: 'Renamed', color: '#ff0000' })]);
+    const e = w.days[0].events.find((x) => x.id === 1)!;
+    expect([e.title, e.color, e.start_ms, e.end_ms, e.pending]).toEqual(['Renamed', '#ff0000', MON + 13 * H, MON + 14 * H, true]);
+  });
+
+  test("'all' takes the new title everywhere and moves nothing", () => {
+    const w: WeekPayload = {
+      ...week(),
+      days: [
+        { start_ms: MON, end_ms: MON + DAY, events: [ev(5, MON + 9 * H, MON + 10 * H, { recurring: true })], placed: [place(0)] },
+        { start_ms: MON + DAY, end_ms: MON + 2 * DAY, events: [ev(5, MON + DAY + 9 * H, MON + DAY + 10 * H, { recurring: true })], placed: [place(0)] },
+      ],
+    };
+    const out = overlayWeek(w, [edit(5, MON + DAY + 9 * H, { allDay: false, startMs: MON + DAY + 9 * H, endMs: MON + DAY + 10 * H },
+      { title: 'Daily sync' }, 'all')]);
+    expect(out.days.map((d) => d.events.map((e) => [e.title, e.start_ms, e.pending]))).toEqual([
+      [['Daily sync', MON + 9 * H, true]], [['Daily sync', MON + DAY + 9 * H, true]],
+    ]);
+  });
+
+  test('timed to all-day leaves its day and joins the band over its days', () => {
+    const tue = MON + DAY;
+    const w = overlayWeek(week(), [edit(1, MON + 9 * H, { allDay: true, startMs: MON, endMs: MON + 2 * DAY })]);
+    expect(w.days[0].events.map((e) => e.id)).toEqual([2]);
+    const i = w.all_day_events.findIndex((e) => e.id === 1);
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(w.all_day_events[i]).toMatchObject({ is_all_day: true, start_ms: MON, end_ms: tue + DAY, pending: true });
+    const l = w.all_day.find((x) => x.idx === i)!;
+    expect([l.start_col, l.end_col]).toEqual([0, 1]);
+    // Its lane is free: no other band item shares its row over those columns.
+    expect(w.all_day.filter((x) => x.lane === l.lane && x.idx !== i && x.end_col >= 0 && x.start_col <= 1)).toEqual([]);
+  });
+
+  test('all-day to timed leaves the band and joins its day', () => {
+    const w = overlayWeek(week(), [edit(7, MON, { allDay: false, startMs: MON + 9 * H, endMs: MON + 10 * H })]);
+    expect(w.all_day_events.map((e) => e.id)).toEqual([8]);
+    expect(w.all_day).toEqual([lane(0, 0, 1, 1)]);
+    const mon = w.days[0];
+    expect(mon.events.map((e) => [e.id, e.is_all_day, e.pending ?? false])).toEqual([[1, false, false], [7, false, true], [2, false, false]]);
+    // 7 overlaps 1 at 09:00: side by side.
+    expect(mon.placed.filter((p) => mon.events[p.idx].id !== 2).map((p) => p.columns)).toEqual([2, 2]);
+  });
+
+  test('an edit that waits for its save is marked as saving where it is, unchanged', () => {
+    const c = edit(1, MON + 9 * H, null, { title: 'Renamed' });
+    const w = overlayWeek(week(), [c]);
+    expect(w.days[0].events.map((e) => [e.id, e.start_ms, e.title, e.pending ?? false])).toEqual([
+      [1, MON + 9 * H, 'e1', true], [2, MON + 10 * H, 'e2', false],
+    ]);
+    expect(w.days[0].placed).toEqual(week().days[0].placed); // nothing moved
+    expect(locks(c, 1, MON + 9 * H)).toBe(true);
+  });
+
+  test('an edit locks where it landed', () => {
+    const c = edit(1, MON + 9 * H, { allDay: false, startMs: MON + 15 * H, endMs: MON + 16 * H });
+    expect(locks(c, 1, MON + 15 * H)).toBe(true);
+    expect(locks(c, 1, MON + 9 * H)).toBe(true);
+  });
+});
+
+test.describe('edits, in the month', () => {
+  const month = (bars: Lane[] = [lane(0, 0, 0, 1)], barEvents: UiEvent[] = [ev(9, MON, MON + 2 * DAY, { is_all_day: true })], cap = 3): MonthPayload => ({
+    year: 2024, month: 1, lane_cap: cap,
+    rows: [{
+      cells: [
+        { start_ms: MON, end_ms: MON + DAY, in_month: true, timed: [ev(1, MON + 9 * H, MON + 10 * H)] },
+        { start_ms: MON + DAY, end_ms: MON + 2 * DAY, in_month: true, timed: [] },
+      ],
+      bars, bar_events: barEvents, bar_overflow: [],
+    }],
+  });
+
+  test('a meeting made all-day takes the first free lane and moves no other bar', () => {
+    const out = overlayMonth(month(), [edit(1, MON + 9 * H, { allDay: true, startMs: MON, endMs: MON + DAY })]);
+    const row = out.rows[0];
+    expect(row.cells[0].timed).toEqual([]);
+    expect(row.bars[0]).toEqual(lane(0, 0, 0, 1)); // untouched
+    const i = row.bar_events.findIndex((e) => e.id === 1);
+    expect(row.bars.find((l) => l.idx === i)).toMatchObject({ lane: 1, start_col: 0, end_col: 0 });
+  });
+
+  test('with no free lane it joins the overflow, once', () => {
+    const full = month([lane(0, 0, 0, 1)], [ev(9, MON, MON + 2 * DAY, { is_all_day: true })], 1);
+    const out = overlayMonth(full, [edit(1, MON + 9 * H, { allDay: true, startMs: MON, endMs: MON + 2 * DAY })]);
+    const row = out.rows[0];
+    const i = row.bar_events.findIndex((e) => e.id === 1);
+    expect(row.bar_overflow).toEqual([i]);
+    expect(row.bars.some((l) => l.idx === i)).toBe(false);
+  });
+
+  test('a meeting moved across midnight keeps showing, as a bar', () => {
+    // Local midnights: "crosses midnight" is the reader's midnight, so a UTC
+    // fixture would answer differently on every machine east or west of it.
+    const mon = local(2024, 0, 29), tue = local(2024, 0, 30), wed = local(2024, 0, 31);
+    const m: MonthPayload = {
+      year: 2024, month: 1, lane_cap: 3,
+      rows: [{
+        cells: [
+          { start_ms: mon, end_ms: tue, in_month: true, timed: [ev(1, mon + 9 * H, mon + 10 * H)] },
+          { start_ms: tue, end_ms: wed, in_month: true, timed: [] },
+        ],
+        bars: [], bar_events: [], bar_overflow: [],
+      }],
+    };
+    const out = overlayMonth(m, [move(1, mon + 9 * H, mon + 23 * H, 2 * H)]);
+    const row = out.rows[0];
+    expect(row.cells[0].timed).toEqual([]);
+    const i = row.bar_events.findIndex((e) => e.id === 1);
+    expect(row.bars.find((l) => l.idx === i)).toMatchObject({ start_col: 0, end_col: 1 });
+  });
+
+  test('a deleted bar takes its overflow entry with it', () => {
+    const m = month([], [ev(9, MON, MON + 2 * DAY, { is_all_day: true }), ev(10, MON, MON + DAY, { is_all_day: true })]);
+    m.rows[0].bar_overflow = [0, 1];
+    const out = overlayMonth(m, [del(9, MON)]);
+    expect(out.rows[0].bar_events.map((e) => e.id)).toEqual([10]);
+    expect(out.rows[0].bar_overflow).toEqual([0]);
+  });
+});
+
+test.describe('edits, in the big year', () => {
+  test('a moved all-day pill takes the first free lane in its new place', () => {
+    const days = Array.from({ length: 28 }, (_, i) => ({ start_ms: local(2024, 0, 29 + i), in_year: true, unsynced: false }));
+    const big: BigYearPayload = {
+      year: 2024, lane_cap: 3,
+      rows: [{ days, pills: [lane(0, 0, 0, 0)], pill_events: [ev(7, days[0].start_ms, days[1].start_ms, { is_all_day: true })], overflow: [] }],
+    };
+    const out = overlayBigYear(big, [edit(7, days[0].start_ms, { allDay: true, startMs: days[2].start_ms, endMs: days[3].start_ms })]);
+    const row = out.rows[0];
+    expect(row.pill_events).toHaveLength(1);
+    expect(row.pills).toEqual([{ ...lane(0, 0, 2, 2), cont_left: false, cont_right: false }]);
+    expect(row.pill_events[0].pending).toBe(true);
+  });
+});
+
+test.describe('the details card of a pending edit', () => {
+  const detail = (): EventDetail => ({
+    id: 1, title: 'Board prep', location: 'Room 1', description: 'old', calendar_id: 3, is_all_day: false, conference_uri: 'https://meet.google.com/x',
+    attendees: [
+      { email: 'me@x.com', display_name: 'Me', response_status: 'accepted', optional: false, is_self: true },
+      { email: 'dan@x.com', display_name: 'Dan', response_status: 'declined', optional: false, is_self: false },
+      { email: 'eve@x.com', display_name: null, response_status: 'tentative', optional: false, is_self: false },
+    ],
+  }) as unknown as EventDetail;
+
+  test('shows the saved values, keeps answers, drops removed guests, adds new ones', () => {
+    const c = edit(1, MON + 9 * H, { allDay: false, startMs: MON + 13 * H, endMs: MON + 14 * H },
+      { title: 'Board prep v2', location: null, calendar_id: 4, conference: null }, 'this',
+      { description: 'new', guests: [{ email: 'me@x.com', optional: false }, { email: 'DAN@x.com', optional: true }, { email: 'zoe@x.com', optional: false }] });
+    const out = overlayDetail(detail(), [c], MON + 13 * H);
+    expect([out.title, out.location, out.calendar_id, out.description, out.conference_uri]).toEqual(['Board prep v2', null, 4, 'new', null]);
+    expect(out.attendees.map((a) => [a.email, a.response_status, a.optional, a.is_self])).toEqual([
+      ['me@x.com', 'accepted', false, true], ['dan@x.com', 'declined', true, false], ['zoe@x.com', 'needsAction', false, false],
+    ]);
+  });
+
+  test('another occurrence, or an edit that waits, leaves the card as stored', () => {
+    const c = edit(1, MON + 9 * H, { allDay: false, startMs: MON + 13 * H, endMs: MON + 14 * H }, { title: 'X' });
+    expect(overlayDetail(detail(), [c], MON + DAY + 9 * H).title).toBe('Board prep');
+    expect(overlayDetail(detail(), [edit(1, MON + 9 * H, null, { title: 'X' })], MON + 9 * H).title).toBe('Board prep');
   });
 });
