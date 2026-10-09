@@ -2244,8 +2244,8 @@
           obscured={hoverContext?.day === day.start_ms && hoverContext.idx !== p.idx
             && hoverContext.peers.some(peer => peer.idx === p.idx)}
           onopen={openPopover}
-          onedit={(ev, r) => openPopover(ev, r, true)}
-          ongrab={(ev, e) => startDrag(ev, day, e)}
+          onedit={(ev, r) => { if (!ev.pending) openPopover(ev, r, true); }}
+          ongrab={(ev, e) => { if (!ev.pending) startDrag(ev, day, e); }}
           preview={previewFor(day.events[p.idx])}
           liveSpan={liveSpanFor(day.events[p.idx])}
           keyboardSelected={keyboardCursor

@@ -1,6 +1,8 @@
 <!-- ui/src/App.svelte -->
 <script lang="ts">
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
+  import { pendingChanges, pendingCheckpoint, reconcilePending } from './lib/pending.svelte';
+  import { overlayWeek, overlayMonth, overlayBigYear } from './lib/pendingview';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
@@ -568,8 +570,8 @@
   });
 
   const keyboardDays = $derived.by<ListDay[]>(() => {
-    if (view === 'month' && month) {
-      const days = allDaysFromMonth(month);
+    if (view === 'month' && shownMonth) {
+      const days = allDaysFromMonth(shownMonth);
       if (listMode) return days;
       // Month folds timed rows after three. Keyboard navigation follows what
       // is actually visible rather than selecting a hidden row behind +N.
@@ -993,12 +995,19 @@
    *  whole payload as well, for its track. */
   const visibleStartMs = $derived(view === 'day' ? anchorMs : pannedWeekStartMs);
   const visibleCount = $derived(view === 'day' ? 1 : weekStartsToday ? weekViewDays : 7);
+  // The payloads as the user's pending changes have left them (spec
+  // 2026-10-09): what every view draws. `week`/`month`/`bigYear` stay exactly
+  // what the backend sent.
+  const shownWeek = $derived(week ? overlayWeek(week, pendingChanges()) : null);
+  const shownMonth = $derived(month ? overlayMonth(month, pendingChanges()) : null);
+  const shownBigYear = $derived(bigYear ? overlayBigYear(bigYear, pendingChanges()) : null);
+
   const visibleWeek = $derived.by(() => {
-    if (!week) return null;
-    const i = visibleIndex(week.days, visibleStartMs);
+    if (!shownWeek) return null;
+    const i = visibleIndex(shownWeek.days, visibleStartMs);
     // Not there yet — the window jumped and its payload is still in flight —
     // so the whole of what is on screen stands in, as it did before padding.
-    return i < 0 ? week : sliceWeek(week, i, visibleCount);
+    return i < 0 ? shownWeek : sliceWeek(shownWeek, i, visibleCount);
   });
 
   // Every `week` assignment goes through `loadWeek`, and every `loadWeek`
@@ -1018,6 +1027,7 @@
     const req = ++weekReq;
     // Snapshot once: queue changes must not drive the view's fetch effect.
     const responseVersion = untrack(responseCheckpoint);
+    const pendingVersion = untrack(pendingCheckpoint);
     try {
       const w = kind === 'day'
         ? await getDay(target, pad)
@@ -1028,6 +1038,7 @@
       week = w;
       error = null;
       reconcileResponses(responseVersion);
+      reconcilePending(pendingVersion);
     } catch (e) {
       if (req !== weekReq) return;
       error = String(e);
@@ -1037,12 +1048,14 @@
   async function loadMonth(year: number, monthNum: number) {
     const req = ++monthReq;
     const responseVersion = untrack(responseCheckpoint);
+    const pendingVersion = untrack(pendingCheckpoint);
     try {
       const m = await getMonth(year, monthNum);
       if (req !== monthReq) return;
       month = m;
       error = null;
       reconcileResponses(responseVersion);
+      reconcilePending(pendingVersion);
     } catch (e) {
       if (req !== monthReq) return;
       error = String(e);
@@ -1052,12 +1065,14 @@
   async function loadYear(y: number) {
     const req = ++yearReq;
     const responseVersion = untrack(responseCheckpoint);
+    const pendingVersion = untrack(pendingCheckpoint);
     try {
       const p = await getYear(y);
       if (req !== yearReq) return;
       year = p;
       error = null;
       reconcileResponses(responseVersion);
+      reconcilePending(pendingVersion);
     } catch (e) {
       if (req !== yearReq) return;
       error = String(e);
@@ -1067,12 +1082,14 @@
   async function loadBigYear(y: number) {
     const req = ++bigYearReq;
     const responseVersion = untrack(responseCheckpoint);
+    const pendingVersion = untrack(pendingCheckpoint);
     try {
       const p = await getBigYear(y);
       if (req !== bigYearReq) return;
       bigYear = p;
       error = null;
       reconcileResponses(responseVersion);
+      reconcilePending(pendingVersion);
     } catch (e) {
       if (req !== bigYearReq) return;
       error = String(e);
@@ -2286,13 +2303,13 @@
     {/if}
     <div class="view">
     {#if view === 'month'}
-      {#if month}
+      {#if shownMonth}
         {#if listMode}
-          <Filmstrip days={daysFromMonth(month)} {weather} {weatherStale} onweather={openWeather} {revealNowRequest}
+          <Filmstrip days={daysFromMonth(shownMonth)} {weather} {weatherStale} onweather={openWeather} {revealNowRequest}
                      keyboardCursor={visibleKeyboardCursor}
                      onopen={openGridEvent} />
         {:else}
-          <MonthGrid {month} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
+          <MonthGrid month={shownMonth} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
                      onedit={editGridEvent}
                      ondaypick={handleDayPick} oncreate={newEventOnDay} />
         {/if}
@@ -2307,13 +2324,13 @@
         <YearGrid {year} ondaypick={handleDayPick} />
       {/if}
     {:else if view === 'bigyear'}
-      {#if bigYear}
+      {#if shownBigYear}
         <!-- `gridSelId`/`gridSelStart` are handed straight down: they already
              name the occurrence whose popover is open — `isGridSelected` above
              tests exactly this pair — and the ribbon keeps every segment of it
              lit while it is. Nothing new is tracked here; the state existed. -->
         <BigYearRibbon
-          ribbon={bigYear}
+          ribbon={shownBigYear}
           {calendars}
           ontoggle={toggleCalendarShown}
           openId={gridSelId}
@@ -2322,13 +2339,13 @@
           oncreate={newEventOnDay}
         />
       {/if}
-    {:else if week && visibleWeek}
+    {:else if shownWeek && visibleWeek}
       {#if listMode}
         <Filmstrip days={daysFromWeek(visibleWeek)} {weather} {weatherStale} onweather={openWeather} {revealNowRequest}
                    keyboardCursor={visibleKeyboardCursor}
                    onopen={openGridEvent} />
       {:else}
-        <WeekGrid {week} {calendars} {visibleStartMs} visibleDays={visibleCount}
+        <WeekGrid week={shownWeek} {calendars} {visibleStartMs} visibleDays={visibleCount}
                   onerror={(m) => (error = m)}
                   {weather} {weatherStale} onweather={openWeather}
                   tasks={weekTasks} ontaskmove={moveTask} ontaskdue={retimeTask} ontasktoggle={completeTask}

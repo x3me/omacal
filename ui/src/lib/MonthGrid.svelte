@@ -183,6 +183,7 @@
             {#each cell.timed.slice(0, MONTH_GRID_TIMED_LIMIT) as ev}
               <button
                 class="timed"
+                class:pending={ev.pending}
                 data-combined-count={ev.copies?.length || undefined}
                 style:color={ev.copies?.length ? "var(--text)" : undefined}
                 class:keyboard={keyboardCursor
@@ -290,6 +291,7 @@
            border: 0; background: transparent; padding: 0; margin: 0;
            font-size: 10.5px; color: var(--text); white-space: nowrap; overflow: hidden;
            text-overflow: ellipsis; position: relative; z-index: 1; flex: none; }
+  .timed.pending { opacity: .62; outline: 1px dashed var(--cal); outline-offset: -1px; border-radius: 3px; }
   .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
   .timed.keyboard { border-radius: 3px;
                     outline: 2px solid var(--accent); outline-offset: 1px; }

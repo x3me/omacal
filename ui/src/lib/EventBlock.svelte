@@ -211,6 +211,7 @@
   class:copies-open={showCopies}
   class:with-colors={(!showCopies && (event.copies?.length ?? 0) > 1) || overlapColors.length > 1}
   class:obscured
+  class:pending={event.pending}
   data-kbd-selected-event={keyboardSelected ? '' : undefined}
   data-event-id={event.id}
   data-event-start-ms={event.start_ms}
@@ -253,7 +254,7 @@
        still lands on the button and `edgeAt` still decides. Hidden while
        this block is the one being dragged, when the only honest cursor is
        the grid's own `grabbing`. -->
-  {#if grips && !preview && !createMode && !event.copies?.length}
+  {#if grips && !preview && !createMode && !event.copies?.length && !event.pending}
     <span class="grip" style="top:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
     <span class="grip bottom-grip" style="bottom:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
   {/if}
@@ -364,6 +365,11 @@
      the block is following a pointer and easing would put it behind the
      finger. */
   .ev.dragging { z-index: 50 !important; opacity: 0.85; cursor: grabbing; }
+  /* Saving (pending-changes spec): where the change put it, faded and dashed
+     until Google confirms. Not grabbable — `WeekGrid` ignores the press — so
+     it wears the pointer, not `grab`. */
+  .ev.pending { opacity: .62; outline: 1.5px dashed var(--cal); outline-offset: -1.5px; }
+  .ev.pending.hovered { cursor: pointer; }
   .ev.keyboard { outline: 2px solid var(--accent); outline-offset: 1px;
                  z-index: 25 !important; }
   /* The grab bands, as cursors *and*, while the block is hovered, as

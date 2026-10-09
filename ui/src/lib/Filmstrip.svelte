@@ -188,6 +188,7 @@
                 style:color={ev.copies?.length ? "var(--text)" : undefined}
                 class:allday={ev.is_all_day}
                 class:nobodycoming={ev.all_guests_declined}
+                class:pending={ev.pending}
                 title={ev.all_guests_declined ? 'Everyone declined' : undefined}
                 class:keyboard={keyboardCursor
                   ? cursorNamesEvent(keyboardCursor, d.startMs, ev)
@@ -294,6 +295,7 @@
   .srow-li:hover, .srow-li:focus-within {
     background: color-mix(in srgb, var(--text) 6%, transparent); }
 
+  .srow.pending { opacity: .62; }
   .srow { position: relative; appearance: none; -webkit-appearance: none; font: inherit;
           display: flex; align-items: baseline; gap: 10px;
           flex: 0 1 auto; min-width: 0;
