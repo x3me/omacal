@@ -1666,6 +1666,54 @@ test.describe('App', () => {
         expect(await callsTo(page, 'update_event')).toHaveLength(1);
       });
 
+      test('a deleted meeting disappears at once, and a refused delete brings it back', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('delete_event_cmd'));
+
+        await block(page, 'Board prep').click();
+        await page.getByRole('button', { name: 'Delete' }).click();
+        await confirmPanel(page).getByRole('button', { name: 'Delete' }).click();
+
+        await expect(block(page, 'Board prep')).toHaveCount(0);
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(block(page, 'Board prep')).toHaveCount(1);
+        await expect(page.locator('.err')).toContainText('Could not delete “Board prep”');
+      });
+
+      test('a meeting still saving offers no Edit or Delete', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+
+        await block(page, 'Board prep').click();
+        const popover = page.getByRole('dialog', { name: 'Board prep' });
+        await expect(popover).toBeVisible();
+        await expect(popover.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+        await expect(popover.getByRole('button', { name: 'Delete', exact: true })).toHaveCount(0);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('the keyboard cannot edit or delete a meeting still saving', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await dragBy(page, 'Board prep', 60);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+
+        await block(page, 'Board prep').click();
+        await expect(page.getByRole('dialog', { name: 'Board prep' })).toBeVisible();
+        await page.keyboard.press('d');
+        await page.keyboard.press('e');
+        await page.waitForTimeout(200);
+        await expect(confirmPanel(page)).toHaveCount(0);
+        await expect(editForm(page)).toHaveCount(0);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
       test('a move still saving survives a week step and back', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('update_event'));

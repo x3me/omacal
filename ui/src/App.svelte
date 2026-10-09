@@ -3,6 +3,7 @@
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import {
     pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
+    queueChange, isPending,
   } from './lib/pending.svelte';
   import { overlayWeek, overlayMonth, overlayBigYear, type PendingChange } from './lib/pendingview';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
@@ -1758,6 +1759,8 @@
    * sources make an untouched time look like a move of weeks.
    */
   function openEdit(occurrence: Occurrence, rect: Rect) {
+    // Still being written (spec 2026-10-09, §2.6): no second change on top.
+    if (isPending(occurrence.detail.id, occurrence.startMs)) return;
     closeGridEvent();
     form = {
       mode: 'edit',
@@ -1772,6 +1775,8 @@
    *  confirmation, which is where the three scopes, the guest count and the
    *  "no undo" live. */
   function askDelete(occurrence: Occurrence, rect: Rect) {
+    // Still being written (spec 2026-10-09, §2.6): no second change on top.
+    if (isPending(occurrence.detail.id, occurrence.startMs)) return;
     closeGridEvent();
     pendingDelete = { occurrence, anchor: rect };
   }
@@ -2068,24 +2073,21 @@
     return { top: r.top, left: r.left, width: r.width, height: r.height };
   }
 
-  async function runDelete(scope: Scope) {
+  /** The confirmed delete (spec 2026-10-09): hidden at once, written behind.
+   *  The scope rule still bites hardest here: `'this'` aimed at the master's
+   *  DTSTART removes the series' *first* occurrence rather than the one the
+   *  user clicked, so the clicked occurrence's own start is what travels. */
+  function runDelete(scope: Scope) {
     const target = pendingDelete;
     if (!target) return;
     pendingDelete = null;
-    busy = true;
     error = null;
-    try {
-      // Same rule, and it bites hardest here: `'this'` aimed at the master's
-      // DTSTART removes the series' *first* occurrence rather than the one the
-      // user clicked, and mails everybody about it.
-      await deleteEvent(target.occurrence.detail.id, scope, target.occurrence.startMs);
-    } catch (e) {
-      error = String(e);
-      return;
-    } finally {
-      busy = false;
-    }
-    await refreshAfterWrite();
+    const { detail, startMs } = target.occurrence;
+    void queueChange({ kind: 'delete', id: detail.id, occurrenceStartMs: startMs, scope }, {
+      write: () => deleteEvent(detail.id, scope, startMs),
+      after: refreshAfterQueuedWrite,
+      onfailure: (e) => { error = `Could not delete “${detail.title ?? 'this event'}”: ${String(e)}`; },
+    });
   }
 
   // Keys are dropped when the user is typing or inside any dialog. The latter

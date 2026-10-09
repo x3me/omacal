@@ -16,6 +16,7 @@
   import { isMachineAddress } from './organizer';
   import { respondToEvent, type Attendee, type EventDetail } from './eventdetail';
   import { pendingResponse, responsePending, responseFailure, dismissResponseFailure, showResponseFailuresHere } from './responses.svelte';
+  import { isPending } from './pending.svelte';
   import { focusInitialChoice, handleChoiceKey } from './choicefocus';
   import { EVENT_SHORTCUT_LIST, type EventShortcutId, shortcutKeyFor } from './shortcuts';
 
@@ -300,6 +301,9 @@
   }
 
   const queuedResponse = $derived(pendingResponse(detail.id, occurrenceStartMs));
+  /** A change to this occurrence is still being written: no Edit or Delete
+   *  until it lands (pending-changes spec §2.6). */
+  const locked = $derived(isPending(detail.id, occurrenceStartMs));
   const shown = $derived(queuedResponse ?? chosen ?? detail.self_response);
   const savingResponse = $derived(responsePending(detail.id) || busy.size > 0);
 
@@ -444,12 +448,12 @@
 
   const EVENT_SHORTCUT_ACTIONS: Record<EventShortcutId, () => boolean> = {
     edit: () => {
-      if (!detail.can_edit) return false;
+      if (!detail.can_edit || locked) return false;
       onedit();
       return true;
     },
     delete: () => {
-      if (!detail.can_edit) return false;
+      if (!detail.can_edit || locked) return false;
       ondelete();
       return true;
     },
@@ -671,10 +675,10 @@
        the row now appears for an event that can be neither edited nor
        duplicated — there is finally something in it for those. -->
   <div class="own">
-    {#if detail.can_edit}<button onclick={onedit}>Edit</button>{/if}
+    {#if detail.can_edit && !locked}<button onclick={onedit}>Edit</button>{/if}
     {#if onduplicate}<button onclick={onduplicate}>Duplicate</button>{/if}
     <button onclick={exportIcs} disabled={exporting}>{exporting ? 'Exporting…' : 'Export'}</button>
-    {#if detail.can_edit}<button onclick={ondelete}>Delete</button>{/if}
+    {#if detail.can_edit && !locked}<button onclick={ondelete}>Delete</button>{/if}
   </div>
 
   {#if responseError}<p class="note err" role="alert">{responseError.message}

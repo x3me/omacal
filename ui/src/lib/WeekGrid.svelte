@@ -2245,7 +2245,14 @@
             && hoverContext.peers.some(peer => peer.idx === p.idx)}
           onopen={openPopover}
           onedit={(ev, r) => { if (!ev.pending) openPopover(ev, r, true); }}
-          ongrab={(ev, e) => { if (!ev.pending) startDrag(ev, day, e); }}
+          ongrab={(ev, e) => {
+            // A card still saving is not grabbed (pending-changes spec §2.6).
+            // The flag is cleared as `startDrag`'s combined-block branch does:
+            // this press starts no drag, so no release would clear it, and
+            // the click that opens this card's details would be swallowed.
+            if (ev.pending) { draggedNotClicked = false; return; }
+            startDrag(ev, day, e);
+          }}
           preview={previewFor(day.events[p.idx])}
           liveSpan={liveSpanFor(day.events[p.idx])}
           keyboardSelected={keyboardCursor
