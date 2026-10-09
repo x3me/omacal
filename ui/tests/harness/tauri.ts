@@ -72,6 +72,14 @@ export type Harness = {
   /** Make the next `update_event` reject — what a drag spec uses to prove a
    *  failed write is reported rather than silently swallowed. */
   failNextUpdate(message: string): void;
+  /** Park the next call to `cmd` until `releaseWrite` or `rejectWrite`: what a
+   *  pending-changes spec uses to look at the screen while Google has not
+   *  answered yet. */
+  holdNextWrite(cmd: 'update_event' | 'delete_event_cmd'): void;
+  /** Answer a parked write as the real command would. */
+  releaseWrite(): Promise<void>;
+  /** Fail a parked write with `message`. */
+  rejectWrite(message: string): Promise<void>;
   /** Make the next `create_event` reject — what the duplicate-create guard
    *  spec uses to stand in for "Google succeeded, the local half did not". */
   failNextCreate(message: string): void;
@@ -195,6 +203,9 @@ let holdSearchOnce = false;
 let holdSettingsOnce = false;
 let holdSyncOnce = false;
 let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = null;
+/** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
+let holdWriteOnce: 'update_event' | 'delete_event_cmd' | null = null;
+let parkedWrite: { resolve: () => void; reject: (message: string) => void } | null = null;
 type ResponseData = {week?: WeekPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
 let responseData: ResponseData = {};
 let parkedSettings: (() => void) | null = null;
@@ -319,6 +330,17 @@ const harness: Harness = {
     holdSettingsOnce = true;
   },
   holdNextSync() { holdSyncOnce = true; },
+  holdNextWrite(cmd) { holdWriteOnce = cmd; },
+  async releaseWrite() {
+    parkedWrite?.resolve();
+    parkedWrite = null;
+    await new Promise((r) => setTimeout(r, 50));
+  },
+  async rejectWrite(message) {
+    parkedWrite?.reject(message);
+    parkedWrite = null;
+    await new Promise((r) => setTimeout(r, 50));
+  },
   async releaseSync() {
     parkedSync?.resolve();
     parkedSync = null;
@@ -1341,6 +1363,13 @@ export function installTauriStub(scenario: string): Harness {
         }
         return CREATED_DETAIL;
       case 'update_event':
+        if (holdWriteOnce === 'update_event') {
+          holdWriteOnce = null;
+          const answer = POPOVER_DETAILS[args.id] ?? CREATED_DETAIL;
+          return new Promise((resolve, reject) => {
+            parkedWrite = { resolve: () => resolve(answer), reject: (m) => reject(new Error(m)) };
+          });
+        }
         if (failUpdateOnce !== null) {
           const m = failUpdateOnce;
           failUpdateOnce = null;
@@ -1351,6 +1380,12 @@ export function installTauriStub(scenario: string): Harness {
         // fixture is a truthful enough stand-in.
         return POPOVER_DETAILS[args.id] ?? CREATED_DETAIL;
       case 'delete_event_cmd':
+        if (holdWriteOnce === 'delete_event_cmd') {
+          holdWriteOnce = null;
+          return new Promise((resolve, reject) => {
+            parkedWrite = { resolve: () => resolve(null), reject: (m) => reject(new Error(m)) };
+          });
+        }
         // Returns nothing, exactly as the Rust command does: the event the
         // popover was showing is gone, and reading it back would fail on the
         // runs that succeeded.
