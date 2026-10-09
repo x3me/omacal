@@ -99,13 +99,16 @@ whether the detail `is_recurring`, its current `calendar_id`), the form's
   out. An all-day date change redraws its lane. Every redrawn copy is
   flagged `pending`. An edit with `when: null` redraws nothing (it only
   locks).
-- **Month (`overlayMonth`).** Timed chips move between cells as in part 1,
-  with `patch`. An all-day item is removed from its bars (a gap remains) or
-  added by **first fit**: the lowest lane in which its columns are free, if
-  below `lane_cap`; otherwise it is added to that row's `bar_overflow` for
-  each column it covers. Other bars never move.
+- **Month (`overlayMonth`).** A redrawn copy that fits within one day goes
+  to that day's cell, in time order, with `patch`. Anything else (all-day,
+  or crossing midnight) goes to the bars by **first fit**: the lowest lane in
+  which its columns are free, if below `lane_cap`; otherwise its index joins
+  that row's `bar_overflow` (the "+N more" list), once. A removed bar leaves
+  a gap; other bars never move. (This also settles part 1's deferred minor:
+  a meeting moved across midnight now keeps showing in Month.)
 - **Big Year (`overlayBigYear`).** The same first fit for pills, against the
-  payload's `lane_cap`.
+  payload's `lane_cap`. The ribbon carries no timed meetings, so a timed
+  meeting switched to all-day appears there when the save lands.
 - **The details card (`overlayDetail(detail, changes, occurrenceStartMs)`).**
   For an edit covering that occurrence: `title`, `location`, `calendar_id`,
   `description`, `is_all_day` (from `when`), `conference_uri: null` when the
