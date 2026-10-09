@@ -8,7 +8,7 @@
 
 import type { BigYearPayload, DayColumn, Lane, MonthPayload, UiEvent, WeekPayload } from './api';
 import type { Attendee, EventDetail } from './eventdetail';
-import type { Scope } from './eventform';
+import { dateOf, type Scope } from './eventform';
 import { layOutDay } from './daylayout';
 
 /** The values an edit redraws; an absent key leaves the payload's. */
@@ -86,13 +86,15 @@ function addDays(ms: number, days: number): number {
   return d.getTime();
 }
 
-/** Whether `ev` fits within the one local day it starts on: a cell's chip in
- *  Month, rather than a bar. */
-function fitsOneDay(ev: UiEvent): boolean {
-  if (ev.is_all_day) return false;
-  const d = new Date(ev.start_ms);
+/** The local midnight nearest `ms`. An all-day event is stored at midnight
+ *  in its *calendar's* zone and placed by its date (`commands::all_day_columns`),
+ *  so its instant can sit hours off the reader's midnight; within twelve hours
+ *  either side, the nearest one is the same date (`occurrenceDate`'s bound). */
+function nearestMidnight(ms: number): number {
+  const d = new Date(ms);
+  const pm = d.getHours() >= 12;
   d.setHours(0, 0, 0, 0);
-  return ev.end_ms <= addDays(d.getTime(), 1);
+  return pm ? addDays(d.getTime(), 1) : d.getTime();
 }
 
 /** What the changes do to one occurrence: hide it, and perhaps redraw it
@@ -118,8 +120,10 @@ function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean
     let start: number;
     let end: number;
     if (ev.is_all_day && w.allDay) {
-      // Whole days, so every occurrence of an all-day series keeps midnights.
-      start = addDays(ev.start_ms, Math.round((w.startMs - c.occurrenceStartMs) / DAY_MS));
+      // Whole days from the reader's own midnight, so every occurrence of an
+      // all-day series is drawn over its days and no more, whatever zone its
+      // calendar keeps; 'this' lands exactly on `w`, where `locks` looks.
+      start = addDays(nearestMidnight(ev.start_ms), Math.round((w.startMs - c.occurrenceStartMs) / DAY_MS));
       end = addDays(start, Math.round((w.endMs - w.startMs) / DAY_MS));
     } else if (ev.is_all_day === w.allDay) {
       start = ev.start_ms + (w.startMs - c.occurrenceStartMs);
@@ -250,9 +254,11 @@ export function overlayWeek(week: WeekPayload, changes: readonly PendingChange[]
 }
 
 /**
- * The month as the pending changes have left it. A redrawn copy that fits
- * within one day joins that day's cell, in time order; anything else (all-day,
- * or crossing midnight) joins the bars by first fit, so no other bar moves.
+ * The month as the pending changes have left it, by the rules
+ * `commands::assemble_month` draws it with. A redrawn timed copy is a line in
+ * the cell it starts in, in time order, and in the first cell of each later
+ * row it runs into (`timed_column`); an all-day one joins the bars by first
+ * fit, so no other bar moves.
  */
 export function overlayMonth(month: MonthPayload, changes: readonly PendingChange[]): MonthPayload {
   if (changes.length === 0) return month;
@@ -261,11 +267,13 @@ export function overlayMonth(month: MonthPayload, changes: readonly PendingChang
   const kept = month.rows.map((row) => row.cells.map((cell) => sift(cell.timed, changes, take)));
   const bars = month.rows.map((row) => relane(row.bars, row.bar_events, row.bar_overflow, changes, take));
   const arrivals = [...moved.values()];
-  const chips = arrivals.filter(fitsOneDay);
-  const spans = arrivals.filter((e) => !fitsOneDay(e));
+  const lines = arrivals.filter((e) => !e.is_all_day);
+  const spans = arrivals.filter((e) => e.is_all_day);
   const rows = month.rows.map((row, r) => {
+    const first = row.cells[0].start_ms;
     const cells = row.cells.map((cell, c) => {
-      const here = chips.filter((e) => e.start_ms >= cell.start_ms && e.start_ms < cell.end_ms);
+      const here = lines.filter((e) => (e.start_ms >= cell.start_ms && e.start_ms < cell.end_ms)
+        || (c === 0 && e.start_ms < first && e.end_ms > first));
       const k = kept[r][c];
       if (!k.changed && here.length === 0) return cell;
       return { ...cell, timed: [...k.out, ...here].sort(byStart) };
@@ -276,16 +284,17 @@ export function overlayMonth(month: MonthPayload, changes: readonly PendingChang
   return { ...month, rows };
 }
 
-/** The Big Year ribbon draws only all-day and multi-day spans. A pill that is
- *  deleted leaves; one that is moved or edited is placed again by first fit.
- *  The ribbon carries no timed meetings, so one switched to all-day appears
- *  when the save lands (part 2 spec §4). */
+/** The Big Year ribbon draws only all-day events (`commands::assemble_big_year`).
+ *  A pill that is deleted leaves; one that is moved or edited is placed again
+ *  by first fit, and one made timed leaves. The ribbon carries no timed
+ *  meetings, so one switched to all-day appears when the save lands (part 2
+ *  spec §4). */
 export function overlayBigYear(big: BigYearPayload, changes: readonly PendingChange[]): BigYearPayload {
   if (changes.length === 0) return big;
   const moved = new Map<string, UiEvent>();
   const take = (from: UiEvent, to: UiEvent) => { moved.set(`${from.id}:${from.start_ms}`, to); };
   const kept = big.rows.map((row) => relane(row.pills, row.pill_events, row.overflow, changes, take));
-  const spans = [...moved.values()].filter((e) => !fitsOneDay(e));
+  const spans = [...moved.values()].filter((e) => e.is_all_day);
   return {
     ...big,
     rows: big.rows.map((row, r) => {
@@ -326,6 +335,13 @@ export function overlayDetail(detail: EventDetail, changes: readonly PendingChan
       ...(c.detail.description !== undefined ? { description: c.detail.description } : {}),
       ...(c.detail.guests ? { attendees: rebuildGuests(out.attendees, c.detail.guests) } : {}),
       is_all_day: c.when.allDay,
+      // An all-day card reads its day off `start_date`, shifted by how far the
+      // clicked card sits from `start_ms` (`occurrenceDate`), and a timed
+      // detail carries neither: so both come from `when`, as one pair.
+      ...(c.when.allDay
+        ? { start_ms: c.when.startMs, end_ms: c.when.endMs,
+            start_date: dateOf(c.when.startMs), end_date: dateOf(addDays(c.when.endMs, -1)) }
+        : { start_date: null, end_date: null }),
     };
   }
   return out;

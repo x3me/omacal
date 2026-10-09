@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { PendingQueue, type Work } from '../src/lib/pendingqueue';
+import { PendingQueue, storeHoldsShift, type Work } from '../src/lib/pendingqueue';
 import type { PendingChange } from '../src/lib/pendingview';
 
 const move = (id: number, from = 100, to = 200): PendingChange =>
@@ -133,4 +133,44 @@ test('every change of state is announced', async () => {
   await q.commit(t, move(1), work(async () => {}));
   q.reconcile(q.checkpoint());
   expect(n).toBeGreaterThanOrEqual(4); // hold, commit, saved, reconcile
+});
+
+test('a write that says the store already holds it clears with a load begun after it, before its sync', async () => {
+  // `update_via_client` folds a patch of the row it loaded straight into the
+  // store: a load before the sync already draws the change, and a series shift
+  // drawn over it again would move every occurrence twice (part 2 review).
+  const q = new PendingQueue();
+  const s = gate();
+  let written!: () => void;
+  const wrote = new Promise<void>((r) => { written = r; });
+  const done = q.queue(move(1), work(async () => { written(); return true; }, { sync: () => s.promise }));
+  await wrote;
+  await new Promise((r) => setTimeout(r, 0));
+  q.reconcile(q.checkpoint()); // a load that began after the write, its sync still running
+  expect(q.changes()).toHaveLength(0);
+  s.resolve();
+  await done;
+});
+
+test('a write answering anything but true still waits for its sync', async () => {
+  const q = new PendingQueue();
+  const s = gate();
+  let written!: () => void;
+  const wrote = new Promise<void>((r) => { written = r; });
+  const done = q.queue(move(1), work(async () => { written(); return { start_ms: 1 }; }, { sync: () => s.promise }));
+  await wrote;
+  await new Promise((r) => setTimeout(r, 0));
+  q.reconcile(q.checkpoint());
+  expect(q.changes()).toHaveLength(1);
+  s.resolve();
+  await done;
+});
+
+test('the store holds a time change once the row an update answers with has moved', () => {
+  const before = { start_ms: 1_000, end_ms: 2_000 };
+  expect(storeHoldsShift(before, { start_ms: 4_600, end_ms: 5_600 })).toBe(true);
+  expect(storeHoldsShift(before, { start_ms: 1_000, end_ms: 3_000 })).toBe(true);
+  // "This occurrence" of a series: the backend patched a new instance and
+  // left the master's row, which is what it answers with, alone.
+  expect(storeHoldsShift(before, { start_ms: 1_000, end_ms: 2_000 })).toBe(false);
 });

@@ -20,13 +20,35 @@ export type Refresh = {
 
 export type Work = Refresh & {
   /** The write to Google. A rejection means nothing changed there: the change
-   *  is dropped from the screen and `onfailure` says why. */
+   *  is dropped from the screen and `onfailure` says why. Resolving to `true`
+   *  says the local store already holds the change (`storeHoldsShift`), so a
+   *  load that begins after the write may clear it without waiting for the
+   *  sync; anything else waits. */
   write: () => Promise<unknown>;
   onfailure: (error: unknown) => void;
   /** The sync after a successful write failed: Google has the change, so it
    *  stays drawn, and `resync` retries the sync later. */
   onsyncfailure: (error: unknown) => void;
 };
+
+/**
+ * Whether an update's answer shows the local store already holding its time
+ * change, so the write can say so (`Work.write` resolving `true`).
+ *
+ * `update_event` answers with the row it was asked about, read back after
+ * the write, and `update_via_client` folds the patched row straight in when
+ * the patch landed on that row: a one-off, or a whole series. For "this
+ * occurrence" of a series it patches a new instance and leaves the master's
+ * row alone, so the row has not moved and the sync must bring the change in.
+ * Only a time change needs this: a patch drawn over values the store already
+ * has draws the same thing, but a series shift drawn over a store that already
+ * shifted moves every occurrence twice (part 2 review).
+ */
+export function storeHoldsShift(
+  before: { start_ms: number; end_ms: number }, after: { start_ms: number; end_ms: number },
+): boolean {
+  return after.start_ms !== before.start_ms || after.end_ms !== before.end_ms;
+}
 
 /** `seq` is null while held (a question is open) and set once committed.
  *  `saved`: Google took the write. `synced`: a sync that began after the write
@@ -84,15 +106,16 @@ export class PendingQueue {
       : [...this.entries, { token, change, seq, saved: false, synced: false, syncFailed: false }];
     this.onchange();
     const done = this.tail.then(async () => {
+      let stored: boolean;
       try {
-        await work.write();
+        stored = (await work.write()) === true;
       } catch (error) {
         this.entries = this.entries.filter((e) => e.token !== token);
         this.onchange();
         work.onfailure(error);
         return;
       }
-      this.mark(token, { saved: true });
+      this.mark(token, stored ? { saved: true, synced: true } : { saved: true });
       try {
         await work.sync();
       } catch (error) {
@@ -112,7 +135,7 @@ export class PendingQueue {
   }
 
   /** Taken when a load begins: the highest change the local store already
-   *  holds — synced, not merely written. */
+   *  holds — synced, or written by a write that said the store took it. */
   checkpoint(): number {
     return Math.max(0, ...this.entries.filter((e) => e.synced).map((e) => e.seq ?? 0));
   }

@@ -76,8 +76,10 @@ export type Harness = {
    *  pending-changes spec uses to look at the screen while Google has not
    *  answered yet. */
   holdNextWrite(cmd: 'update_event' | 'delete_event_cmd'): void;
-  /** Answer a parked write as the real command would. */
-  releaseWrite(): Promise<void>;
+  /** Answer a parked write as the real command would; `answer` replaces the
+   *  detail it answers `update_event` with (the stored detail by default), for
+   *  a spec that needs the row as the write left it. */
+  releaseWrite(answer?: EventDetail): Promise<void>;
   /** Fail a parked write with `message`. */
   rejectWrite(message: string): Promise<void>;
   /** Make the next `create_event` reject — what the duplicate-create guard
@@ -205,8 +207,8 @@ let holdSyncOnce = false;
 let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = null;
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
 let holdWriteOnce: 'update_event' | 'delete_event_cmd' | null = null;
-let parkedWrite: { resolve: () => void; reject: (message: string) => void } | null = null;
-type ResponseData = {week?: WeekPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
+let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
+type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
 let responseData: ResponseData = {};
 let parkedSettings: (() => void) | null = null;
 let holdMenubarOnce: string | null = null;
@@ -331,8 +333,8 @@ const harness: Harness = {
   },
   holdNextSync() { holdSyncOnce = true; },
   holdNextWrite(cmd) { holdWriteOnce = cmd; },
-  async releaseWrite() {
-    parkedWrite?.resolve();
+  async releaseWrite(answer) {
+    parkedWrite?.resolve(answer);
     parkedWrite = null;
     await new Promise((r) => setTimeout(r, 50));
   },
@@ -618,7 +620,9 @@ function getDay(dayStartMs: number): WeekPayload {
  *  actually match the requested month (that's `assemble_month`'s own
  *  Rust-side coverage, and `MonthGrid`'s). */
 function getMonth(): MonthPayload {
-  return busyDayMonth();
+  // A spec that needs the App's own fixtures in Month sets its grid with
+  // `setResponseData({ month })`.
+  return structuredClone(responseData.month ?? busyDayMonth());
 }
 
 /** Year view's own `get_year` stub: twelve otherwise-empty months, echoing
@@ -1367,7 +1371,7 @@ export function installTauriStub(scenario: string): Harness {
           holdWriteOnce = null;
           const answer = POPOVER_DETAILS[args.id] ?? CREATED_DETAIL;
           return new Promise((resolve, reject) => {
-            parkedWrite = { resolve: () => resolve(answer), reject: (m) => reject(new Error(m)) };
+            parkedWrite = { resolve: (given) => resolve(given ?? answer), reject: (m) => reject(new Error(m)) };
           });
         }
         if (failUpdateOnce !== null) {

@@ -1,7 +1,7 @@
 <!-- ui/src/lib/WeekGrid.svelte -->
 <script lang="ts">
   import { pendingResponse } from './responses.svelte';
-  import { pendingChanges } from './pending.svelte';
+  import { pendingChanges, closeWhenEditClears } from './pending.svelte';
   import { overlayDetail } from './pendingview';
   import { visibleHours } from "./visiblehours.svelte";
   import { hideWeekends } from './hideweekends.svelte';
@@ -1402,6 +1402,7 @@
     anchor = null;
     detail = null;
   }
+  closeWhenEditClears(() => (detail && selectedStartMs !== null ? { detail, startMs: selectedStartMs } : null), closePopover);
 
   /**
    * The half hour a click landed in, in the day it landed on.

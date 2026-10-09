@@ -16,7 +16,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
-  APP_ALLDAY_ID, appWritableWeek, APP_ONE_OFF_ID, POPOVER_DETAILS,
+  APP_ALLDAY_ID, appWritableWeek, APP_ONE_OFF_ID, POPOVER_DETAILS, appJanuaryMonth,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -1865,6 +1865,145 @@ test.describe('App', () => {
         await expect(popover.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
         await page.keyboard.press('Escape');
         await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('the details card of a meeting just made all-day opens, without Edit', async ({ page }) => {
+        const errors: string[] = [];
+        page.on('pageerror', (e) => errors.push(e.message));
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('All day').check();
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await expect(chip(page, 'Board prep')).toHaveClass(/pending/);
+
+        await chip(page, 'Board prep').click();
+        const popover = page.getByRole('dialog', { name: 'Board prep' });
+        await expect(popover).toBeVisible();
+        await expect(popover.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+        expect(errors).toEqual([]);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('in Month, a meeting just made all-day is a bar whose details open', async ({ page }) => {
+        await writable(page);
+        await page.evaluate((m) => window.__harness.setResponseData({ month: m }), appJanuaryMonth());
+        await page.keyboard.press('3');
+        await expect(page.locator('.timed').filter({ hasText: 'Board prep' })).toBeVisible();
+        // Collected from here: the switch's own unmount trips the harness's
+        // missing event-plugin internals (`unregisterListener`), which is not
+        // what this spec is about.
+        const errors: string[] = [];
+        page.on('pageerror', (e) => errors.push(e.message));
+        await page.locator('.timed').filter({ hasText: 'Board prep' }).click();
+        await page.getByRole('dialog', { name: 'Board prep' }).getByRole('button', { name: 'Edit', exact: true }).click();
+        await expect(editForm(page)).toBeVisible();
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await editForm(page).getByLabel('All day').check();
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        const bar = page.locator('.bar').filter({ hasText: 'Board prep' });
+        await expect(bar).toHaveClass(/pending/);
+        await expect(page.locator('.timed').filter({ hasText: 'Board prep' })).toHaveCount(0);
+
+        await bar.click();
+        const popover = page.getByRole('dialog', { name: 'Board prep' });
+        await expect(popover).toBeVisible();
+        await expect(popover.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+        expect(errors).toEqual([]);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a details card left open closes when its save lands', async ({ page }) => {
+        // Its values were the save's, drawn over a detail fetched before it;
+        // once the save lands that detail is stale, and its Edit would write
+        // the old values back.
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await block(page, 'Board review').click();
+        await expect(page.getByRole('dialog', { name: 'Board review' })).toBeVisible();
+
+        await page.evaluate(() => window.__harness.releaseWrite());
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving' })).toHaveCount(0);
+        await expect(block(page, 'Board review')).toHaveCount(0); // landed and cleared
+        await expect(page.getByRole('dialog', { name: /Board/ })).toHaveCount(0);
+      });
+
+      test('in Month, a details card left open closes when its save lands', async ({ page }) => {
+        await writable(page);
+        await page.evaluate((m) => window.__harness.setResponseData({ month: m }), appJanuaryMonth());
+        await page.keyboard.press('3');
+        await page.locator('.timed').filter({ hasText: 'Board prep' }).click();
+        await page.getByRole('dialog', { name: 'Board prep' }).getByRole('button', { name: 'Edit', exact: true }).click();
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        const line = page.locator('.timed').filter({ hasText: 'Board review' });
+        await expect(line).toHaveClass(/pending/);
+        await line.click();
+        await expect(page.getByRole('dialog', { name: 'Board review' })).toBeVisible();
+
+        await page.evaluate(() => window.__harness.releaseWrite());
+        await expect(page.locator('.timed').filter({ hasText: 'Board review' })).toHaveCount(0); // landed and cleared
+        await expect(page.getByRole('dialog', { name: /Board/ })).toHaveCount(0);
+      });
+
+      test('an "All events" retime the store already holds clears with the next load', async ({ page }) => {
+        // `update_via_client` folds a patch of the series' own row straight
+        // into the store, so a load before the sync already draws the series
+        // moved; drawing the shift over it again would move it twice (part 2
+        // review). The harness's week does not move, so "cleared" is the proof.
+        await writable(page);
+        await page.evaluate(() => { window.__harness.holdNextWrite('update_event'); window.__harness.holdNextSync(); });
+        await block(page, 'Gym').first().click();
+        await page.getByRole('button', { name: 'Edit', exact: true }).click();
+        await expect(editForm(page)).toBeVisible();
+        const start = editForm(page).getByLabel('Start', { exact: true });
+        const [h, m] = (await start.inputValue()).split(':').map(Number);
+        const hhmm = (hh: number) => `${String(hh).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        await start.fill(hhmm(h + 1));
+        await start.press('Tab');
+        const end = editForm(page).getByLabel('End', { exact: true });
+        const [eh, em] = (await end.inputValue()).split(':').map(Number);
+        await end.fill(`${String(eh + 1).padStart(2, '0')}:${String(em).padStart(2, '0')}`);
+        await end.press('Tab');
+        await editForm(page).getByRole('radio', { name: 'All events' }).check();
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await expect(block(page, 'Gym').first()).toHaveClass(/pending/);
+
+        const d = POPOVER_DETAILS[APP_SOLO_SERIES_ID];
+        await page.evaluate((moved) => window.__harness.releaseWrite(moved),
+          { ...d, start_ms: d.start_ms + 3_600_000, end_ms: d.end_ms + 3_600_000 });
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync held
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await expect(block(page, 'Gym').first()).toBeVisible();
+        await expect(block(page, 'Gym').first()).not.toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      test('an "All events" drop the store already holds clears with the next load', async ({ page }) => {
+        // The drag's write reads the same answer as the form's Save.
+        await writable(page);
+        await page.evaluate(() => { window.__harness.holdNextWrite('update_event'); window.__harness.holdNextSync(); });
+        await dragBy(page, 'Gym', 60);
+        await movePanel(page).getByRole('radio', { name: 'All events' }).check();
+        await movePanel(page).getByRole('button', { name: 'Move', exact: true }).click();
+        await expect(block(page, 'Gym').first()).toHaveClass(/pending/);
+
+        const d = POPOVER_DETAILS[APP_SOLO_SERIES_ID];
+        await page.evaluate((moved) => window.__harness.releaseWrite(moved),
+          { ...d, start_ms: d.start_ms + 3_600_000, end_ms: d.end_ms + 3_600_000 });
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync held
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await expect(block(page, 'Gym').first()).toBeVisible();
+        await expect(block(page, 'Gym').first()).not.toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseSync());
       });
 
       test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {

@@ -3,9 +3,10 @@
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import {
     pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
-    queueChange, isPending, resyncPending,
+    queueChange, isPending, resyncPending, closeWhenEditClears,
   } from './lib/pending.svelte';
   import { overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type PendingChange } from './lib/pendingview';
+  import { storeHoldsShift } from './lib/pendingqueue';
   import { editChange } from './lib/pendingedit';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
@@ -1513,6 +1514,7 @@
     gridAnchor = null;
     gridDetail = null;
   }
+  closeWhenEditClears(() => (gridDetail && gridSelStart !== null ? { detail: gridDetail, startMs: gridSelStart } : null), closeGridEvent);
 
   // --- Creating, editing and deleting --------------------------------------
   //
@@ -1563,6 +1565,10 @@
         /** For the pending edit (part 2 spec §3): whether all-day switched on
          *  a series can be drawn, or waits for the save. */
         isRecurring: boolean;
+        /** The row's own times as the form opened (the master's, for a
+         *  series), to tell from the write's answer whether the store already
+         *  took the change (`storeHoldsShift`). */
+        rowTimes: { start_ms: number; end_ms: number };
       };
 
   let form = $state<FormRequest | null>(null);
@@ -1777,6 +1783,7 @@
       id: occurrence.detail.id,
       occurrenceStartMs: occurrence.startMs,
       isRecurring: occurrence.detail.is_recurring,
+      rowTimes: { start_ms: occurrence.detail.start_ms, end_ms: occurrence.detail.end_ms },
       initial: valueFromDetail(occurrence.detail, occurrence.startMs, occurrence.endMs),
     };
   }
@@ -1909,10 +1916,13 @@
           // `result.calendarId` is the picker's value, sent on every save: the
           // backend reads "the calendar it is already on" as no move at all, so
           // there is nothing here to decide about whether it changed.
-          write: () => updateEvent(
+          //
+          // The answer is the row read back after the write: when its times
+          // moved, the store already holds the change (`storeHoldsShift`).
+          write: async () => storeHoldsShift(request.rowTimes, await updateEvent(
             request.id, result.scope, request.occurrenceStartMs, result.fields, result.notify,
             result.calendarId,
-          ),
+          )),
           ...queuedRefresh,
           onfailure: (e) => { error = `Could not save “${title}”: ${String(e)}`; },
         },
@@ -2069,13 +2079,15 @@
           start: timeOf(span.startMs),
           end: timeOf(span.endMs),
         };
-        await updateEvent(
+        // The same answer the form's Save reads (`storeHoldsShift`): an
+        // "all events" drop the store already took is not shifted twice.
+        return storeHoldsShift(detail, await updateEvent(
           event.id,
           choice.scope,
           event.start_ms,
           toEventInput(moved, value, zoneName()),
           choice.sendUpdates,
-        );
+        ));
       },
       ...queuedRefresh,
       // The drop is undone on screen the moment Google refuses it, and says

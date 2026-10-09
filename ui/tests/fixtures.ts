@@ -1714,6 +1714,16 @@ const APP_GUESTS_BLOCK: UiEvent = ev({
   id: APP_GUESTS_ID, title: 'Client call',
   start_ms: APP_GUESTS_START, end_ms: APP_GUESTS_START + 30 * 60_000,
 });
+
+/** January 2024 as Month view draws it, carrying 'Board prep' on Mon 29 Jan
+ *  (row 4, the first cell) — what an App spec sets with
+ *  `setResponseData({ month })` to reach App's own details card for the
+ *  meeting the Week specs edit. The harness's default Month is August 2026. */
+export const appJanuaryMonth = (): MonthPayload => {
+  const m = emptyMonth(2024, 1, Date.UTC(2024, 0, 1), Date.UTC(2024, 0, 1), Date.UTC(2024, 1, 1));
+  m.rows[4].cells[0].timed = [{ ...APP_ONE_OFF_BLOCK }];
+  return m;
+};
 const APP_SOLO_SERIES_BLOCK: UiEvent = ev({
   id: APP_SOLO_SERIES_ID, title: 'Gym',
   start_ms: APP_SOLO_SERIES_START, end_ms: APP_SOLO_SERIES_START + 45 * 60_000,
