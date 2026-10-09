@@ -29,6 +29,10 @@ export type UiEvent = {
   all_guests_declined: boolean;
   /** All underlying occurrences when several calendars share this display. */
   copies?: EventCopy[];
+  /** Drawn where a change the user just made puts it, while that change is
+   *  still being written (`pendingview.ts`). Set by the UI only; the backend
+   *  never sends it. */
+  pending?: boolean;
 };
 
 /** Opens an event's meeting link in the system browser, backend-side. The
