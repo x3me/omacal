@@ -24,7 +24,7 @@ import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
   labelledWeek, weekLabel, APP_FIVE_MIN_AGO, APP_NOW, APP_SERIES_ID, APP_SERIES_OCCURRENCE,
-  LOCAL_TASK_LIST, TASK_LISTS, TASKS, TIMED_TASK, DONE_HISTORY, IMPORT_PLANS,
+  LOCAL_TASK_LIST, TASK_LISTS, TASKS, VISIBILITY_TASKS, TIMED_TASK, DONE_HISTORY, IMPORT_PLANS,
   APP_ONE_OFF_ID, APP_ONE_OFF_START, APP_GUESTS_ID, APP_SOLO_SERIES_ID,
   POPOVER_DETAILS, busyDayMonth,
   appWritableWeek, APP_WRITE_CALENDARS, APP_WEATHER, CREATED_DETAIL, crossZoneWeek,
@@ -928,11 +928,16 @@ export function installTauriStub(scenario: string): Harness {
   preferencesPending = scenario === 'launched-with-preferences';
   // The default week, with a task due at an hour beside its one meeting.
   if (scenario === 'timed-task') taskRows = [...TASKS, TIMED_TASK];
+  if (scenario === 'task-visibility') taskRows = [...VISIBILITY_TASKS];
   // Reassigned by `sign_in` for the `sign-in-adds-account` scenario: a real
   // `sign_in` leaves the account durably connected, so the next `get_status`
   // must reflect it too, not just `get_calendars`.
   let status = statusFor(scenario);
   let signedIn = false;
+  /** The `task-visibility` scenario's calendars, whose `selected` flags
+   *  `set_calendar_selected` moves, so that `list_tasks` can answer as the
+   *  backend does. */
+  const visibilityCalendars: Calendar[] = structuredClone(APP_WRITE_CALENDARS);
   let cancelPendingSignIn: ((reason: string) => void) | undefined;
   /** Whether `take_open_date` has answered — the real command clears on
    *  read, and a stub that kept answering would hide a remount replaying
@@ -1074,6 +1079,8 @@ export function installTauriStub(scenario: string): Harness {
         // from and Save refuses, so the edit half of its agreement spec could
         // never run.
         if (scenario === 'writable' || scenario === 'cross-zone') return APP_WRITE_CALENDARS;
+        // Stateful, so a spec can hide a calendar and see what is drawn after.
+        if (scenario === 'task-visibility') return structuredClone(visibilityCalendars);
         return scenario === 'sign-in-adds-account' && signedIn
           ? SIGNED_IN_CALENDARS
           : ([] as Calendar[]);
@@ -1259,6 +1266,10 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_calendar_color':
         return calendarResult(cmd, undefined);
       case 'set_calendar_selected':
+        if (scenario === 'task-visibility') {
+          const c = visibilityCalendars.find((c) => c.id === args.id);
+          if (c) c.selected = Boolean(args.on);
+        }
         return calendarResult(cmd, undefined);
       case 'set_calendar_sync':
         return calendarResult(cmd, CALENDAR_SYNC_REMOVED);
@@ -1431,6 +1442,11 @@ export function installTauriStub(scenario: string): Harness {
       case 'run_ics_import':
         return { imported: 2, skipped: IMPORT_PLANS.mixed.filter((p) => p.kind === 'skip'), failed: [] };
       case 'list_tasks':
+        // Like `tasks_for_ui`, which joins on `c.selected = 1`: in this
+        // scenario a task on a hidden calendar is not in the answer.
+        if (scenario === 'task-visibility') {
+          return taskRows.filter((t) => visibilityCalendars.find((c) => c.id === t.calendarId)?.selected);
+        }
         return taskRows;
       case 'task_lists':
         return taskLists;
