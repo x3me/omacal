@@ -26,11 +26,10 @@ gets its own spec and plan; they share the store and the overlay below.
 
 ## 2. Behaviour
 
-1. **A drop holds.** A dragged meeting stays where it was dropped, drawn
-   faded with a dashed outline. The header shows "Saving N", the count the
-   invitation queue already shows, now covering both kinds. When the save
-   lands the outline goes and the card takes its proper lane beside any
-   overlapping meeting.
+1. **A drop holds.** A dragged meeting stays where it was dropped, in its
+   proper lane beside any overlapping meeting, drawn faded with a dashed
+   outline. The header shows "Saving N change(s)…" beside the invitation
+   queue's own "Saving N responses…". When the save lands the outline goes.
 2. **A delete hides at once**, wherever it was made: Day/Week, Month, list
    mode, the popover, the keyboard.
 3. **A failure undoes itself visibly.** The card returns to its old place, or
@@ -38,12 +37,14 @@ gets its own spec and plan; they share the store and the overlay below.
 4. **A drop that asks first holds while it asks.** A meeting with guests to
    notify, or a repeating one (this event or all), shows at the drop point
    while `MoveConfirm` is open. Cancel puts it back; the answer starts the
-   save. Delete's scope prompt behaves the same way.
+   save. A delete is different: `DeleteConfirm` is anchored to the card, so
+   the card stays until the deletion is confirmed, then hides at once.
 5. **"All events" shifts every visible occurrence** of the series by the
    dragged occurrence's delta. An exception already moved separately in
    Google updates when the save lands.
-6. **A pending card is not draggable, and cannot be deleted again**, until
-   its save lands (a few seconds). Every other meeting stays fully usable.
+6. **A pending card cannot be dragged, edited or deleted again** until its
+   save lands (a few seconds): its popover offers no Edit or Delete, and the
+   keyboard's do nothing. Every other meeting stays fully usable.
    Several changes can be pending at once; they are written to Google one at
    a time, in the order made.
 7. **Navigating away and back** (another week, Month, list mode) keeps the
@@ -54,6 +55,11 @@ gets its own spec and plan; they share the store and the overlay below.
 
 Moves exist only for timed events in Day and Week (the all-day band is not
 draggable), so pending moves are timed-only. Deletes can be anything.
+
+Three rare cases keep today's behaviour (the change shows when the save
+lands): a block that combines several calendars' copies of one meeting (the
+opt-in setting), a timed meeting crossing midnight when seen in Month view,
+and Year view's day marks. Big Year hides a deleted all-day pill at once.
 
 ## 3. Approach: draw over the payload
 
@@ -68,15 +74,21 @@ Three were weighed (2026-10-09, Plamen chose A):
 - C. Patch the payload in the UI and re-run the lane packing there. A second
   copy of `omacal-core`'s layout, which drifts.
 
-**A's one cost:** while pending, a moved timed card is drawn full column
-width on top, not packed beside an overlapping meeting. It is packed when
-the save lands. The drag preview looks the same way today.
+**A's cost turned out not to exist.** `ui/src/lib/daylayout.ts` is a port of
+`omacal_core::lay_out_day`, held to the Rust function's own golden file by
+`daylayout.spec.ts` (it lays out task pins among meetings). So a day that
+gains or loses a pending card is re-laid out with it, and the card sits in
+its proper lane at once. That removes C's objection too: the layout copy
+already exists and cannot drift.
 
 ## 4. Structure
 
-### `ui/src/lib/pending.svelte.ts` — the store
+### `ui/src/lib/pendingqueue.ts` + `pending.svelte.ts` — the store
 
-The invitation queue (`responses.svelte.ts`) is the model, deliberately.
+The invitation queue (`responses.svelte.ts`) is the model, deliberately. The
+logic is a plain class, `PendingQueue`, in `pendingqueue.ts`, because the
+repo's unit specs run in Node and cannot import a `.svelte.ts` rune file
+(`eventform.ts`'s reason). `pending.svelte.ts` is a thin reactive wrapper.
 
 - A **job** is `{ seq, kind: 'move' | 'delete', target, saved }`, where the
   target names the occurrence (`id`, `occurrenceStartMs`, `scope`) and a
@@ -102,11 +114,11 @@ The invitation queue (`responses.svelte.ts`) is the model, deliberately.
 
 No DOM, no store import; specs drive them directly.
 
-- `overlayWeek(week, changes) → { week, ghosts }`: removes hidden occurrences
-  from `days[].events`, remaps each `placed` entry's `idx` (dropping the
-  hidden ones, so the remaining events keep their lanes), does the same for
-  `all_day`/`all_day_events`, and returns moved cards as
-  `ghosts: { event, startMs, endMs }[]`.
+- `overlayWeek(week, changes) → week`: removes hidden and moved occurrences
+  from `days[].events`, adds each moved occurrence (flagged `pending`) to
+  every day its new span touches, and re-runs `layOutDay` for each day that
+  changed. All-day lanes (`all_day`/`all_day_events`) only ever lose deleted
+  items, with `idx` remapped.
 - `overlayMonth(month, changes) → month`: removes hidden chips from cells and
   `bar_events`/`bars`, and puts a moved timed occurrence's chip into its new
   cell in time order, flagged `pending`.
@@ -120,14 +132,14 @@ No DOM, no store import; specs drive them directly.
   the no-dialog path queues at once; `MoveConfirm`'s confirm queues and its
   cancel releases. `commitMove`'s body becomes the job's write, and
   `runDelete` queues the same way. Neither sets `busy` any more. App derives
-  overlaid payloads and passes them to `WeekGrid`, `MonthGrid` and list mode,
-  plus `ghosts` to `WeekGrid`.
-- **WeekGrid** draws `ghosts` with the form preview's geometry (full column
-  width, `crop`-aware), class `pending`: faded, dashed outline, no pointer
-  events, so not draggable.
-- **Popover and keyboard:** Delete is unavailable for an occurrence where
-  `isPending` is true.
-- **Header:** "Saving N" counts `pendingResponseCount() + pendingChangeCount()`.
+  overlaid payloads and passes them to `WeekGrid`, `MonthGrid` and list mode.
+- **WeekGrid/EventBlock** draw a `pending` event as a normal block with
+  class `pending` (faded, dashed outline, no resize grips) and ignore a grab
+  or a right-click edit on it. **MonthGrid** marks a pending chip the same way.
+- **Popover and keyboard:** Edit and Delete are unavailable where `isPending`
+  is true (`openEdit`/`askDelete` refuse too, which covers the keys).
+- **Header:** a second status, "Saving N change(s)…", from
+  `pendingChangeCount()`, beside the responses one.
 
 ## 5. Testing
 
@@ -139,7 +151,7 @@ No DOM, no store import; specs drive them directly.
 - **Playwright (`app.spec.ts`)**: the harness gains a hold for
   `update_event` and `delete_event_cmd` (beside `holdSyncOnce`). With it:
   the dropped card sits at its new place, dashed, before the write
-  resolves, and "Saving 1" shows; a rejected write puts it back with the
+  resolves, and "Saving 1 change" shows; a rejected write puts it back with the
   error; Cancel on `MoveConfirm` puts it back; a delete hides at once and a
   failed one brings it back; a pending card survives a week step and back;
   a pending card does not start a drag.
