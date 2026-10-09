@@ -193,6 +193,7 @@
               style:color={ev.copies?.length ? "var(--text)" : undefined}
               class:cl={lane.cont_left}
               class:cr={lane.cont_right}
+              class:pending={ev.pending}
               class:lit={isLit(ev)}
               onmouseenter={() => { hoverId = ev.id; hoverStart = ev.start_ms; }}
               onmouseleave={() => { hoverId = null; hoverStart = null; }}
@@ -418,6 +419,8 @@
           border-radius: var(--event-pill-radius, 999px); padding: 0 5px; white-space: nowrap;
           overflow: hidden; text-overflow: ellipsis; margin: 0 1px;
           --event-fill: var(--cal); background: var(--cal); color: var(--ink); }
+  /* Saving (pending-changes spec): faded and dashed until Google confirms. */
+  .pill.pending { opacity: .62; outline: 1.5px dashed var(--cal); outline-offset: -1.5px; }
   :global(:root[data-event-transparency]) .pill {
     background: color-mix(
       in srgb,

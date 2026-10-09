@@ -136,6 +136,7 @@
             style:color={ev.copies?.length ? "var(--text)" : undefined}
             class:cl={lane.cont_left}
             class:cr={lane.cont_right}
+            class:pending={ev.pending}
             class:keyboard={keyboardSelected}
             data-kbd-selected-event={keyboardSelected ? '' : undefined}
             style="
@@ -237,6 +238,8 @@
          --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
          background: color-mix(in srgb, var(--cal) 16%, transparent);
          color: color-mix(in srgb, var(--cal) 60%, var(--text)); }
+  /* Saving (pending-changes spec): faded and dashed until Google confirms. */
+  .bar.pending { opacity: .62; outline: 1.5px dashed var(--cal); outline-offset: -1.5px; }
   :global(:root[data-event-transparency]) .bar {
     background: color-mix(
       in srgb,
