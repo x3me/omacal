@@ -1054,9 +1054,13 @@
   .pchip { flex: 0 0 auto; font-size: 10px; font-weight: 600; line-height: 1;
            padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
            white-space: nowrap; }
-  .pchip.high { color: var(--error); }
-  .pchip.medium { color: var(--accent); }
-  .pchip.low { color: var(--muted); }
+  /* Red, amber and blue (`setPalette`), not the accent: the accent is a
+     theme's choice and Daylight's is red. High is filled, so the three also
+     differ in shape for anyone who cannot tell the hues apart. */
+  .pchip.high { color: var(--prio-high-ink); background: var(--prio-high);
+                border-color: var(--prio-high); }
+  .pchip.medium { color: var(--prio-medium); }
+  .pchip.low { color: var(--prio-low); }
   .due { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
          white-space: nowrap; }
   .due.overdue { color: var(--error); }

@@ -116,6 +116,21 @@ export function setPalette(p: Palette): void {
    *  is neither an error nor a clock. */
   r.setProperty('--demo', '#e2a03f');
 
+  // A task's priority chip in the Tasks pane. Three hues of its own that
+  // branch on `is_dark` like `--sync-ok`, not borrowed from `--error` and
+  // `--accent`: the accent is whatever the theme chose (Daylight's is red, and
+  // so is `--error`, 1.34:1 apart), so High and Medium used to be the same
+  // colour in any theme with a red accent. Red, amber and blue stay apart on
+  // any accent. The chip is 10px text, so each clears 4.5:1 on every built-in
+  // `bg` and `surface` (4.59:1 at the lowest, light Medium on Latte's
+  // surface) and the CIE76 distance between High and Medium is 47 light, 58
+  // dark. High is drawn filled, so the level also reads without hue, and
+  // `--prio-high-ink` is the text on that fill (6.1:1 light, 6.5:1 dark).
+  r.setProperty('--prio-high', p.is_dark ? '#ff6b6b' : '#c4122b');
+  r.setProperty('--prio-high-ink', p.is_dark ? '#14161a' : '#ffffff');
+  r.setProperty('--prio-medium', p.is_dark ? '#f2b84b' : '#9a5a00');
+  r.setProperty('--prio-low', p.is_dark ? '#7fb0ff' : '#1f5fc4');
+
   // The two quiet states of the header's status light. Its two loud ones
   // already have variables — `--accent` while a sync is running, `--error`
   // when one failed — and adding hues for these would be adding colour to say

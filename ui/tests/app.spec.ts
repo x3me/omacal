@@ -7208,6 +7208,79 @@ test.describe('the tasks sidebar', () => {
     await expect(side.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
   });
 
+  /** High, Medium and Low must be told apart in any theme. They used to be the
+   *  error red, the theme's accent and the muted grey, so Daylight (red accent)
+   *  drew High and Medium nearly alike. The mark is the text colour for an
+   *  outlined chip and the fill for High's solid one; the text on that fill is
+   *  held to the same 4.5:1 as the others (10px text). */
+  test('the three priority levels are told apart in a light and a dark theme', async ({ page }) => {
+    const side = await openTasks(page);
+    for (const [task, level] of [['Buy milk', 'High'], ['Ship the release', 'Medium'], ['Answer the issue', 'Low']]) {
+      await side.getByRole('button', { name: task, exact: true }).click();
+      await side.getByRole('combobox', { name: 'Priority' }).click();
+      await side.getByRole('option', { name: level }).click();
+      await side.getByRole('button', { name: 'Save' }).click();
+      await expect(side.locator('.pchip', { hasText: new RegExp(`^${level}$`) })).toHaveCount(1);
+    }
+    const themes = {
+      daylight: { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+                  accent: '#d32f3a', is_dark: false,
+                  style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                           today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      latte: { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false },
+      // A dark theme with the same red accent: the accent must not matter.
+      redDark: { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#ff5555', is_dark: true },
+    };
+    for (const [name, palette] of Object.entries(themes)) {
+      await page.evaluate((p) => window.__harness.emit('theme-changed', p), palette);
+      const marks = await side.evaluate((el, bgs) => {
+        const rgb = (c: string) => c.startsWith('#')
+          ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16))
+          : (c.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        const lum = (c: number[]) => {
+          const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a: number[], b: number[]) => {
+          const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        return ['High', 'Medium', 'Low'].map((level) => {
+          const cs = getComputedStyle(el.querySelector(`.pchip.${level.toLowerCase()}`)!);
+          const text = rgb(cs.color), fill = rgb(cs.backgroundColor);
+          const solid = cs.backgroundColor !== 'rgba(0, 0, 0, 0)';
+          return {
+            level, solid, mark: solid ? fill : text,
+            // Text against what is behind it: the fill, or each theme background.
+            text: solid ? ratio(text, fill) : Math.min(...bgs.map((b) => ratio(text, rgb(b)))),
+            mark_vs_bg: Math.min(...bgs.map((b) => ratio(solid ? fill : text, rgb(b)))),
+          };
+        });
+      }, [palette.bg, palette.surface]);
+      const [hi, med, lo] = marks;
+      expect(hi.solid, `${name}: High is the filled one`).toBe(true);
+      expect(med.solid || lo.solid, `${name}: Medium and Low are outlined`).toBe(false);
+      for (const m of marks) {
+        expect(m.text, `${name}: ${m.level} text`).toBeGreaterThanOrEqual(4.5);
+        expect(m.mark_vs_bg, `${name}: ${m.level} mark`).toBeGreaterThanOrEqual(3);
+      }
+      // Pairwise apart as the eye reads colour (CIE76 distance in Lab), which
+      // a channel difference does not: dark red and dark orange are close in RGB.
+      const lab = (c: number[]) => {
+        const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+        const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+        const x = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+        const y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+        const z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+        return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+      };
+      const apart = (a: number[], b: number[]) => Math.hypot(...lab(a).map((v, i) => v - lab(b)[i]));
+      expect(apart(hi.mark, med.mark), `${name}: High vs Medium`).toBeGreaterThan(40);
+      expect(apart(med.mark, lo.mark), `${name}: Medium vs Low`).toBeGreaterThan(40);
+      expect(apart(hi.mark, lo.mark), `${name}: High vs Low`).toBeGreaterThan(40);
+    }
+  });
+
   /** The chip must not make the pane scroll sideways, however long the title
    *  — the row keeps `flex: 1; min-width: 0` so the title ellipsises instead. */
   test('a priority chip never widens the pane', async ({ page }) => {
