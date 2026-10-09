@@ -928,6 +928,12 @@ export function installTauriStub(scenario: string): Harness {
   preferencesPending = scenario === 'launched-with-preferences';
   // The default week, with a task due at an hour beside its one meeting.
   if (scenario === 'timed-task') taskRows = [...TASKS, TIMED_TASK];
+  // Task lists from a CalDAV server that publishes no colour: `color_hex`
+  // null on the calendar, the list and every task.
+  if (scenario === 'uncoloured-lists') {
+    taskLists = TASK_LISTS.map((l) => ({ ...l, color: null }));
+    taskRows = TASKS.map((t) => ({ ...t, color: null }));
+  }
   // Reassigned by `sign_in` for the `sign-in-adds-account` scenario: a real
   // `sign_in` leaves the account durably connected, so the next `get_status`
   // must reflect it too, not just `get_calendars`.
@@ -1074,6 +1080,13 @@ export function installTauriStub(scenario: string): Harness {
         // from and Save refuses, so the edit half of its agreement spec could
         // never run.
         if (scenario === 'writable' || scenario === 'cross-zone') return APP_WRITE_CALENDARS;
+        if (scenario === 'uncoloured-lists') {
+          return [
+            { ...APP_WRITE_CALENDARS[2], id: 1, summary: 'Personal', provider: 'caldav', color_hex: null },
+            { ...APP_WRITE_CALENDARS[2], id: 2, summary: 'Work', provider: 'caldav', color_hex: null,
+              is_primary: false },
+          ] as Calendar[];
+        }
         return scenario === 'sign-in-adds-account' && signedIn
           ? SIGNED_IN_CALENDARS
           : ([] as Calendar[]);

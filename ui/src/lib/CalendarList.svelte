@@ -2,7 +2,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import {
-    byAccount, setCalendarLabel, setCalendarColor, setCalendarSelected, setCalendarSync, type Calendar,
+    byAccount, calendarInk, setCalendarLabel, setCalendarColor, setCalendarSelected, setCalendarSync, type Calendar,
   } from './calendars';
   import { CALENDAR_COLOURS } from './theme';
 
@@ -173,7 +173,7 @@
             disabled={!c.sync_enabled || busy.has(c.id)}
             onchange={(e) => toggleShown(c, e)}
           />
-          <span class="dot" aria-hidden="true" style="background:{c.color_hex ?? 'var(--accent)'}"></span>
+          <span class="dot" aria-hidden="true" style="background:{calendarInk(c.color_hex)}"></span>
           <span class="name" title={c.summary}>{c.summary}</span>
         </label>
         <button class="label-button" type="button" disabled={busy.has(c.id)} aria-label="Label for {c.summary}"
@@ -185,7 +185,7 @@
           aria-label="Colour for {c.summary}"
           aria-expanded={picking === c.id}
           disabled={busy.has(c.id)}
-          style="background:{c.color_hex ?? 'var(--accent)'}"
+          style="background:{calendarInk(c.color_hex)}"
           onclick={() => (picking = picking === c.id ? null : c.id)}
         ></button>
         <button

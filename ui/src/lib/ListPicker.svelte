@@ -7,6 +7,7 @@
 
 <script lang="ts">
   import { dropdown } from './dropdown';
+  import { calendarInk } from './calendars';
 
   /** A task list, chosen the way the rest of the app chooses things.
    *
@@ -91,7 +92,7 @@
 {#snippet dot(c: ListChoice | null)}
   <!-- "No list in particular" is a ring rather than a colour: it is every
        list, not one of them. -->
-  <i class="dot" class:any={c?.id === null} style:background={c && c.id !== null ? (c.color ?? 'var(--muted)') : null}></i>
+  <i class="dot" class:any={c?.id === null} style:background={c && c.id !== null ? calendarInk(c.color) : null}></i>
 {/snippet}
 
 <span class="picker" class:open class:compact class:dotonly={dotOnly} bind:this={field}>

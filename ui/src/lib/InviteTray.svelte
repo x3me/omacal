@@ -7,6 +7,7 @@
   import { clockFormat } from './clock.svelte';
   import { formatClock } from './timefmt';
   import { escapeCloses } from './dismiss.svelte';
+  import { calendarInk } from './calendars';
   import {
     dismissAllChangeNotices, dismissAllDeclineNotices,
     dismissChangeNotice, dismissDeclineNotice,
@@ -252,7 +253,7 @@
       <div class="panel" class:alignleft={alignLeft} role="group" aria-label="Pending invitations">
         {#each shownInvites as inv (inv.id)}
           <div class="row" data-testid="invite-row">
-            <span class="tick" style:background={inv.color ?? 'var(--muted)'}></span>
+            <span class="tick" style:background={calendarInk(inv.color)}></span>
             <div class="text">
               <span class="title">{inv.title ?? '(no title)'}</span>
               <span class="meta">{when(inv)}</span>
@@ -291,7 +292,7 @@
         {/if}
         {#each shownDeclines as d (ackKey(d))}
           <div class="row" data-testid="decline-row">
-            <span class="tick" style:background={d.color ?? 'var(--muted)'}></span>
+            <span class="tick" style:background={calendarInk(d.color)}></span>
             <div class="text">
               <span class="title">{d.display_name ?? d.email} declined</span>
               <span class="meta">{d.title ?? '(no title)'}</span>
@@ -316,7 +317,7 @@
         {/if}
         {#each shownMoved as c (changeKey(c))}
           <div class="row" data-testid="moved-row">
-            <span class="tick" style:background={c.color ?? 'var(--muted)'}></span>
+            <span class="tick" style:background={calendarInk(c.color)}></span>
             <div class="text">
               <span class="title">{c.title ?? '(no title)'}</span>
               <span class="meta">
@@ -361,7 +362,7 @@
         {/if}
         {#each shownCancelled as c (changeKey(c))}
           <div class="row" data-testid="cancelled-row">
-            <span class="tick" style:background={c.color ?? 'var(--muted)'}></span>
+            <span class="tick" style:background={calendarInk(c.color)}></span>
             <div class="text">
               <span class="title">{c.title ?? '(no title)'}</span>
               <span class="meta">was {slot(c.old_start_date, c.old_start_ms, c.is_all_day)}</span>

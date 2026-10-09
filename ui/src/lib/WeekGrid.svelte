@@ -24,7 +24,7 @@
     settleTarget, skipWeekendStart, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { DayColumn, Lane, Placed, WeekPayload, UiEvent } from './api';
-  import type { Calendar } from './calendars';
+  import { calendarInk, type Calendar } from './calendars';
   import { containsPlacement } from './combined';
   import type { Rect } from './position';
   import EventBlock from './EventBlock.svelte';
@@ -2057,7 +2057,7 @@
                || (paneLanding?.allDay === true && paneLanding.dayStartMs === d.start_ms)}>
           {#each rowTasksFor(d) as chip (chip.id)}
             {#if !inFlight(chip)}
-              <div class="tchip" class:over={chip.overdue} style:--cal={chip.color ?? 'var(--muted)'}>
+              <div class="tchip" class:over={chip.overdue} style:--cal={calendarInk(chip.color)}>
                 <input
                   type="checkbox"
                   checked={false}
@@ -2076,13 +2076,13 @@
           <!-- The chip in flight, drawn in the column it would land in. -->
           {#if taskDropMs === d.start_ms && taskDrag?.moving}
             <div class="tchip landing" class:over={taskDrag.chip.overdue}
-                 style:--cal={taskDrag.chip.color ?? 'var(--muted)'}>
+                 style:--cal={calendarInk(taskDrag.chip.color)}>
               <span class="tt">{taskDrag.chip.summary}</span>
             </div>
           {/if}
           <!-- A task from the Tasks pane, landing on this day with no hour. -->
           {#if paneLanding?.allDay && paneLanding.dayStartMs === d.start_ms}
-            <div class="tchip landing" style:--cal={carried()?.color ?? 'var(--muted)'}>
+            <div class="tchip landing" style:--cal={calendarInk(carried()?.color)}>
               <span class="tt">{carried()?.summary}</span>
             </div>
           {/if}
@@ -2274,7 +2274,7 @@
         {@const width = 100 / pin.placed.columns}
         {@const moving = pinMoving(chip)}
         <div class="tchip tpin" class:dragging={moving} class:create-mode={createMode}
-             style:--cal={chip.color ?? 'var(--muted)'}
+             style:--cal={calendarInk(chip.color)}
              style:top="calc({pin.placed.top * 100}% + {moving ? pinDrag!.topDeltaPct : 0}% + 1px)"
              style:height="{TASK_PIN_PX - 2}px"
              style:left="calc({pin.placed.column * width}% + 3px)"
@@ -2302,7 +2302,7 @@
            will become, reading the time it would be due, as a dragged pin's
            card does. -->
       {#if paneLanding && !paneLanding.allDay && paneLanding.dayStartMs === day.start_ms}
-        <div class="tchip tpin landing" style:--cal={carried()?.color ?? 'var(--muted)'}
+        <div class="tchip tpin landing" style:--cal={calendarInk(carried()?.color)}
              style:top="calc({((paneLanding.dueMs - day.start_ms) / (day.end_ms - day.start_ms)) * 100}% + 1px)"
              style:height="{TASK_PIN_PX - 2}px" style:left="3px" style:width="calc(100% - 6px)">
           <span class="tt"><span class="tclock">{formatClock(paneLanding.dueMs, clockFormat())}</span>{carried()?.summary}</span>

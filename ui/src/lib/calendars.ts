@@ -73,6 +73,22 @@ export function calendarColor(id: number | null, cals: Calendar[]): string | nul
   return cals.find((c) => c.id === id)?.color_hex ?? null;
 }
 
+/**
+ * The colour to draw a mark for a calendar or task list in, **always** a
+ * usable CSS colour: the calendar's own, or `--accent` when it has none.
+ *
+ * A CalDAV collection that publishes no `calendar-color` (a task server's
+ * lists often don't) arrives with `color_hex` null, and `CalendarList`'s
+ * swatch has always drawn that as `--accent`. Every other surface that shows
+ * the same calendar — the Tasks pane's ticks, the TASKS band's chips, the list
+ * pickers, the invitation tray, Big Year's legend — wrote its own fallback,
+ * and `--muted` is not `--accent`: a list was one colour in Calendars and
+ * another everywhere else, until the user picked a colour. They all ask here,
+ * so the answer is one. `||` and not `??`, so an empty string is "no colour"
+ * too.
+ */
+export const calendarInk = (color: string | null | undefined): string => color || 'var(--accent)';
+
 export const getCalendars = () => invoke<Calendar[]>('get_calendars');
 export const setCalendarSelected = (id: number, on: boolean) =>
   invoke<void>('set_calendar_selected', { id, on });

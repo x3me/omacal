@@ -4,7 +4,7 @@
   import { isWeekendColumn } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
   import type { BigYearPayload, UiEvent } from './api';
-  import type { Calendar } from './calendars';
+  import { calendarInk, type Calendar } from './calendars';
   import { foregroundFor } from './ink';
   import type { Rect } from './position';
 
@@ -235,7 +235,7 @@
                 aria-pressed={c.selected}
                 title={c.selected ? `Hide ${c.summary}` : `Show ${c.summary}`}
                 onclick={() => ontoggle?.(c)}>
-          <i class="dot" style="--c:{c.color_hex ?? 'var(--muted)'}"></i>
+          <i class="dot" style="--c:{calendarInk(c.color_hex)}"></i>
           <span>{c.summary}</span>
         </button>
       {/each}
