@@ -32,8 +32,9 @@ change visibly. This spec adds one change kind and teaches the overlays it.
    - **all-day on or off for "following" or "all events"** of a series;
    - **adding a Google Meet link** (the link exists only once Google mints
      it); removing one shows at once.
-   These are still queued: the meeting is locked and counted in "Saving",
-   but drawn unchanged until the save lands.
+   These are still queued: the meeting is locked, counted in "Saving" and
+   marked as saving (dashed), but its title and time are drawn as they were
+   until the save lands.
 6. **"Following" and "all events"** of a series: every visible occurrence
    takes the new values and shifts by the same time change, exactly as part
    1's moves do.
@@ -97,8 +98,9 @@ whether the detail `is_recurring`, its current `calendar_id`), the form's
   the lane number is irrelevant). An all-day→timed edit leaves the band
   (its lane dropped, `idx` remapped) and joins its day, which is re-laid
   out. An all-day date change redraws its lane. Every redrawn copy is
-  flagged `pending`. An edit with `when: null` redraws nothing (it only
-  locks).
+  flagged `pending`. An edit with `when: null` moves and renames nothing:
+  it only flags the card `pending` where it is, which marks it as saving
+  and stops a grab.
 - **Month (`overlayMonth`).** A redrawn copy that fits within one day goes
   to that day's cell, in time order, with `patch`. Anything else (all-day,
   or crossing midnight) goes to the bars by **first fit**: the lowest lane in
