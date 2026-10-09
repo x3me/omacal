@@ -96,17 +96,25 @@ repo's unit specs run in Node and cannot import a `.svelte.ts` rune file
 - **One queue tail**, so writes run in order. A job runs: the write
   (`updateEvent` / `deleteEvent`), then `syncCalendar(true)`, then a reload.
   The write's own arguments are what `commitMove` / `runDelete` pass today.
-- **Clearing uses the checkpoint rule.** `pendingCheckpoint()` is the highest
-  `seq` saved before a load begins; `reconcilePending(checkpoint)` runs after
-  a load lands and drops saved jobs at or below it. A reload already in
-  flight when a save finishes therefore cannot clear the job, so the card
-  never flickers back. `loadWeek` (Day and Week), `loadMonth`, `loadYear` and `loadBigYear` call it
+- **Clearing uses the checkpoint rule, counted from the sync, not the
+  write.** `pendingCheckpoint()` is the highest `seq` whose *follow-up sync*
+  had finished before a load begins; `reconcilePending(checkpoint)` runs after
+  a load lands and drops entries at or below it. The sync, not the write, is
+  what puts "this occurrence" of a series into the local store (the backend
+  leaves the store alone for it), so a load between the write and the sync
+  (a week step, a background `sync-finished`) cannot clear the card and draw
+  the old place (whole-branch review, 2026-10-09). If the follow-up sync
+  fails, Google still has the change: the card stays drawn, the error says
+  "The change was made, but OmaCal could not refresh from Google", and the
+  next background `sync-finished` retries the sync (`resyncPending`).
+  `loadWeek` (Day and Week), `loadMonth`, `loadYear` and `loadBigYear` call it
   beside `reconcileResponses`.
 - **A failure drops the job** and sets App's `error` to
   `Could not move “Title”: <reason>` / `Could not delete “Title”: <reason>`.
-- **Held, not yet queued:** a drop that opens `MoveConfirm` (or a delete
-  awaiting its scope) registers a *held* entry that draws like a pending one
-  and is removed on Cancel or turned into a job on the answer.
+- **Held, not yet queued:** a drop that opens `MoveConfirm` registers a
+  *held* entry that draws like a pending one and is removed on Cancel or
+  turned into a job on the answer. (A delete holds nothing while
+  `DeleteConfirm` is open, per §2.4.)
 - Exposes `pendingChangeCount()`, `isPending(id, occurrenceStartMs)`, and the
   current changes for the overlay.
 

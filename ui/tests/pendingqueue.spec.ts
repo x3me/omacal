@@ -12,7 +12,7 @@ function gate() {
   return { promise, resolve, reject };
 }
 const work = (write: () => Promise<unknown>, extra: Partial<Work> = {}): Work =>
-  ({ write, after: async () => {}, onfailure: () => {}, ...extra });
+  ({ write, sync: async () => {}, reload: async () => {}, onfailure: () => {}, onsyncfailure: () => {}, ...extra });
 
 test('a held change is drawn but not counted, and release takes it away', () => {
   const q = new PendingQueue();
@@ -73,11 +73,49 @@ test('a load begun before the save does not clear it; one begun after does', asy
   expect(q.changes()).toHaveLength(0);
 });
 
-test('after() failing keeps the change drawn: the write did happen', async () => {
+test('a load begun after the write but before its sync does not clear it', async () => {
+  // "This occurrence" of a series: the backend leaves the local store alone
+  // and the follow-up sync brings it in, so until that sync is done a reload
+  // would still read the old place (review finding 1, 2026-10-09).
   const q = new PendingQueue();
-  await q.queue(move(1), work(async () => {}, { after: async () => { throw new Error('offline'); } }));
+  const sync = gate();
+  const done = q.queue(move(1), work(async () => {}, { sync: () => sync.promise }));
+  await new Promise((r) => setTimeout(r, 0)); // the write has landed, the sync has not
+  q.reconcile(q.checkpoint());
   expect(q.changes()).toHaveLength(1);
-  expect(q.count()).toBe(0);
+  sync.resolve();
+  await done;
+  q.reconcile(q.checkpoint());
+  expect(q.changes()).toHaveLength(0);
+});
+
+test('a failed sync keeps the change drawn, reports it, and a later resync clears it', async () => {
+  const q = new PendingQueue();
+  const reasons: unknown[] = [];
+  await q.queue(move(1), work(async () => {}, {
+    sync: async () => { throw new Error('offline'); },
+    onsyncfailure: (e) => reasons.push(e),
+  }));
+  expect(String(reasons[0])).toContain('offline');
+  q.reconcile(q.checkpoint());
+  expect(q.changes()).toHaveLength(1); // Google has it; the store does not yet
+  expect(q.count()).toBe(0);           // nothing is being written any more
+
+  let synced = 0;
+  await q.resync({ sync: async () => { synced++; }, reload: async () => {} });
+  expect(synced).toBe(1);
+  q.reconcile(q.checkpoint());
+  expect(q.changes()).toHaveLength(0);
+});
+
+test('a resync with nothing whose sync failed does nothing', async () => {
+  const q = new PendingQueue();
+  const sync = gate();
+  void q.queue(move(1), work(async () => {}, { sync: () => sync.promise }));
+  let synced = 0;
+  await q.resync({ sync: async () => { synced++; }, reload: async () => {} });
+  expect(synced).toBe(0); // its own sync is still running: no second pass
+  sync.resolve();
 });
 
 test('isPending answers for where a move came from and where it landed', () => {

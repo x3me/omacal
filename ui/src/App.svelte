@@ -3,7 +3,7 @@
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import {
     pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
-    queueChange, isPending,
+    queueChange, isPending, resyncPending,
   } from './lib/pending.svelte';
   import { overlayWeek, overlayMonth, overlayBigYear, type PendingChange } from './lib/pendingview';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
@@ -1184,6 +1184,9 @@
       await refreshStatus();
       await refreshInvites();
       await reload();
+      // A change whose own follow-up sync failed is retried now that a sync
+      // has got through (spec 2026-10-09); nothing happens otherwise.
+      void resyncPending(queuedRefresh);
       // A sync brings tasks too — one completed on the phone, one added on
       // the server — and the grid and the sidebar would otherwise keep
       // showing the list as it was when the window opened.
@@ -1848,24 +1851,22 @@
   }
 
   /**
-   * `refreshAfterWrite` for a queued change (spec 2026-10-09). Sync first and
-   * reload once: the reload is what clears the pending card, and a local
-   * reload before the sync could clear it with the old position still in the
-   * store (the `'this'`-on-a-bare-master case `refreshAfterWrite` describes).
-   * No `busy`: the app stays usable while this runs. If the sync fails, the
-   * card stays drawn where it landed, because Google has the change, and the
-   * next successful load clears it.
+   * How a queued change (spec 2026-10-09) reaches the store and the screen.
+   * Sync first, then reload once: the reload is what clears the pending card,
+   * and only a sync that began after the write puts "this occurrence" of a
+   * series into the store (`refreshAfterWrite` describes that case), so the
+   * queue waits for the sync before any load may clear the card. No `busy`:
+   * the app stays usable while this runs. If the sync fails, Google still has
+   * the change, so the card stays drawn and the next background sync retries
+   * (`resyncPending` in the `sync-finished` listener).
    */
-  async function refreshAfterQueuedWrite() {
-    try {
-      await syncCalendar(true);
-      await refreshStatus();
-      await reload();
-      await refreshInvites();
-    } catch (e) {
+  const queuedRefresh = {
+    sync: async () => { await syncCalendar(true); await refreshStatus(); },
+    reload: async () => { await reload(); await refreshInvites(); },
+    onsyncfailure: (e: unknown) => {
       error = `The change was made, but OmaCal could not refresh from Google: ${e}`;
-    }
-  }
+    },
+  };
 
   async function saveForm(result: EventFormResult) {
     const request = form;
@@ -2053,7 +2054,7 @@
           choice.sendUpdates,
         );
       },
-      after: refreshAfterQueuedWrite,
+      ...queuedRefresh,
       // The drop is undone on screen the moment Google refuses it, and says
       // why: §6's "a drag that appears to have worked and silently did not is
       // worse than one that visibly refuses" still holds, it just holds now.
@@ -2085,7 +2086,7 @@
     const { detail, startMs } = target.occurrence;
     void queueChange({ kind: 'delete', id: detail.id, occurrenceStartMs: startMs, scope }, {
       write: () => deleteEvent(detail.id, scope, startMs),
-      after: refreshAfterQueuedWrite,
+      ...queuedRefresh,
       onfailure: (e) => { error = `Could not delete “${detail.title ?? 'this event'}”: ${String(e)}`; },
     });
   }

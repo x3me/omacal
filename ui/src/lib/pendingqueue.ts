@@ -7,18 +7,35 @@
 
 import { locks, type PendingChange } from './pendingview';
 
-export type Work = {
+/** How a written change reaches the local store and the screen. */
+export type Refresh = {
+  /** A sync that starts after the write. Only once it is done does the local
+   *  store hold the change: for "this occurrence" of a series the backend
+   *  leaves the store alone and this sync brings it in, so the checkpoint
+   *  waits for it, not for the write (review finding 1, 2026-10-09). */
+  sync: () => Promise<void>;
+  /** The reload that then clears the card. Reports its own failure. */
+  reload: () => Promise<void>;
+};
+
+export type Work = Refresh & {
   /** The write to Google. A rejection means nothing changed there: the change
    *  is dropped from the screen and `onfailure` says why. */
   write: () => Promise<unknown>;
-  /** After a successful write: sync and reload. Its own failure is its own to
-   *  report, and does not undo the change: Google has it. */
-  after: () => Promise<void>;
   onfailure: (error: unknown) => void;
+  /** The sync after a successful write failed: Google has the change, so it
+   *  stays drawn, and `resync` retries the sync later. */
+  onsyncfailure: (error: unknown) => void;
 };
 
-/** `seq` is null while held (a question is open) and set once committed. */
-type Entry = { token: symbol; change: PendingChange; seq: number | null; saved: boolean };
+/** `seq` is null while held (a question is open) and set once committed.
+ *  `saved`: Google took the write. `synced`: a sync that began after the write
+ *  has finished, so the local store has it. `syncFailed`: that sync failed and
+ *  waits for `resync`. */
+type Entry = {
+  token: symbol; change: PendingChange; seq: number | null;
+  saved: boolean; synced: boolean; syncFailed: boolean;
+};
 
 export class PendingQueue {
   private entries: Entry[] = [];
@@ -45,7 +62,7 @@ export class PendingQueue {
 
   hold(change: PendingChange): symbol {
     const token = Symbol('pending');
-    this.entries = [...this.entries, { token, change, seq: null, saved: false }];
+    this.entries = [...this.entries, { token, change, seq: null, saved: false, synced: false, syncFailed: false }];
     this.onchange();
     return token;
   }
@@ -64,7 +81,7 @@ export class PendingQueue {
     const held = this.entries.some((e) => e.token === token);
     this.entries = held
       ? this.entries.map((e) => (e.token === token ? { ...e, change, seq } : e))
-      : [...this.entries, { token, change, seq, saved: false }];
+      : [...this.entries, { token, change, seq, saved: false, synced: false, syncFailed: false }];
     this.onchange();
     const done = this.tail.then(async () => {
       try {
@@ -75,9 +92,16 @@ export class PendingQueue {
         work.onfailure(error);
         return;
       }
-      this.entries = this.entries.map((e) => (e.token === token ? { ...e, saved: true } : e));
-      this.onchange();
-      try { await work.after(); } catch { /* `after` reports its own failure */ }
+      this.mark(token, { saved: true });
+      try {
+        await work.sync();
+      } catch (error) {
+        this.mark(token, { syncFailed: true });
+        work.onsyncfailure(error);
+        return;
+      }
+      this.mark(token, { synced: true });
+      try { await work.reload(); } catch { /* `reload` reports its own failure */ }
     });
     this.tail = done;
     return done;
@@ -87,17 +111,35 @@ export class PendingQueue {
     return this.commit(this.hold(change), change, work);
   }
 
-  /** Taken when a load begins: the highest change already saved. */
+  /** Taken when a load begins: the highest change the local store already
+   *  holds — synced, not merely written. */
   checkpoint(): number {
-    return Math.max(0, ...this.entries.filter((e) => e.saved).map((e) => e.seq ?? 0));
+    return Math.max(0, ...this.entries.filter((e) => e.synced).map((e) => e.seq ?? 0));
   }
 
   /** Called when that load has landed: what it already contains is no longer
    *  pending. */
   reconcile(checkpoint: number): void {
     const before = this.entries.length;
-    this.entries = this.entries.filter((e) => !(e.saved && (e.seq ?? 0) <= checkpoint));
+    this.entries = this.entries.filter((e) => !(e.synced && (e.seq ?? 0) <= checkpoint));
     if (this.entries.length !== before) this.onchange();
+  }
+
+  /** Retry the sync for every change whose follow-up sync failed. Called when
+   *  a background sync finishes, which says the server is reachable again;
+   *  `refresh.sync` starts a pass of its own after it, so it began after every
+   *  one of those writes. Does nothing when no sync has failed. */
+  async resync(refresh: Refresh): Promise<void> {
+    const tokens = this.entries.filter((e) => e.syncFailed).map((e) => e.token);
+    if (tokens.length === 0) return;
+    try { await refresh.sync(); } catch { return; }
+    for (const token of tokens) this.mark(token, { synced: true, syncFailed: false });
+    try { await refresh.reload(); } catch { /* reports its own failure */ }
+  }
+
+  private mark(token: symbol, patch: Partial<Pick<Entry, 'saved' | 'synced' | 'syncFailed'>>): void {
+    this.entries = this.entries.map((e) => (e.token === token ? { ...e, ...patch } : e));
+    this.onchange();
   }
 
   /** Resolves once every queued write, including ones added meanwhile, is done. */

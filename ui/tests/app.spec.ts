@@ -1714,6 +1714,75 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseWrite());
       });
 
+      /** Review finding 1: "this occurrence" of a series is only in the
+       *  local store after the follow-up sync, so a reload in between must
+       *  not clear the card. The stub's week never applies a write, which is
+       *  exactly that case. */
+      test('a move whose follow-up sync is still running survives a week step and back', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextSync());
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync running
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        const moved = await topOfBlock(page, 'Board prep');
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await page.waitForTimeout(300);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(moved, 0);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      test('a background reload while the follow-up sync runs does not undo a move', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextSync());
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1);
+        const moved = await topOfBlock(page, 'Board prep');
+
+        await page.evaluate(() => window.__harness.emit('sync-finished', null));
+        await page.waitForTimeout(300);
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(moved, 0);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      /** Review finding 2: occurrences of a series share an id, so a copy
+       *  dropped onto its sibling's slot shared the sibling's key in the grid's
+       *  keyed list — Svelte threw and the dropped card was not drawn. */
+      test('a meeting dropped onto its own series\' next slot is drawn beside it', async ({ page }) => {
+        const errors: string[] = [];
+        page.on('pageerror', (e) => errors.push(e.message));
+        await writable(page);
+        const w = appWritableWeek();
+        const s = w.days[0].events[0];
+        w.days[0] = { ...w.days[0], events: w.days[0].events.slice(1),
+          placed: w.days[0].placed.slice(1).map((p, i) => ({ ...p, idx: i })) };
+        const pl = { idx: 0, column: 0, columns: 1, top: (9 * 60) / 1440, height: 30 / 1440 };
+        w.days[3] = { ...w.days[3], events: [s], placed: [pl] };
+        w.days[4] = { ...w.days[4], events: [{ ...s, start_ms: s.start_ms + 86_400_000, end_ms: s.end_ms + 86_400_000 }], placed: [pl] };
+        await page.evaluate(async (week) => {
+          window.__harness.setResponseData({ week });
+          await window.__harness.emit('sync-finished', null);
+        }, w);
+        await expect(block(page, 'Standup')).toHaveCount(2);
+        await block(page, 'Standup').nth(0).scrollIntoViewIfNeeded();
+
+        const a = (await block(page, 'Standup').nth(0).boundingBox())!;
+        const b = (await block(page, 'Standup').nth(1).boundingBox())!;
+        await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(b.x + a.width / 2, a.y + a.height / 2, { steps: 8 });
+        await page.mouse.up();
+
+        await expect(movePanel(page)).toBeVisible(); // a series asks this-or-all
+        await expect(block(page, 'Standup')).toHaveCount(2);
+        await expect(block(page, 'Standup').and(page.locator('.pending'))).toHaveCount(1);
+        expect(errors, 'no keyed-each collision').toEqual([]);
+        await page.keyboard.press('Escape');
+      });
+
       test('a move still saving survives a week step and back', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('update_event'));

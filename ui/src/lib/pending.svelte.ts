@@ -2,7 +2,7 @@
 // `PendingQueue`'s; this only makes it reactive, by bumping `version` on every
 // change and reading it in each getter.
 
-import { PendingQueue, type Work } from './pendingqueue';
+import { PendingQueue, type Refresh, type Work } from './pendingqueue';
 import type { PendingChange } from './pendingview';
 
 let version = $state(0);
@@ -19,3 +19,4 @@ export const queueChange = (change: PendingChange, work: Work): Promise<void> =>
 export const pendingCheckpoint = (): number => queue.checkpoint();
 export const reconcilePending = (checkpoint: number): void => queue.reconcile(checkpoint);
 export const pendingIdle = (): Promise<void> => queue.idle();
+export const resyncPending = (refresh: Refresh): Promise<void> => queue.resync(refresh);

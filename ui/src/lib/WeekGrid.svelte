@@ -2215,7 +2215,10 @@
 
       <!-- A drag or sync can reorder the packed array. Keep focus and copy
            panels with their occurrence, never with its old array position. -->
-      {#each layout.placed as p (`${day.events[p.idx].id}:${day.events[p.idx].start_ms}`)}
+      <!-- A pending copy keys apart: occurrences of one series share an id, so
+           a card dropped onto its sibling's slot would otherwise share the
+           sibling's key (review finding 2, 2026-10-09). -->
+      {#each layout.placed as p (`${day.events[p.idx].id}:${day.events[p.idx].start_ms}${day.events[p.idx].pending ? ':p' : ''}`)}
         <EventBlock
           event={day.events[p.idx]}
           placed={p}
