@@ -23,7 +23,10 @@ change visibly. This spec adds one change kind and teaches the overlays it.
    when there is no free lane).
 3. **The details card shows the saved values.** Clicking the pending meeting
    shows the new title, location, description, calendar and guest list, with
-   no Edit or Delete (part 1's lock).
+   no Edit or Delete (part 1's lock). A card left open closes when the save
+   lands or is refused: the values it showed were the save's, drawn over a
+   detail read before it, and its Edit would otherwise write the old values
+   back (whole-branch review, 2026-10-10).
 4. **A refusal undoes it.** The meeting returns to how it was, and the header
    says `Could not save “<title>”: <reason>`. The user reopens the form to
    try again, as today.
@@ -101,24 +104,39 @@ whether the detail `is_recurring`, its current `calendar_id`), the form's
   flagged `pending`. An edit with `when: null` moves and renames nothing:
   it only flags the card `pending` where it is, which marks it as saving
   and stops a grab.
-- **Month (`overlayMonth`).** A redrawn copy that fits within one day goes
-  to that day's cell, in time order, with `patch`. Anything else (all-day,
-  or crossing midnight) goes to the bars by **first fit**: the lowest lane in
-  which its columns are free, if below `lane_cap`; otherwise its index joins
-  that row's `bar_overflow` (the "+N more" list), once. A removed bar leaves
-  a gap; other bars never move. (This also settles part 1's deferred minor:
-  a meeting moved across midnight now keeps showing in Month.)
-- **Big Year (`overlayBigYear`).** The same first fit for pills, against the
-  payload's `lane_cap`. The ribbon carries no timed meetings, so a timed
-  meeting switched to all-day appears there when the save lands.
+- **Month (`overlayMonth`)**, by `commands::assemble_month`'s own rules. A
+  redrawn **timed** copy is a line in the cell it starts in, in time order,
+  with `patch`, and in the first cell of each later row it runs into
+  (`timed_column`); Month's bars are all-day only, so a meeting crossing
+  midnight stays a line. An **all-day** copy goes to the bars by **first
+  fit**: the lowest lane in which its columns are free, if below `lane_cap`;
+  otherwise its index joins that row's `bar_overflow` (the "+N more" list),
+  once. A removed bar leaves a gap; other bars never move. (This also settles
+  part 1's deferred minor: a meeting moved across midnight now keeps showing
+  in Month, in the cell it starts in.) *Corrected 2026-10-10: this section
+  first sent a meeting crossing midnight to the bars, which the backend never
+  does (whole-branch review).*
+- **Big Year (`overlayBigYear`).** The same first fit for all-day pills,
+  against the payload's `lane_cap`; a pill made timed leaves. The ribbon
+  carries no timed meetings, so a timed meeting switched to all-day appears
+  there when the save lands.
+- **All-day days are the reader's.** An all-day event is stored at midnight
+  in its calendar's zone and placed by its date (`commands::all_day_columns`).
+  A redrawn all-day copy starts at the reader's nearest midnight, so it covers
+  its own days and no more whatever zone its calendar keeps, and "this" lands
+  exactly on `when`, where the lock looks.
 - **The details card (`overlayDetail(detail, changes, occurrenceStartMs)`).**
   For an edit covering that occurrence: `title`, `location`, `calendar_id`,
   `description`, `is_all_day` (from `when`), `conference_uri: null` when the
   call was removed, and `attendees` rebuilt from `detail.guests` in its
   order: an address already stored keeps its stored entry (its answer, its
   name, `is_self`) with the new `optional`, a new one is added as
-  `needsAction`, and one no longer on the list is dropped. App passes the popover
-  `overlayDetail(gridDetail, pendingChanges(), gridSelStart)`.
+  `needsAction`, and one no longer on the list is dropped. An all-day `when`
+  also sets `start_ms`/`end_ms` and `start_date`/`end_date` (the last
+  inclusive) from it, as one pair, since the card reads its day off them; a
+  timed one clears both dates. App passes the popover
+  `overlayDetail(gridDetail, pendingChanges(), gridSelStart)`, and WeekGrid
+  its own popover the same.
 
 ## 5. Wiring
 
@@ -129,6 +147,15 @@ result.calendarId), ...queuedRefresh, onfailure: … })`. The form request
 carries the occurrence's current `startMs`/`endMs` and the detail's
 `is_recurring` and `calendar_id`, which it already has when the form opens.
 The create arm, Quick Add and imports keep `refreshAfterWrite`.
+
+**A write the store already holds.** `update_via_client` folds the patched
+row straight into the store when the patch landed on the row it loaded (a
+one-off, or a whole series), and `update_event` answers with that row read
+back. When the answer's times moved (`storeHoldsShift`), the write resolves
+`true` and the queue counts the change as synced at once: a load before the
+sync already draws it, and a series shift drawn over a store that already
+shifted would move every occurrence twice (whole-branch review, 2026-10-10).
+A drag's write (part 1) reads the same answer.
 
 ## 6. Testing
 
