@@ -1,6 +1,8 @@
 <!-- ui/src/lib/WeekGrid.svelte -->
 <script lang="ts">
   import { pendingResponse } from './responses.svelte';
+  import { pendingChanges } from './pending.svelte';
+  import { overlayDetail } from './pendingview';
   import { visibleHours } from "./visiblehours.svelte";
   import { hideWeekends } from './hideweekends.svelte';
   import { clockFormat } from './clock.svelte';
@@ -2352,8 +2354,10 @@
   {@const occurrence = { detail, startMs, endMs: selectedEndMs ?? startMs }}
   {@const rect = anchor}
   {#key detail.id}
+  <!-- The details as a pending edit left them (part 2 spec §1.3); Edit and
+       Delete are already hidden by the popover's own lock. -->
   <EventPopover
-    {detail}
+    detail={overlayDetail(detail, pendingChanges(), startMs)}
     {calendars}
     copies={selectedEvent?.copies}
     onchoosecopy={(copy) => { if (selectedEvent) void openPopover({ ...selectedEvent, ...copy }, rect); }}

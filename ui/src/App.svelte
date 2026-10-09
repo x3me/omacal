@@ -5,7 +5,8 @@
     pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
     queueChange, isPending, resyncPending,
   } from './lib/pending.svelte';
-  import { overlayWeek, overlayMonth, overlayBigYear, type PendingChange } from './lib/pendingview';
+  import { overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type PendingChange } from './lib/pendingview';
+  import { editChange } from './lib/pendingedit';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
@@ -1557,7 +1558,12 @@
    *  value an edit cannot be allowed to guess. */
   type FormRequest =
     | { mode: 'create'; anchor: Rect; initial: EventFormValue; chooseCalendar?: boolean }
-    | { mode: 'edit'; anchor: Rect; initial: EventFormValue; id: number; occurrenceStartMs: number };
+    | {
+        mode: 'edit'; anchor: Rect; initial: EventFormValue; id: number; occurrenceStartMs: number;
+        /** For the pending edit (part 2 spec §3): whether all-day switched on
+         *  a series can be drawn, or waits for the save. */
+        isRecurring: boolean;
+      };
 
   let form = $state<FormRequest | null>(null);
   /** The span the open form currently describes, for the grid's live ghost —
@@ -1770,6 +1776,7 @@
       anchor: rect,
       id: occurrence.detail.id,
       occurrenceStartMs: occurrence.startMs,
+      isRecurring: occurrence.detail.is_recurring,
       initial: valueFromDetail(occurrence.detail, occurrence.startMs, occurrence.endMs),
     };
   }
@@ -1872,38 +1879,56 @@
     const request = form;
     if (!request) return;
     form = null;
+    if (request.mode === 'edit') {
+      // Drawn as saved at once (part 2 spec, 2026-10-09); the write runs in
+      // the queue behind it, and a refusal puts the meeting back.
+      error = null;
+      const title = result.fields.summary ?? '(no title)';
+      void queueChange(
+        editChange({
+          id: request.id,
+          occurrenceStartMs: request.occurrenceStartMs,
+          wasAllDay: request.initial.isAllDay,
+          isRecurring: request.isRecurring,
+          calendarId: request.initial.calendarId,
+        }, result, calendars, ymdMs),
+        {
+          // `request.occurrenceStartMs`, never `detail.start_ms`: for a series
+          // the second is the master's DTSTART, and an edit aimed at it patches
+          // occurrence #0 with the whole form as its payload. The scope comes
+          // from the form's own chooser (Task 9).
+          //
+          // **`result.notify`, never a constant.** This used to be `'all'`, on
+          // the reasoning that a time typed on purpose and saved is exactly the
+          // change guests need to hear about. That was right while the form
+          // could only change the event; guest-list spec §3 makes it a choice,
+          // because the same Save now also fixes a typo in an address, and
+          // mailing the whole room about that is the outcome the choice exists
+          // to prevent. `App` does not decide it — the form asks, and this
+          // carries the answer.
+          // `result.calendarId` is the picker's value, sent on every save: the
+          // backend reads "the calendar it is already on" as no move at all, so
+          // there is nothing here to decide about whether it changed.
+          write: () => updateEvent(
+            request.id, result.scope, request.occurrenceStartMs, result.fields, result.notify,
+            result.calendarId,
+          ),
+          ...queuedRefresh,
+          onfailure: (e) => { error = `Could not save “${title}”: ${String(e)}`; },
+        },
+      );
+      return;
+    }
+
     busy = true;
     error = null;
     try {
-      if (request.mode === 'create') {
-        // **`result.notify`, never a constant** — the same rule the edit arm
-        // below states at length. A create used to be structurally unable to
-        // mail anybody, so `create_event` sent `sendUpdates=none` on the Rust
-        // side and there was nothing here to carry. Now a create can invite
-        // people, the form asks, and this carries the answer.
-        await createEvent(result.calendarId, result.fields, result.notify);
-      } else {
-        // `request.occurrenceStartMs`, never `detail.start_ms`: for a series
-        // the second is the master's DTSTART, and an edit aimed at it patches
-        // occurrence #0 with the whole form as its payload. The scope comes
-        // from the form's own chooser (Task 9).
-        //
-        // **`result.notify`, never a constant.** This used to be `'all'`, on
-        // the reasoning that a time typed on purpose and saved is exactly the
-        // change guests need to hear about. That was right while the form
-        // could only change the event; guest-list spec §3 makes it a choice,
-        // because the same Save now also fixes a typo in an address, and
-        // mailing the whole room about that is the outcome the choice exists
-        // to prevent. `App` does not decide it — the form asks, and this
-        // carries the answer.
-        // `result.calendarId` is the picker's value, sent on every save: the
-        // backend reads "the calendar it is already on" as no move at all, so
-        // there is nothing here to decide about whether it changed.
-        await updateEvent(
-          request.id, result.scope, request.occurrenceStartMs, result.fields, result.notify,
-          result.calendarId,
-        );
-      }
+      // **`result.notify`, never a constant** — the same rule the edit arm
+      // above states at length. A create used to be structurally unable to
+      // mail anybody, so `create_event` sent `sendUpdates=none` on the Rust
+      // side and there was nothing here to carry. Now a create can invite
+      // people, the form asks, and this carries the answer.
+      await createEvent(result.calendarId, result.fields, result.notify);
     } catch (e) {
       error = String(e);
       // One failure is not a failure: a create that reached Google but not
@@ -1914,9 +1939,7 @@
       // through to refreshAfterWrite runs the ordinary post-write sync,
       // which fetches the event like any other; the banner keeps the
       // sentence so the user knows what happened.
-      if (!(request.mode === 'create' && String(e).startsWith('The event was created on Google'))) {
-        return;
-      }
+      if (!String(e).startsWith('The event was created on Google')) return;
     } finally {
       busy = false;
     }
@@ -2457,7 +2480,7 @@
   {@const occurrence = { detail: gridDetail, startMs, endMs: gridSelEnd ?? startMs }}
   {#key gridDetail.id}
   <EventPopover
-    detail={gridDetail}
+    detail={overlayDetail(gridDetail, pendingChanges(), startMs)}
     {calendars}
     copies={gridCopies}
     onchoosecopy={(copy) => { void openOccurrence(copy.id, copy.start_ms, copy.end_ms, rect, gridCopies); }}

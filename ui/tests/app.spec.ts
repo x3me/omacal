@@ -1783,6 +1783,122 @@ test.describe('App', () => {
         await page.keyboard.press('Escape');
       });
 
+      /** Opens Board prep's form from its popover. */
+      const openBoardPrepForm = async (page: Page) => {
+        await block(page, 'Board prep').click();
+        await page.getByRole('button', { name: 'Edit' }).click();
+        await expect(editForm(page)).toBeVisible();
+      };
+
+      test('a saved title shows at once, dashed, while it saves', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+
+        await expect(block(page, 'Board review')).toHaveClass(/pending/);
+        await expect(block(page, 'Board prep')).toHaveCount(0);
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a saved time moves the card at once', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        const before = await topOfBlock(page, 'Board prep');
+        await openBoardPrepForm(page);
+        const start = editForm(page).getByLabel('Start', { exact: true });
+        const was = await start.inputValue();
+        const [h, m] = was.split(':').map(Number);
+        const hhmm = (hh: number) => `${String(hh).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        // The form keeps End where it was when Start moves, so both are set:
+        // an end before its start is a form Save refuses.
+        await start.fill(hhmm(h + 2));
+        await start.press('Tab');
+        await editForm(page).getByLabel('End', { exact: true }).fill(hhmm(h + 3));
+        await editForm(page).getByLabel('End', { exact: true }).press('Tab');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeGreaterThan(before + 20);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('All day on moves it into the band at once', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('All day').check();
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+
+        await expect(block(page, 'Board prep')).toHaveCount(0);
+        await expect(chip(page, 'Board prep')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a refused save puts the meeting back, with the reason', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await expect(block(page, 'Board review')).toHaveClass(/pending/);
+
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(block(page, 'Board prep')).toHaveCount(1);
+        await expect(block(page, 'Board review')).toHaveCount(0);
+        await expect(page.locator('.err')).toContainText('Could not save “Board review”');
+      });
+
+      test('the saving card\'s details show the new title, without Edit or Delete', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await expect(block(page, 'Board review')).toHaveClass(/pending/);
+
+        await block(page, 'Board review').click();
+        const popover = page.getByRole('dialog', { name: 'Board review' });
+        await expect(popover).toBeVisible();
+        await expect(popover.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextSync());
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync running
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await page.waitForTimeout(300);
+        await expect(block(page, 'Board review')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      test('a repeat change keeps the old drawing, marked as saving and locked', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        const before = await topOfBlock(page, 'Board prep');
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Repeat', { exact: true }).selectOption('weekly');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+        await expect(block(page, 'Board prep')).toHaveClass(/pending/);
+        expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(before, 0); // not moved
+        await block(page, 'Board prep').click();
+        await expect(page.getByRole('dialog', { name: 'Board prep' }).getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
       test('a move still saving survives a week step and back', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
