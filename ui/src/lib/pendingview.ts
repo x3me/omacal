@@ -37,8 +37,10 @@ export type PendingChange =
   | {
       /** A new event (part 3 spec §2). `id` is temporary and negative, unique
        *  per create: no payload event has one, so nothing is covered and the
-       *  `id:start` keys never collide. `event` is the copy to draw. */
-      kind: 'create'; id: number; event: UiEvent;
+       *  `id:start` keys never collide. `event` is the copy to draw, or null
+       *  when its calendar is not shown: still saved and counted, but a copy
+       *  would vanish without a word once the save landed. */
+      kind: 'create'; id: number; event: UiEvent | null;
     };
 
 /** A new event Google has not given an id yet (part 3 spec §5): drawn, but
@@ -47,7 +49,7 @@ export const isUnsaved = (ev: Pick<UiEvent, 'id'>): boolean => ev.id < 0;
 
 /** The new events the changes draw. */
 const createdEvents = (changes: readonly PendingChange[]): UiEvent[] =>
-  changes.flatMap((c) => (c.kind === 'create' ? [c.event] : []));
+  changes.flatMap((c) => (c.kind === 'create' && c.event ? [c.event] : []));
 
 /**
  * Whether `change` speaks for this occurrence, as the payload has it.

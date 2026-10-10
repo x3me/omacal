@@ -2161,6 +2161,25 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseSync());
       });
 
+      test('Backspace on a new event still saving does nothing', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        const selected = page.locator('[data-kbd-selected-event]');
+        for (let i = 0; i < 8; i++) {
+          if ((await selected.count()) && ((await selected.textContent()) ?? '').includes('Lunch')) break;
+          await page.keyboard.press('j');
+        }
+        await expect(selected).toContainText('Lunch');
+        await page.keyboard.press('Backspace');
+        await page.waitForTimeout(300);
+        expect(await callsTo(page, 'event_detail')).toHaveLength(0);
+        await expect(page.locator('.err')).toHaveCount(0);
+        await expect(page.getByRole('dialog', { name: 'Delete event' })).toHaveCount(0);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
       test('a refused create offers to reopen what was typed', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('create_event'));

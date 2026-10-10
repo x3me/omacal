@@ -79,16 +79,20 @@ const DEFAULT_EVENT_COLOR = '#5b8def';
  * repeat is set. A requested Meet link exists only once Google mints it.
  */
 export function createChange(
-  result: EventFormResult, calendars: Pick<Calendar, 'id' | 'color_hex'>[],
+  result: EventFormResult, calendars: (Pick<Calendar, 'id' | 'color_hex'> & { selected?: boolean })[],
   dayMs: (ymd: string) => number, id: number,
 ): PendingChange {
   const f = result.fields;
   const w = drawnWhen(f.when, dayMs);
+  const calendar = calendars.find((c) => c.id === result.calendarId);
+  // A calendar that is not shown: loads leave its events out, so the copy is
+  // not drawn either (part 3 review); the save still runs and is counted.
+  if (calendar?.selected === false) return { kind: 'create', id, event: null };
   return {
     kind: 'create', id,
     event: {
       id, calendar_id: result.calendarId,
-      color: calendars.find((c) => c.id === result.calendarId)?.color_hex ?? DEFAULT_EVENT_COLOR,
+      color: calendar?.color_hex ?? DEFAULT_EVENT_COLOR,
       title: f.summary ?? '(no title)', location: f.location,
       start_ms: w.startMs, end_ms: w.endMs, is_all_day: w.allDay,
       response: 'accepted', attendees: f.guests?.length ?? 0,

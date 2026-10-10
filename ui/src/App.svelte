@@ -744,6 +744,8 @@
     if (!listable(view)) return;
     const event = eventAtCursor(keyboardDays, keyboardCursor);
     if (!event) return;
+    // Not on Google yet: nothing to delete until it saves (part 3 spec §5).
+    if (isUnsaved(event)) return;
     const el = document.querySelector<HTMLElement>('[data-kbd-selected-event]');
     const r = el?.getBoundingClientRect();
     const rect = r

@@ -106,3 +106,10 @@ test('drawnWhen is the rule both a create and an edit draw by', () => {
   expect(drawnWhen({ kind: 'allDay', startDate: '2024-01-29', endDate: '2024-01-30' }, dayMs))
     .toEqual({ allDay: true, startMs: dayMs('2024-01-29'), endMs: dayMs('2024-01-30') });
 });
+
+test('a new event on a calendar that is not shown is saved but not drawn', () => {
+  // Loads return shown calendars only, so a drawn copy would vanish with no
+  // word once the save landed: it would read as a lost save (part 3 review).
+  const c = createChange(result({}, { calendarId: 2 }), [{ id: 2, color_hex: '#222222', selected: false }], dayMs, -1) as any;
+  expect(c).toMatchObject({ kind: 'create', id: -1, event: null });
+});

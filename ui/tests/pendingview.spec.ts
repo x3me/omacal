@@ -483,6 +483,12 @@ test.describe('creates', () => {
     expect(w.days[0].events.filter((e) => e.id < 0).map((e) => e.id).sort((a, b) => a - b)).toEqual([-2, -1]);
   });
 
+  test('a new event on a hidden calendar draws nothing, and still locks its id', () => {
+    const c: PendingChange = { kind: 'create', id: -1, event: null };
+    expect(overlayWeek(week(), [c]).days[0].events.map((e) => e.id)).toEqual([1, 2]);
+    expect(locks(c, -1, MON)).toBe(true);
+  });
+
   test('covers no stored event, and locks only its own id', () => {
     const c = created(-1, MON + 9 * H, MON + 10 * H);
     expect(covers(c, ev(1, MON + 9 * H, MON + 10 * H))).toBe(false);
