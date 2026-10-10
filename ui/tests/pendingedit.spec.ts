@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { editChange, type EditRequest } from '../src/lib/pendingedit';
+import { createChange, drawnWhen, editChange, type EditRequest } from '../src/lib/pendingedit';
 import type { EventFormResult } from '../src/lib/eventform';
 
 const H = 3_600_000;
@@ -64,4 +64,45 @@ test('guests give the count and the card\'s list; untouched guests give neither'
 test('removing the call is drawn; adding a Meet link is not', () => {
   expect((map(result({ conference: 'none' })) as any).patch.conference).toBeNull();
   expect('conference' in (map(result({ conference: 'googleMeet' })) as any).patch).toBe(false);
+});
+
+const make = (r: EventFormResult, cals: { id: number; color_hex: string | null }[] = calendars) =>
+  createChange(r, cals, dayMs, -1) as any;
+
+test('a new timed event is drawn at its own times, in its calendar\'s colour, as saving', () => {
+  const c = make(result({ summary: 'Lunch', location: 'Cafe' }, { calendarId: 2 }));
+  expect(c).toMatchObject({ kind: 'create', id: -1 });
+  expect(c.event).toEqual({
+    id: -1, calendar_id: 2, color: '#222222', title: 'Lunch', location: 'Cafe',
+    start_ms: T, end_ms: T + H, is_all_day: false, response: 'accepted', attendees: 0,
+    recurring: false, conference: null, all_guests_declined: false, pending: true,
+  });
+});
+
+test('a new all-day event uses display-zone midnights, end exclusive', () => {
+  const c = make(result({ when: { kind: 'allDay', startDate: '2024-01-29', endDate: '2024-01-31' } }));
+  expect([c.event.is_all_day, c.event.start_ms, c.event.end_ms]).toEqual([true, dayMs('2024-01-29'), dayMs('2024-01-31')]);
+});
+
+test('a new repeating event is marked recurring and drawn once, at its own times', () => {
+  const c = make(result({ repeat: 'weekly', weeklyDays: ['MO'] } as any));
+  expect([c.event.recurring, c.event.start_ms, c.event.end_ms]).toEqual([true, T, T + H]);
+});
+
+test('no title, guests and a requested Meet', () => {
+  const c = make(result({
+    summary: null, conference: 'googleMeet',
+    guests: [{ email: 'a@x.com', optional: false }, { email: 'b@x.com', optional: true }],
+  } as any));
+  expect([c.event.title, c.event.attendees, c.event.conference]).toEqual(['(no title)', 2, null]);
+});
+
+test('a calendar with no colour draws the backend\'s default', () => {
+  expect(make(result({}, { calendarId: 3 }), [{ id: 3, color_hex: null }]).event.color).toBe('#5b8def');
+});
+
+test('drawnWhen is the rule both a create and an edit draw by', () => {
+  expect(drawnWhen({ kind: 'timed', startMs: T, endMs: T + H }, dayMs)).toEqual({ allDay: false, startMs: T, endMs: T + H });
+  expect(drawnWhen({ kind: 'allDay', startDate: '2024-01-29', endDate: '2024-01-30' }, dayMs))
+    .toEqual({ allDay: true, startMs: dayMs('2024-01-29'), endMs: dayMs('2024-01-30') });
 });
