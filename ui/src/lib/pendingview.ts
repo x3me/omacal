@@ -19,7 +19,8 @@ export type EditPatch = {
 
 /** One change still on its way to Google. A move or an edit says where the
  *  occurrence it came from lands; for a series, every covered occurrence
- *  shifts by the same amount and takes the same length. */
+ *  shifts by the same amount and takes the same length. A create carries the
+ *  new event itself. */
 export type PendingChange =
   | { kind: 'move'; id: number; occurrenceStartMs: number; scope: Scope; startMs: number; endMs: number }
   | { kind: 'delete'; id: number; occurrenceStartMs: number; scope: Scope }
@@ -32,7 +33,21 @@ export type PendingChange =
       patch: EditPatch;
       /** The details card's own values (`overlayDetail`). */
       detail: { description?: string | null; guests?: { email: string; optional: boolean }[] };
+    }
+  | {
+      /** A new event (part 3 spec §2). `id` is temporary and negative, unique
+       *  per create: no payload event has one, so nothing is covered and the
+       *  `id:start` keys never collide. `event` is the copy to draw. */
+      kind: 'create'; id: number; event: UiEvent;
     };
+
+/** A new event Google has not given an id yet (part 3 spec §5): drawn, but
+ *  with nothing to open. */
+export const isUnsaved = (ev: Pick<UiEvent, 'id'>): boolean => ev.id < 0;
+
+/** The new events the changes draw. */
+const createdEvents = (changes: readonly PendingChange[]): UiEvent[] =>
+  changes.flatMap((c) => (c.kind === 'create' ? [c.event] : []));
 
 /**
  * Whether `change` speaks for this occurrence, as the payload has it.
@@ -44,6 +59,7 @@ export type PendingChange =
  * covered: its copies are reached through its own panel.
  */
 export function covers(change: PendingChange, ev: Pick<UiEvent, 'id' | 'start_ms' | 'copies'>): boolean {
+  if (change.kind === 'create') return false;
   if (ev.copies?.length) return false;
   if (ev.id !== change.id) return false;
   if (change.scope === 'all') return true;
@@ -66,6 +82,7 @@ function landing(change: PendingChange): { startMs: number } | null {
  * new start, and that card is the pending one.
  */
 export function locks(change: PendingChange, id: number, startMs: number): boolean {
+  if (change.kind === 'create') return id === change.id;
   if (id !== change.id) return false;
   if (change.scope === 'all') return true;
   const land = landing(change);
@@ -107,6 +124,7 @@ function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean
   let moved: UiEvent | null = null;
   for (const c of changes) {
     if (!covers(c, ev)) continue;
+    if (c.kind === 'create') continue;
     if (c.kind === 'delete') { hidden = true; moved = null; continue; }
     if (c.kind === 'move') {
       hidden = true;
@@ -227,8 +245,8 @@ const WEEK_BAND_CAP = 1000;
  * The week as the user's pending changes have left it.
  *
  * Moved, edited and deleted occurrences leave their day or the band. Each
- * redrawn copy (flagged `pending`) joins every day its new span touches when
- * it is timed, or the band when it is all-day. A day that changed is laid out
+ * redrawn copy (flagged `pending`), and each new event, joins every day its
+ * span touches when it is timed, or the band when it is all-day. A day that changed is laid out
  * again with `layOutDay`, the Rust layout's own port, so a pending card sits
  * in its proper lane beside whatever it now overlaps.
  */
@@ -238,7 +256,7 @@ export function overlayWeek(week: WeekPayload, changes: readonly PendingChange[]
   const take = (from: UiEvent, to: UiEvent) => { moved.set(`${from.id}:${from.start_ms}`, to); };
   const kept = week.days.map((day) => sift(day.events, changes, take));
   const band = relane(week.all_day, week.all_day_events, week.overflow, changes, take);
-  const arrivals = [...moved.values()];
+  const arrivals = [...moved.values(), ...createdEvents(changes)];
   const days = week.days.map((day, i): DayColumn => {
     const here = arrivals.filter((e) => !e.is_all_day && e.start_ms < day.end_ms && e.end_ms > day.start_ms);
     const k = kept[i];
@@ -266,7 +284,7 @@ export function overlayMonth(month: MonthPayload, changes: readonly PendingChang
   const take = (from: UiEvent, to: UiEvent) => { moved.set(`${from.id}:${from.start_ms}`, to); };
   const kept = month.rows.map((row) => row.cells.map((cell) => sift(cell.timed, changes, take)));
   const bars = month.rows.map((row) => relane(row.bars, row.bar_events, row.bar_overflow, changes, take));
-  const arrivals = [...moved.values()];
+  const arrivals = [...moved.values(), ...createdEvents(changes)];
   const lines = arrivals.filter((e) => !e.is_all_day);
   const spans = arrivals.filter((e) => e.is_all_day);
   const rows = month.rows.map((row, r) => {
@@ -294,7 +312,7 @@ export function overlayBigYear(big: BigYearPayload, changes: readonly PendingCha
   const moved = new Map<string, UiEvent>();
   const take = (from: UiEvent, to: UiEvent) => { moved.set(`${from.id}:${from.start_ms}`, to); };
   const kept = big.rows.map((row) => relane(row.pills, row.pill_events, row.overflow, changes, take));
-  const spans = [...moved.values()].filter((e) => e.is_all_day);
+  const spans = [...moved.values(), ...createdEvents(changes)].filter((e) => e.is_all_day);
   return {
     ...big,
     rows: big.rows.map((row, r) => {

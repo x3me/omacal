@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 import type { UiEvent, WeekPayload, MonthPayload, BigYearPayload, Lane } from '../src/lib/api';
 import type { EventDetail } from '../src/lib/eventdetail';
-import { occurrenceDate } from '../src/lib/eventform';
+import { occurrenceDate, type Scope } from '../src/lib/eventform';
 import {
-  covers, locks, overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type EditPatch, type PendingChange,
+  covers, isUnsaved, locks, overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type EditPatch, type PendingChange,
 } from '../src/lib/pendingview';
 
 const H = 3_600_000;
@@ -30,9 +30,10 @@ const week = (): WeekPayload => ({
   overflow: [0, 0],
 });
 
-const move = (id: number, from: number, to: number, length = H, scope: PendingChange['scope'] = 'this'): PendingChange =>
+type Move = Extract<PendingChange, { kind: 'move' }>;
+const move = (id: number, from: number, to: number, length = H, scope: Scope = 'this'): Move =>
   ({ kind: 'move', id, occurrenceStartMs: from, scope, startMs: to, endMs: to + length });
-const del = (id: number, from: number, scope: PendingChange['scope'] = 'this'): PendingChange =>
+const del = (id: number, from: number, scope: Scope = 'this'): PendingChange =>
   ({ kind: 'delete', id, occurrenceStartMs: from, scope });
 
 test.describe('which occurrences a pending change speaks for', () => {
@@ -186,7 +187,7 @@ const edit = (
   id: number, from: number,
   when: { allDay: boolean; startMs: number; endMs: number } | null,
   patch: EditPatch = {},
-  scope: PendingChange['scope'] = 'this',
+  scope: Scope = 'this',
   detail: { description?: string | null; guests?: { email: string; optional: boolean }[] } = {},
 ): PendingChange => ({ kind: 'edit', id, occurrenceStartMs: from, scope, when, patch, detail });
 const local = (y: number, m: number, d: number) => new Date(y, m, d).getTime(); // display-zone midnight
@@ -456,5 +457,79 @@ test.describe('the details card of a pending edit', () => {
     const c = edit(1, MON + 9 * H, { allDay: false, startMs: MON + 13 * H, endMs: MON + 14 * H }, { title: 'X' });
     expect(overlayDetail(detail(), [c], MON + DAY + 9 * H).title).toBe('Board prep');
     expect(overlayDetail(detail(), [edit(1, MON + 9 * H, null, { title: 'X' })], MON + 9 * H).title).toBe('Board prep');
+  });
+});
+
+const created = (id: number, start: number, end: number, extra: Partial<UiEvent> = {}): PendingChange =>
+  ({ kind: 'create', id, event: ev(id, start, end, { title: 'New', pending: true, ...extra }) });
+
+test.describe('creates', () => {
+  test('a new meeting joins its day, laid out beside what it overlaps', () => {
+    const w = overlayWeek(week(), [created(-1, MON + 9 * H, MON + 10 * H)]);
+    const mon = w.days[0];
+    expect(mon.events.map((e) => [e.id, e.pending ?? false])).toEqual([[1, false], [-1, true], [2, false]]);
+    expect(mon.placed.filter((p) => mon.events[p.idx].id !== 2).map((p) => p.columns)).toEqual([2, 2]);
+  });
+
+  test('a new all-day event joins the band by first fit', () => {
+    const w = overlayWeek(week(), [created(-1, MON, MON + DAY, { is_all_day: true })]);
+    const i = w.all_day_events.findIndex((e) => e.id === -1);
+    expect(w.all_day.find((l) => l.idx === i)).toMatchObject({ lane: 1, start_col: 0, end_col: 0 });
+    expect(w.all_day.filter((l) => l.idx !== i)).toEqual(week().all_day); // no other lane moved
+  });
+
+  test('two new events are both drawn, each its own', () => {
+    const w = overlayWeek(week(), [created(-1, MON + 13 * H, MON + 14 * H), created(-2, MON + 13 * H, MON + 14 * H)]);
+    expect(w.days[0].events.filter((e) => e.id < 0).map((e) => e.id).sort((a, b) => a - b)).toEqual([-2, -1]);
+  });
+
+  test('covers no stored event, and locks only its own id', () => {
+    const c = created(-1, MON + 9 * H, MON + 10 * H);
+    expect(covers(c, ev(1, MON + 9 * H, MON + 10 * H))).toBe(false);
+    expect(locks(c, -1, MON + 9 * H)).toBe(true);
+    expect(locks(c, 1, MON + 9 * H)).toBe(false);
+    expect([isUnsaved({ id: -1 }), isUnsaved({ id: 4 })]).toEqual([true, false]);
+  });
+
+  test('in Month a new meeting is a line in its start cell, a new all-day event a bar', () => {
+    const mon = local(2024, 0, 29), tue = local(2024, 0, 30), wed = local(2024, 0, 31);
+    const m: MonthPayload = {
+      year: 2024, month: 1, lane_cap: 3,
+      rows: [{
+        cells: [
+          { start_ms: mon, end_ms: tue, in_month: true, timed: [] },
+          { start_ms: tue, end_ms: wed, in_month: true, timed: [] },
+        ],
+        bars: [], bar_events: [], bar_overflow: [],
+      }],
+    };
+    const out = overlayMonth(m, [created(-1, tue + 9 * H, tue + 10 * H), created(-2, mon, wed, { is_all_day: true })]);
+    const row = out.rows[0];
+    expect(row.cells.map((c) => c.timed.map((e) => e.id))).toEqual([[], [-1]]);
+    const i = row.bar_events.findIndex((e) => e.id === -2);
+    expect(row.bars.find((l) => l.idx === i)).toMatchObject({ lane: 0, start_col: 0, end_col: 1 });
+  });
+
+  test('a new all-day event crossing a Month row is a bar in both rows', () => {
+    const sun = local(2024, 1, 4), mon = local(2024, 1, 5), tue = local(2024, 1, 6);
+    const row = (a: number, b: number) => ({
+      cells: [{ start_ms: a, end_ms: b, in_month: true, timed: [] as UiEvent[] }],
+      bars: [] as Lane[], bar_events: [] as UiEvent[], bar_overflow: [] as number[],
+    });
+    const m: MonthPayload = { year: 2024, month: 2, lane_cap: 3, rows: [row(sun, mon), row(mon, tue)] };
+    const out = overlayMonth(m, [created(-1, sun, tue, { is_all_day: true })]);
+    expect(out.rows.map((r) => r.bars.map((l) => [l.start_col, l.end_col, l.cont_left, l.cont_right])))
+      .toEqual([[[0, 0, false, true]], [[0, 0, true, false]]]);
+  });
+
+  test('in Big Year a new all-day event takes a pill, a new timed one nothing', () => {
+    const days = Array.from({ length: 28 }, (_, i) => ({ start_ms: local(2024, 0, 29 + i), in_year: true, unsynced: false }));
+    const big: BigYearPayload = { year: 2024, lane_cap: 3, rows: [{ days, pills: [], pill_events: [], overflow: [] }] };
+    const out = overlayBigYear(big, [
+      created(-1, days[2].start_ms, days[3].start_ms, { is_all_day: true }),
+      created(-2, days[4].start_ms + 9 * H, days[4].start_ms + 10 * H),
+    ]);
+    expect(out.rows[0].pill_events.map((e) => e.id)).toEqual([-1]);
+    expect(out.rows[0].pills).toEqual([lane(0, 0, 2, 2)]);
   });
 });

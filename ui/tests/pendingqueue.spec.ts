@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { PendingQueue, storeHoldsShift, type Work } from '../src/lib/pendingqueue';
 import type { PendingChange } from '../src/lib/pendingview';
 
-const move = (id: number, from = 100, to = 200): PendingChange =>
+const move = (id: number, from = 100, to = 200): Extract<PendingChange, { kind: 'move' }> =>
   ({ kind: 'move', id, occurrenceStartMs: from, scope: 'this', startMs: to, endMs: to + 50 });
 
 /** A write the test resolves or rejects by hand. */
@@ -29,7 +29,7 @@ test('a committed change is counted until written, and takes the scope it was co
   const t = q.hold(move(1));
   const done = q.commit(t, { ...move(1), scope: 'all' }, work(() => g.promise));
   expect(q.count()).toBe(1);
-  expect(q.changes()[0].scope).toBe('all');
+  expect(q.changes()[0]).toMatchObject({ scope: 'all' });
   g.resolve();
   await done;
   expect(q.count()).toBe(0);
