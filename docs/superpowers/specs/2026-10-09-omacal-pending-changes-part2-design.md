@@ -155,7 +155,9 @@ back. When the answer's times moved (`storeHoldsShift`), the write resolves
 `true` and the queue counts the change as synced at once: a load before the
 sync already draws it, and a series shift drawn over a store that already
 shifted would move every occurrence twice (whole-branch review, 2026-10-10).
-A drag's write (part 1) reads the same answer.
+A drag's write (part 1) reads the same answer. Since part 3 the queue also
+reloads at once after such a write, then syncs, so the change is drawn as
+itself without waiting for the sync.
 
 ## 6. Testing
 

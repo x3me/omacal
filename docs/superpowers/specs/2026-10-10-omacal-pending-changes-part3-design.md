@@ -39,7 +39,10 @@ id of its own.
    everything that was typed. The button lasts as long as that message does.
 6. **"Created on Google but not stored" is not a refusal.** The event exists
    and its guests may already be mailed, so it stays drawn, the banner keeps
-   the backend's sentence (as today), and the next sync brings it in.
+   the backend's sentence (as today), and the next sync brings it in. A
+   CalDAV create whose PUT landed but whose local half failed (resync, lookup,
+   read-back) reports the same sentence, so it is never offered for Reopen
+   (whole-branch review, 2026-10-10).
 7. **Navigating away and back** keeps it, in every view.
 8. **A requested Meet link** appears once saved; the title and time show at
    once.
@@ -116,7 +119,10 @@ guard already refuses a `pending` event. EventBlock's own hover tooltip adds
   shown beside the error only while `error === forError`, so a later error or
   a cleared banner removes it.
 - Reopen runs `form = { mode: 'create', anchor: keyboardAnchor(), initial:
-  value }`, the form Quick Add's "continue" opens.
+  value }`, the form Quick Add's "continue" opens. A create sends its reminder
+  rows whenever it has any, whatever its baseline (`toEventInput`, as for
+  guests), so the reopened form's `initial` holding them does not drop them
+  (whole-branch review).
 
 ## 7. Wiring
 
@@ -147,9 +153,11 @@ void queueChange(createChange(result, calendars, ymdMs, unsavedId()), {
 ```
 
 A write resolving `true` is part 2's "the store already holds it": the
-change counts as synced at once, and the next load draws the real event and
-drops the copy in the same update. The created-not-stored write resolves
-`false`, so the copy waits for the follow-up sync.
+change counts as synced at once, and the queue **reloads at once, then
+syncs**, so the copy turns into the real, clickable event as soon as the
+write lands rather than after a sync that may first wait out another
+(whole-branch review). The created-not-stored write resolves `false`, so the
+copy waits for the follow-up sync.
 
 ## 8. Testing
 

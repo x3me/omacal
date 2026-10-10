@@ -2122,8 +2122,10 @@ test.describe('App', () => {
       });
 
       test('a new event the next load brings in is drawn once', async ({ page }) => {
-        // `create_impl` stores the row it answers with, so a load after the
-        // write draws the real event; the copy must go in the same update.
+        // `create_impl` stores the row it answers with: the copy is gone once
+        // the write lands (the queue reloads at once), and the load that
+        // brings the real event draws it once, not dashed. The copy-to-real
+        // handoff itself is 'a new event is itself as soon as its write lands'.
         await writable(page);
         const w = appWritableWeek();
         const mon = w.days[0];
