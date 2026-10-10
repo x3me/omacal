@@ -2,7 +2,7 @@
 <script lang="ts">
   import { pendingResponse } from './responses.svelte';
   import { pendingChanges, closeWhenEditClears } from './pending.svelte';
-  import { overlayDetail } from './pendingview';
+  import { isUnsaved, overlayDetail } from './pendingview';
   import { visibleHours } from "./visiblehours.svelte";
   import { hideWeekends } from './hideweekends.svelte';
   import { clockFormat } from './clock.svelte';
@@ -1333,6 +1333,8 @@
     // block; swallow it. See `draggedNotClicked` for why the flag is cleared
     // on press rather than here.
     if (draggedNotClicked) return;
+    // Not on Google yet: nothing to open until it saves (part 3 spec §5).
+    if (isUnsaved(event)) return;
 
     hoveredOccurrence = null;
     selectedEvent = event;

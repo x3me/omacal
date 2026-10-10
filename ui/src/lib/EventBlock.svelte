@@ -8,6 +8,7 @@
   import type { Calendar } from './calendars';
   import type { Rect } from './position';
   import { locationLabel } from './location';
+  import { isUnsaved } from './pendingview';
 
   let {
     event,
@@ -279,6 +280,7 @@
           style="left:{tip.x}px; top:{tip.y}px; --cal:{tip.color};">
       <b class="tt">{event.title}</b>
       <span class="tw">{hhmm(shownStartMs)} – {hhmm(shownEndMs)}{meta ? ` · ${meta}` : ''}</span>
+      {#if isUnsaved(event)}<span class="tw">Saving…</span>{/if}
       {#if tipCalendar}<span class="calendar-line"><i class="calendar-dot"></i><span class="calendar-label">{tipCalendar.summary}</span></span>{/if}
     </span>
   {/if}

@@ -16,7 +16,7 @@ import {
   APP_ALLDAY_OCCURRENCE, APP_ALLDAY_SERIES_DTSTART,
   XZONE_NOW, XZONE_STORED_START, XZONE_WEEK_START, XZONE_DAY,
   XZONE_DISPLAY_MISREADING,
-  APP_ALLDAY_ID, appWritableWeek, APP_ONE_OFF_ID, POPOVER_DETAILS, appJanuaryMonth,
+  APP_ALLDAY_ID, appWritableWeek, APP_ONE_OFF_ID, POPOVER_DETAILS, appJanuaryMonth, CREATED_DETAIL,
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
@@ -2003,6 +2003,140 @@ test.describe('App', () => {
         await page.getByRole('button', { name: 'Previous week' }).click();
         await expect(block(page, 'Gym').first()).toBeVisible();
         await expect(block(page, 'Gym').first()).not.toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      /** `n`, a title, Create: a new event on the anchor day (Mon 29 Jan). */
+      const createLunch = async (page: Page, setUp: (form: ReturnType<typeof newForm>) => Promise<void> = async () => {}) => {
+        await page.keyboard.press('n');
+        await expect(newForm(page)).toBeVisible();
+        await newForm(page).getByLabel('Title', { exact: true }).fill('Lunch');
+        await setUp(newForm(page));
+        await newForm(page).getByRole('button', { name: 'Create', exact: true }).click();
+        await expect(newForm(page)).toHaveCount(0);
+      };
+
+      test('a new event shows at once, dashed, while it saves', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await expect(page.locator('header [role="status"]').filter({ hasText: 'Saving 1 change' })).toBeVisible();
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a new all-day event shows in the band at once', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page, (f) => f.getByLabel('All day').check());
+        await expect(chip(page, 'Lunch')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a new event opens nothing while it saves, and says it is saving', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await block(page, 'Lunch').hover();
+        await expect(page.locator('.tip').filter({ hasText: 'Saving…' })).toBeVisible();
+        await block(page, 'Lunch').click();
+        await page.waitForTimeout(300);
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+        expect(await callsTo(page, 'event_detail')).toHaveLength(0);
+        await expect(page.locator('.err')).toHaveCount(0);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('in Month, a new event opens nothing while it saves', async ({ page }) => {
+        await writable(page);
+        await page.evaluate((m) => window.__harness.setResponseData({ month: m }), appJanuaryMonth());
+        await page.keyboard.press('3');
+        await expect(page.locator('.timed').filter({ hasText: 'Board prep' })).toBeVisible();
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        const line = page.locator('.timed').filter({ hasText: 'Lunch' });
+        await expect(line).toHaveClass(/pending/);
+        await line.click();
+        await page.waitForTimeout(300);
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+        expect(await callsTo(page, 'event_detail')).toHaveLength(0);
+        await expect(page.locator('.err')).toHaveCount(0);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a refused create takes it away, with the reason', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(block(page, 'Lunch')).toHaveCount(0);
+        await expect(page.locator('.err')).toContainText('Could not create “Lunch”');
+        expect(await callsTo(page, 'sync_now')).toHaveLength(0);
+      });
+
+      test('a create that reached Google stays drawn until the sync brings it in', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => {
+          window.__harness.holdNextSync();
+          window.__harness.failNextCreate('The event was created on Google, but OmaCal could not record it locally. ' +
+            'The next sync will bring it in — do not create it again.');
+        });
+        await createLunch(page);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await expect(page.locator('.err')).toContainText('The event was created on Google');
+        await page.evaluate(() => window.__harness.releaseSync());
+        await expect(block(page, 'Lunch')).toHaveCount(0); // the harness's week has no Lunch
+        expect(await callsTo(page, 'create_event')).toHaveLength(1);
+      });
+
+      test('Quick Add\'s direct create shows at once', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await page.keyboard.press('q');
+        const quick = page.getByRole('dialog', { name: 'Quick add event' });
+        await quick.getByLabel('Describe the event').fill('at 2pm Lunch');
+        await quick.getByRole('button', { name: /^Create/ }).click();
+        await expect(quick).toHaveCount(0);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a new event survives a week step while it saves', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a new repeating event draws one occurrence at once', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page, (f) => f.getByLabel('Repeat', { exact: true }).selectOption('daily'));
+        await expect(block(page, 'Lunch')).toHaveCount(1);
+        await expect(block(page, 'Lunch')).toHaveClass(/pending/);
+        await page.evaluate(() => window.__harness.releaseWrite());
+      });
+
+      test('a new event the next load brings in is drawn once', async ({ page }) => {
+        // `create_impl` stores the row it answers with, so a load after the
+        // write draws the real event; the copy must go in the same update.
+        await writable(page);
+        const w = appWritableWeek();
+        const mon = w.days[0];
+        mon.events.push({ ...mon.events[1], id: CREATED_DETAIL.id, title: 'Lunch' });
+        mon.placed.push({ ...mon.placed[1], idx: mon.events.length - 1, top: 0.5 });
+        await page.evaluate(() => window.__harness.holdNextSync());
+        await createLunch(page);
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync held
+        await page.evaluate((week) => window.__harness.setResponseData({ week }), w);
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await page.getByRole('button', { name: 'Previous week' }).click();
+        await expect(block(page, 'Lunch')).toHaveCount(1);
+        await expect(block(page, 'Lunch')).not.toHaveClass(/pending/);
         await page.evaluate(() => window.__harness.releaseSync());
       });
 

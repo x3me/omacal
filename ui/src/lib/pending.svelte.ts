@@ -22,6 +22,11 @@ export const reconcilePending = (checkpoint: number): void => queue.reconcile(ch
 export const pendingIdle = (): Promise<void> => queue.idle();
 export const resyncPending = (refresh: Refresh): Promise<void> => queue.resync(refresh);
 
+let unsaved = 0;
+/** A temporary id for a new event until Google gives it one (part 3 spec
+ *  §2): negative, so no stored event shares it. */
+export const unsavedId = (): number => --unsaved;
+
 /**
  * Closes a details card once the pending edit it shows has cleared, landed or
  * refused (part 2 review). Its values were `overlayDetail`'s, drawn over a

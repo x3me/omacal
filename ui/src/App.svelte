@@ -3,11 +3,11 @@
   import { responsesIdle, responseCheckpoint, reconcileResponses } from './lib/responses.svelte';
   import {
     pendingChanges, pendingCheckpoint, reconcilePending, holdChange, releaseHold, commitChange,
-    queueChange, isPending, resyncPending, closeWhenEditClears,
+    queueChange, isPending, resyncPending, closeWhenEditClears, unsavedId,
   } from './lib/pending.svelte';
-  import { overlayWeek, overlayMonth, overlayBigYear, overlayDetail, type PendingChange } from './lib/pendingview';
+  import { overlayWeek, overlayMonth, overlayBigYear, overlayDetail, isUnsaved, type PendingChange } from './lib/pendingview';
   import { storeHoldsShift } from './lib/pendingqueue';
-  import { editChange } from './lib/pendingedit';
+  import { createChange, editChange } from './lib/pendingedit';
   import { applyVisibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
@@ -1470,6 +1470,8 @@
    * hit's three numbers.
    */
   async function openOccurrence(id: number, startMs: number, endMs: number, rect: Rect, copies: EventCopy[] = [], thenEdit = false) {
+    // Not on Google yet: nothing to open until it saves (part 3 spec §5).
+    if (isUnsaved({ id })) return;
     gridCopies = copies;
     gridSelId = id;
     gridSelStart = startMs;
@@ -1882,6 +1884,39 @@
     },
   };
 
+  /**
+   * A new event, drawn at once and created behind (part 3 spec, 2026-10-10).
+   *
+   * **`result.notify`, never a constant**: a create can invite people, the
+   * form asks, and this carries the answer.
+   *
+   * `create_impl` stores the row it answers with, so a write that answers says
+   * the store holds it (part 2's rule) and the next load draws the real event.
+   * One failure is not a failure: the backend's fixed created-not-stored
+   * sentence (events.rs, safelisted verbatim) means the event exists and its
+   * guests are already mailed, so it must not be undone the way a refusal is,
+   * which would invite creating it again. It stays drawn, the banner keeps the
+   * sentence, and the follow-up sync fetches it like any other.
+   */
+  function queueCreate(result: EventFormResult) {
+    error = null;
+    const title = result.fields.summary ?? '(no title)';
+    void queueChange(createChange(result, calendars, ymdMs, unsavedId()), {
+      write: async () => {
+        try {
+          await createEvent(result.calendarId, result.fields, result.notify);
+          return true;
+        } catch (e) {
+          if (!String(e).startsWith('The event was created on Google')) throw e;
+          error = String(e);
+          return false;
+        }
+      },
+      ...queuedRefresh,
+      onfailure: (e) => { error = `Could not create “${title}”: ${String(e)}`; },
+    });
+  }
+
   async function saveForm(result: EventFormResult) {
     const request = form;
     if (!request) return;
@@ -1930,49 +1965,15 @@
       return;
     }
 
-    busy = true;
-    error = null;
-    try {
-      // **`result.notify`, never a constant** — the same rule the edit arm
-      // above states at length. A create used to be structurally unable to
-      // mail anybody, so `create_event` sent `sendUpdates=none` on the Rust
-      // side and there was nothing here to carry. Now a create can invite
-      // people, the form asks, and this carries the answer.
-      await createEvent(result.calendarId, result.fields, result.notify);
-    } catch (e) {
-      error = String(e);
-      // One failure is not a failure: a create that reached Google but not
-      // the local store answers with the backend's fixed created-not-stored
-      // sentence (events.rs, safelisted verbatim). The event exists — guests
-      // are already mailed — so this must NOT stop like the errors above,
-      // where stopping invites the user to create the event again. Falling
-      // through to refreshAfterWrite runs the ordinary post-write sync,
-      // which fetches the event like any other; the banner keeps the
-      // sentence so the user knows what happened.
-      if (!String(e).startsWith('The event was created on Google')) return;
-    } finally {
-      busy = false;
-    }
-    await refreshAfterWrite();
+    queueCreate(result);
   }
 
-  /** Quick-add's direct create. It deliberately mirrors the create arm above,
-   * including the “created on Google but not stored yet” recovery: the event
-   * already exists in that case and retrying would duplicate it and its mail. */
-  async function saveQuick(result: EventFormResult) {
+  /** Quick-add's direct create: the same queued create as the form's
+   *  (`queueCreate`), with its created-not-stored rule. */
+  function saveQuick(result: EventFormResult) {
     if (!quickAdd) return;
     quickAdd = null;
-    busy = true;
-    error = null;
-    try {
-      await createEvent(result.calendarId, result.fields, result.notify);
-    } catch (e) {
-      error = String(e);
-      if (!String(e).startsWith('The event was created on Google')) return;
-    } finally {
-      busy = false;
-    }
-    await refreshAfterWrite();
+    queueCreate(result);
   }
 
   function continueQuick(value: EventFormValue) {

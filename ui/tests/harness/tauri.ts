@@ -75,7 +75,7 @@ export type Harness = {
   /** Park the next call to `cmd` until `releaseWrite` or `rejectWrite`: what a
    *  pending-changes spec uses to look at the screen while Google has not
    *  answered yet. */
-  holdNextWrite(cmd: 'update_event' | 'delete_event_cmd'): void;
+  holdNextWrite(cmd: 'update_event' | 'delete_event_cmd' | 'create_event'): void;
   /** Answer a parked write as the real command would; `answer` replaces the
    *  detail it answers `update_event` with (the stored detail by default), for
    *  a spec that needs the row as the write left it. */
@@ -206,7 +206,7 @@ let holdSettingsOnce = false;
 let holdSyncOnce = false;
 let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = null;
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
-let holdWriteOnce: 'update_event' | 'delete_event_cmd' | null = null;
+let holdWriteOnce: 'update_event' | 'delete_event_cmd' | 'create_event' | null = null;
 let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
 type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
 let responseData: ResponseData = {};
@@ -1357,6 +1357,12 @@ export function installTauriStub(scenario: string): Harness {
       // order. A second capture on `window` would be a second thing to keep in
       // step with it.
       case 'create_event':
+        if (holdWriteOnce === 'create_event') {
+          holdWriteOnce = null;
+          return new Promise((resolve, reject) => {
+            parkedWrite = { resolve: (given) => resolve(given ?? CREATED_DETAIL), reject: (m) => reject(new Error(m)) };
+          });
+        }
         if (failCreateOnce !== null) {
           const m = failCreateOnce;
           failCreateOnce = null;
