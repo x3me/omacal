@@ -2140,6 +2140,25 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseSync());
       });
 
+      test('a new event is itself as soon as its write lands, before the sync', async ({ page }) => {
+        // The store holds it once `create_event` answers: drawn as the real,
+        // clickable event then, not after the follow-up sync (part 3 review).
+        await writable(page);
+        const w = appWritableWeek();
+        const mon = w.days[0];
+        mon.events.push({ ...mon.events[1], id: CREATED_DETAIL.id, title: 'Lunch' });
+        mon.placed.push({ ...mon.placed[1], idx: mon.events.length - 1, top: 0.5 });
+        await page.evaluate((week) => window.__harness.setResponseData({ week }), w);
+        await page.evaluate(() => window.__harness.holdNextSync());
+        await createLunch(page);
+        await expect.poll(() => callsTo(page, 'sync_now')).toHaveLength(1); // written; sync held
+        await expect(block(page, 'Lunch')).toHaveCount(1);
+        await expect(block(page, 'Lunch')).not.toHaveClass(/pending/);
+        await block(page, 'Lunch').click();
+        await expect.poll(async () => (await callsTo(page, 'event_detail')).map((a) => a.id)).toContain(CREATED_DETAIL.id);
+        await page.evaluate(() => window.__harness.releaseSync());
+      });
+
       test('a refused create offers to reopen what was typed', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('create_event'));

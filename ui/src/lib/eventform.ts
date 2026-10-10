@@ -1428,8 +1428,14 @@ export function toEventInput(
     // only safe thing for rows nobody touched (reminders spec §2). A change
     // sends explicit overrides — the edited popups plus the preserved email
     // rows — never `useDefault: true`, because the form edits rows and a row
-    // is an override by definition.
-    ...(sameReminders(value, initial)
+    // is an override by definition. A **create**, as with guests above, has
+    // no reminders on the server to leave alone, so its rows are sent whenever
+    // it has any: a refused create reopened (pending changes part 3) holds the
+    // typed rows in its `initial` too, and the diff would read them as nothing
+    // to say. No rows on a create is still absence: the calendar's default.
+    ...((value.isEdit
+      ? sameReminders(value, initial)
+      : value.popupReminders.length + value.emailReminders.length === 0)
       ? {}
       : {
           reminders: {

@@ -2596,6 +2596,22 @@ test.describe('reminders in the value and on the wire', () => {
     });
   });
 
+  /** A create has no server-side reminders to leave alone, so its rows are
+   *  sent whatever its `initial` holds: a refused create reopened (part 3)
+   *  carries the typed rows in its `initial` too (part 3 review). */
+  test('a reopened create still sends the reminders it holds', () => {
+    const value = { ...blankValueAt(1_785_398_400_000, 1), popupReminders: [15] };
+    expect(toEventInput(value, value, TZ).reminders).toEqual({
+      useDefault: false,
+      overrides: [{ method: 'popup', minutes: 15 }],
+    });
+  });
+
+  test('a create with no rows leaves the calendar default', () => {
+    const blank = blankValueAt(1_785_398_400_000, 1);
+    expect(toEventInput(blank, blank, TZ).reminders).toBeUndefined();
+  });
+
   /** Removing every row is a change like any other — `overrides: []` with
    *  `useDefault: false` is "no reminders", distinct from the absent field,
    *  which means "leave them alone" (spec §2). */

@@ -174,3 +174,20 @@ test('the store holds a time change once the row an update answers with has move
   // left the master's row, which is what it answers with, alone.
   expect(storeHoldsShift(before, { start_ms: 1_000, end_ms: 2_000 })).toBe(false);
 });
+
+test('a write that says the store holds it reloads before its sync, so the change is drawn as itself at once', async () => {
+  // A create would otherwise stay a dashed, unclickable copy for the length
+  // of a sync that may first wait out another (part 3 review).
+  const q = new PendingQueue();
+  const s = gate();
+  const order: string[] = [];
+  const done = q.queue(move(1), work(async () => true, {
+    sync: async () => { order.push('sync'); await s.promise; },
+    reload: async () => { order.push('reload'); q.reconcile(q.checkpoint()); },
+  }));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(order).toEqual(['reload', 'sync']);
+  expect(q.changes()).toHaveLength(0);
+  s.resolve();
+  await done;
+});

@@ -301,9 +301,29 @@ pub(crate) async fn create(
     let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
     client.put(&href, &ics, None).await.map_err(friendly)?;
 
-    resync(state, calendar_id).await?;
-    let id = row_id_by_uid(state, calendar_id, &uid).await?;
-    crate::events::event_detail_impl(state, id).await
+    created_but(
+        async {
+            resync(state, calendar_id).await?;
+            let id = row_id_by_uid(state, calendar_id, &uid).await?;
+            crate::events::event_detail_impl(state, id).await
+        }
+        .await,
+    )
+}
+
+/// **Past the PUT, no error may read as "the create failed."** The event
+/// exists on the server; a failure in the local half reported like the ones
+/// before it invites the user to create it again (the app's Reopen even offers
+/// to), and the second attempt duplicates it. The same rule
+/// `create_via_client` keeps for Google: collapse into the safelisted
+/// [`crate::events::CREATED_NOT_STORED`], which the UI keeps drawn until the
+/// next sync heals it, with the cause kept for the log. (Its wording names
+/// Google; the promise it makes holds for a CalDAV server too.)
+fn created_but<T>(r: anyhow::Result<T>) -> anyhow::Result<T> {
+    r.map_err(|e| {
+        tracing::error!(%e, "created on the CalDAV server, but the local half failed");
+        anyhow::anyhow!(crate::events::CREATED_NOT_STORED)
+    })
 }
 
 /// The attendee list a write owns, out of the guest list the form sends.
@@ -622,6 +642,17 @@ pub(crate) async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Past the PUT the event exists on the server, so a failure in the local
+    /// half must say so rather than read as a failed create (part 3 review):
+    /// the UI keeps it drawn, offers no Reopen, and the next sync heals it.
+    #[test]
+    fn a_failure_after_the_put_reads_as_created_not_stored() {
+        let failed: anyhow::Result<i64> =
+            created_but(Err(anyhow::anyhow!("the write landed but the resync did not find it")));
+        assert_eq!(failed.unwrap_err().to_string(), crate::events::CREATED_NOT_STORED);
+        assert_eq!(created_but(Ok(7)).unwrap(), 7);
+    }
 
     /// The three-state that keeps every guest-free write harmless (#114): a
     /// path with no attendee editor sends `None`, and `None` is what tells

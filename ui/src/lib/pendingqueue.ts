@@ -116,6 +116,12 @@ export class PendingQueue {
         return;
       }
       this.mark(token, stored ? { saved: true, synced: true } : { saved: true });
+      // The store already holds it: draw it now, as itself (a new event turns
+      // into the real, clickable one), rather than after a sync that may first
+      // wait out another already running (part 3 review).
+      if (stored) {
+        try { await work.reload(); } catch { /* `reload` reports its own failure */ }
+      }
       try {
         await work.sync();
       } catch (error) {
