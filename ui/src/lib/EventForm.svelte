@@ -537,7 +537,7 @@
       invalidField = 'repeatEnd';
       return;
     }
-    const result = { calendarId: value.calendarId, scope, fields: toEventInput(value, initial, zoneName()) };
+    const result = { calendarId: value.calendarId, scope, value: $state.snapshot(value), fields: toEventInput(value, initial, zoneName()) };
 
     // **Spec §3: whether to mail the guests is a choice, not a consequence.**
     //

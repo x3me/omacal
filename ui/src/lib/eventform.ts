@@ -31,6 +31,9 @@ export type EventFormResult = {
   /** Meaningless for a create, and for a one-off edit; always `'this'` there. */
   scope: Scope;
   fields: EventInput;
+  /** The form's own value at Save, so a refused create can be reopened with
+   *  everything that was typed (part 3 spec §6). */
+  value: EventFormValue;
   /**
    * Who Google mails about this save (spec §3).
    *

@@ -1898,6 +1898,11 @@
    * which would invite creating it again. It stays drawn, the banner keeps the
    * sentence, and the follow-up sync fetches it like any other.
    */
+  /** The banner's button for a refused create (part 3 spec §6): shown only
+   *  while the banner still holds the message it was set with, so the next
+   *  load (which clears the banner) or a later error takes it away. */
+  let retry = $state<{ forError: string; label: string; run: () => void } | null>(null);
+
   function queueCreate(result: EventFormResult) {
     error = null;
     const title = result.fields.summary ?? '(no title)';
@@ -1913,7 +1918,18 @@
         }
       },
       ...queuedRefresh,
-      onfailure: (e) => { error = `Could not create “${title}”: ${String(e)}`; },
+      onfailure: (e) => {
+        const message = `Could not create “${title}”: ${String(e)}`;
+        error = message;
+        retry = {
+          forError: message, label: 'Reopen',
+          run: () => {
+            error = null;
+            retry = null;
+            form = { mode: 'create', anchor: keyboardAnchor(), initial: result.value };
+          },
+        };
+      },
     });
   }
 
@@ -2298,6 +2314,7 @@
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
     {busy} {error} {calendars} {view} {listMode}
+    errorAction={retry && retry.forError === error ? retry : null}
     onToggleList={toggleList}
     onPrev={() => step(-1)}
     onNext={() => step(1)}

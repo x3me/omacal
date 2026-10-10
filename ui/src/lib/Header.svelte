@@ -17,7 +17,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, syncing = false, error, calendars, view, onpick,
+    busy, syncing = false, error, errorAction = null, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange, ontasks,
@@ -50,6 +50,9 @@
     signingIn?: boolean;
     onCancelSignIn?: () => void;
     error: string | null;
+    /** A button beside the error, for a failure with a next step (a refused
+     *  create's Reopen, part 3 spec §6). */
+    errorAction?: { label: string; run: () => void } | null;
     calendars: Calendar[];
     /** The view the switcher shows as current — `App`'s own `view` state,
      *  passed straight through. */
@@ -481,7 +484,10 @@
   </p>
 {/if}
 {#if error}
-  <p class="err">{error}</p>
+  <p class="err" class:with-action={!!errorAction}>
+    <span>{error}</span>
+    {#if errorAction}<button type="button" onclick={errorAction.run}>{errorAction.label}</button>{/if}
+  </p>
 {/if}
 
 <!-- The reconnect prompt, and the reason it is not the `error` banner above:
@@ -674,12 +680,13 @@
          padding: 7px 10px; border-radius: 6px;
          background: color-mix(in srgb, var(--error) 9%, transparent);
          overflow-wrap: anywhere; }
-  /* The one banner with a button in it: the sentence wraps, the button
-     stays a button. Inherits .err's colours — this is still a failure, just
-     one with a fix attached. */
-  .reauth { display: flex; align-items: center; justify-content: space-between;
+  /* The banners with a button in them, the reconnect prompt and a failure
+     with a next step (`errorAction`): the sentence wraps, the button stays a
+     button. Inherits .err's colours — this is still a failure, just one with
+     a fix attached. */
+  .reauth, .with-action { display: flex; align-items: center; justify-content: space-between;
             gap: 12px; flex-wrap: wrap; }
-  .reauth button { border: none; border-radius: 6px; padding: 5px 12px;
+  .reauth button, .with-action button { border: none; border-radius: 6px; padding: 5px 12px;
                    font-size: 12.5px; cursor: pointer; }
   /* The .err shape in the accent's clothes: same box, calmer colours,
      because this banner reports an option rather than a problem. */

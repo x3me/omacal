@@ -47,6 +47,7 @@
     oncreate({
       calendarId: parsed.value.calendarId,
       scope: 'this',
+      value: parsed.value,
       fields: toEventInput(parsed.value, parsed.baseline, zoneName()),
       // Typing an address is an explicit invitation, and the button names the
       // mail effect before it is pressed. Continue editing takes the existing

@@ -2140,6 +2140,31 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseSync());
       });
 
+      test('a refused create offers to reopen what was typed', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page, (f) => f.getByLabel('Location', { exact: true }).fill('Cafe'));
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(page.locator('.err')).toContainText('Could not create “Lunch”');
+
+        await page.locator('.err').getByRole('button', { name: 'Reopen' }).click();
+        await expect(newForm(page)).toBeVisible();
+        await expect(newForm(page).getByLabel('Title', { exact: true })).toHaveValue('Lunch');
+        await expect(newForm(page).getByLabel('Location', { exact: true })).toHaveValue('Cafe');
+        await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+      });
+
+      test('Reopen goes when the banner clears', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
+        await createLunch(page);
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
+        await page.getByRole('button', { name: 'Next week' }).click(); // a load clears the banner
+        await expect(page.locator('.err')).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+      });
+
       test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextSync());
