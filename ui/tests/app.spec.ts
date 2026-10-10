@@ -2007,7 +2007,7 @@ test.describe('App', () => {
       });
 
       /** `n`, a title, Create: a new event on the anchor day (Mon 29 Jan). */
-      const createLunch = async (page: Page, setUp: (form: ReturnType<typeof newForm>) => Promise<void> = async () => {}) => {
+      const createLunch = async (page: Page, setUp: (form: ReturnType<typeof newForm>) => Promise<unknown> = async () => {}) => {
         await page.keyboard.press('n');
         await expect(newForm(page)).toBeVisible();
         await newForm(page).getByLabel('Title', { exact: true }).fill('Lunch');
