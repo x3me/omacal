@@ -2115,6 +2115,17 @@ export const TASKS: Task[] = [
     completed: true, completedMs: APP_NOW - 4 * 24 * H, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
 ];
 
+/** The `task-visibility` scenario's tasks: one on `Team` (8) and one on
+ *  `Personal` (9), both due Monday. The real `list_tasks` only answers for
+ *  lists whose calendar is shown, so a spec can tell a task surface that
+ *  re-reads after a visibility change from one that keeps what it had. */
+export const VISIBILITY_TASKS: Task[] = [
+  { id: 31, calendarId: 8, summary: 'Team errand', notes: null, dueMs: APP_MON + 12 * H, dueAllDay: true,
+    completed: false, completedMs: null, calendar: 'Team', color: '#2fbf71', priority: 0, canWrite: true },
+  { id: 32, calendarId: 9, summary: 'Home errand', notes: null, dueMs: APP_MON + 12 * H, dueAllDay: true,
+    completed: false, completedMs: null, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
+];
+
 /** Done long enough ago that `list_tasks` no longer carries them: only the
  *  Done list's search (`search_done_tasks`) reaches these. Newest first, as
  *  the backend orders them — and one titled in Bulgarian, and one found

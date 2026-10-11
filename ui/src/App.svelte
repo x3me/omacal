@@ -955,7 +955,13 @@
     // freshly connected account must appear in the modal the moment its
     // calendars do, not at the next status poll — "did it work?" deserves
     // an answer the user can see.
-    await Promise.all([refreshCalendars(), reload(), refreshStatus()]);
+    //
+    // Tasks ride along because they are filtered on `selected` too
+    // (`tasks_for_ui` joins on it): the TASKS row, the sidebar and Month's
+    // cells all draw from the one task list, which nothing else re-reads when
+    // a calendar is shown or hidden — only a sync, or the sidebar being
+    // opened afresh.
+    await Promise.all([refreshCalendars(), reload(), refreshStatus(), reloadTasks()]);
   }
 
   // What to fetch for the view currently on screen, at the date currently
