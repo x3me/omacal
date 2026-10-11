@@ -6,6 +6,7 @@
   import DateField from './DateField.svelte';
   import TimeField from './TimeField.svelte';
   import ListPicker, { type ListChoice } from './ListPicker.svelte';
+  import { calendarInk } from './calendars';
   import { beganDrag } from './drag';
   import { beginCarry, carried, endCarry, moveCarry, taskLanding, type TaskLanding } from './taskdrag.svelte';
   import { clockFormat } from './clock.svelte';
@@ -338,7 +339,7 @@
   const groups = $derived(grouping === 'when' ? byWhen : byList);
 
   const listColor = (t: Task) =>
-    t.color ?? lists.find((l) => l.calendarId === t.calendarId)?.color ?? 'var(--muted)';
+    calendarInk(t.color ?? lists.find((l) => l.calendarId === t.calendarId)?.color);
 
   /** What the add row's picker offers: where the next task goes. */
   const addChoices = $derived<ListChoice[]>([
@@ -610,7 +611,7 @@
     {@const c = carried()!}
     <div class="carry" class:nowhere={taskLanding() === null} aria-hidden="true"
          style:left="{c.x + 12}px" style:top="{c.y + 10}px">
-      <span class="tick" style:background={c.color ?? 'var(--muted)'}></span>{c.summary}
+      <span class="tick" style:background={calendarInk(c.color)}></span>{c.summary}
     </div>
   {/if}
   <div class="top">
@@ -694,7 +695,7 @@
     {:else}
       {#each groups as g (g.key)}
         <div class="head" class:listhead={g.list !== null}>
-          {#if g.color}<span class="tick" style:background={g.color}></span>{/if}
+          {#if g.list}<span class="tick" style:background={calendarInk(g.color)}></span>{/if}
           {#if g.list && naming === g.list.calendarId}
             <input class="lname" aria-label="List name" bind:this={listInput} bind:value={listName}
                    disabled={listBusy} onkeydown={listKeys} />
@@ -816,7 +817,7 @@
             <div class="newline" onfocusout={leaveLine}>
               <div class="row">
                 <span class="box" aria-hidden="true"></span>
-                <span class="tick" style:background={g.color ?? 'var(--muted)'}></span>
+                <span class="tick" style:background={calendarInk(g.color)}></span>
                 <input class="ntitle" aria-label="New task on {g.label}" placeholder="New task"
                        bind:this={lineInput} bind:value={line.summary} disabled={lineBusy}
                        onkeydown={lineKeys} />

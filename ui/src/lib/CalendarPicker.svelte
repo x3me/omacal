@@ -1,6 +1,6 @@
 <!-- ui/src/lib/CalendarPicker.svelte -->
 <script lang="ts">
-  import { byAccount, type Calendar } from './calendars';
+  import { byAccount, calendarInk, type Calendar } from './calendars';
 
   let {
     calendars,
@@ -54,7 +54,7 @@
     title={disabled ? disabledReason : (chosen?.summary ?? 'Calendar')}
     onclick={() => (open = !open)}
   >
-    <i style="background:{chosen?.color_hex ?? 'var(--accent)'}"></i>
+    <i style="background:{calendarInk(chosen?.color_hex)}"></i>
   </button>
 
   {#if open}
@@ -72,7 +72,7 @@
             class:current={c.id === value}
             onclick={() => pick(c.id)}
           >
-            <i style="background:{c.color_hex ?? 'var(--accent)'}"></i>
+            <i style="background:{calendarInk(c.color_hex)}"></i>
             <span class="name">{c.summary}</span>
             {#if c.id === value}<span class="check" aria-hidden="true">✓</span>{/if}
           </button>
