@@ -700,6 +700,7 @@ type StubSettings = {
   minSyncIntervalMs: number;
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  calendarGroups: { name: string; calendarIds: number[] }[];
   showDate: boolean;
   menubarDayView?: boolean;
   menubarLabel?: boolean;
@@ -791,6 +792,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   transparentWindow: true,
   listMode: false,
   combineIdenticalEvents: false,
+  calendarGroups: [],
   // The mark, which is what the tray has always worn.
   showDate: false,
   // The grid's own 70, so every column golden holds.
@@ -948,6 +950,15 @@ export function installTauriStub(scenario: string): Harness {
    *  `set_calendar_selected` moves, so that `list_tasks` can answer as the
    *  backend does. */
   const visibilityCalendars: Calendar[] = structuredClone(APP_WRITE_CALENDARS);
+  /** The `calendar-groups` scenario's list, whose `selected` flags the two
+   *  commands above move. Ends with a local task list (`sync_enabled` off, its
+   *  checkbox disabled), which a group must neither capture nor hide. */
+  const GROUP_LOCAL_LIST_ID = 40;
+  const groupCalendars: Calendar[] = structuredClone([
+    ...APP_WRITE_CALENDARS,
+    { ...APP_WRITE_CALENDARS[1], id: GROUP_LOCAL_LIST_ID, summary: 'Chores', provider: 'local',
+      sync_enabled: false, selected: true },
+  ]);
   let cancelPendingSignIn: ((reason: string) => void) | undefined;
   /** Whether `take_open_date` has answered — the real command clears on
    *  read, and a stub that kept answering would hide a remount replaying
@@ -1098,6 +1109,8 @@ export function installTauriStub(scenario: string): Harness {
               is_primary: false },
           ] as Calendar[];
         }
+        // Stateful, so a spec can watch a group switch change what is shown.
+        if (scenario === 'calendar-groups') return structuredClone(groupCalendars);
         return scenario === 'sign-in-adds-account' && signedIn
           ? SIGNED_IN_CALENDARS
           : ([] as Calendar[]);
@@ -1287,6 +1300,16 @@ export function installTauriStub(scenario: string): Harness {
           const c = visibilityCalendars.find((c) => c.id === args.id);
           if (c) c.selected = Boolean(args.on);
         }
+        if (scenario === 'calendar-groups') {
+          const c = groupCalendars.find((c) => c.id === args.id);
+          if (c) c.selected = Boolean(args.on);
+        }
+        return calendarResult(cmd, undefined);
+      // The bulk apply: exactly these shown, every other hidden.
+      case 'set_calendars_shown':
+        // Mirrors `set_selected_exactly`: only sync-enabled rows move, and a
+        // named id switches on only if it is one.
+        for (const c of groupCalendars) if (c.sync_enabled) c.selected = (args.ids as number[]).includes(c.id);
         return calendarResult(cmd, undefined);
       case 'set_calendar_sync':
         return calendarResult(cmd, CALENDAR_SYNC_REMOVED);
