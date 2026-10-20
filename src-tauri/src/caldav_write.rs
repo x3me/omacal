@@ -309,6 +309,7 @@ pub(crate) async fn create(
         }
         .await,
     )
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// **Past the PUT, no error may read as "the create failed."** The event
@@ -472,6 +473,7 @@ pub(crate) async fn update(
         }
         .await,
     )
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// Google's response vocabulary rendered as `PARTSTAT` — two spellings of
