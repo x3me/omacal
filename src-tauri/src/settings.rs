@@ -109,6 +109,8 @@ pub(crate) const MENUBAR_DAYS_AHEAD_KEY: &str = "menubar_days_ahead";
 pub(crate) const DATE_FORMAT_KEY: &str = "date_format";
 pub(crate) const VISIBLE_HOURS_KEY: &str = "visible_hours";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
+/// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
+const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -764,6 +766,71 @@ pub struct AppSettings {
     /// process-level `TZ` is involved; the webview converts at render time
     /// from the IANA name itself.
     pub second_timezone: Option<String>,
+    /// The saved calendar groups, in the order the switcher lists them (and so
+    /// the order ⌘1–⌘9 count in). Which one is *active* is not stored: it is
+    /// whichever group's calendars are exactly the ones shown right now, worked
+    /// out in the UI, so toggling a calendar by hand can never leave a stale
+    /// "active" mark behind. Empty for installs without the row.
+    pub calendar_groups: Vec<CalendarGroup>,
+}
+
+/// A named, saved choice of which calendars are **shown** — the `selected`
+/// flag, not `sync_enabled`. Applying one is a display change only; nothing
+/// stops syncing and nothing reaches Google. Ids that no longer name a
+/// calendar the picker can toggle (`sync_enabled`) are left in place and
+/// ignored when a group is applied or compared, rather than pruned on every
+/// calendar removal. That keeps a calendar's place in a group across sync off
+/// and on, which keeps its id; it does not survive removing an account and
+/// connecting it again, which mints new ids — a group left with none of its
+/// calendars is refused when applied, and wants updating or deleting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarGroup {
+    pub name: String,
+    pub calendar_ids: Vec<i64>,
+}
+
+/// More than this and the switcher is a list nobody scans, and ⌘1–⌘9 reach
+/// only nine anyway. A bound so a hand-written invoke cannot grow the row
+/// without limit, not a number anyone should meet.
+const MAX_CALENDAR_GROUPS: usize = 50;
+const MAX_CALENDAR_GROUP_NAME: usize = 60;
+
+/// The stored groups, or none when the row is absent or is not what
+/// [`validate_calendar_groups`] would have written — a hand-edited row must
+/// land on "no groups", not on a broken switcher.
+async fn calendar_groups(pool: &SqlitePool) -> Vec<CalendarGroup> {
+    read(pool, CALENDAR_GROUPS_KEY)
+        .await
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Trims names, refuses the ones the switcher could not tell apart, and drops
+/// repeated ids. Returns what to store, so the row only ever holds the
+/// normalised form.
+fn validate_calendar_groups(groups: &[CalendarGroup]) -> Result<Vec<CalendarGroup>, String> {
+    if groups.len() > MAX_CALENDAR_GROUPS {
+        return Err(format!("You can keep up to {MAX_CALENDAR_GROUPS} calendar groups."));
+    }
+    let mut out: Vec<CalendarGroup> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let name = g.name.trim();
+        if name.is_empty() {
+            return Err("A calendar group needs a name.".into());
+        }
+        if name.chars().count() > MAX_CALENDAR_GROUP_NAME {
+            return Err(format!("A group name can be up to {MAX_CALENDAR_GROUP_NAME} characters."));
+        }
+        if out.iter().any(|o| o.name.to_lowercase() == name.to_lowercase()) {
+            return Err("Two calendar groups cannot share a name.".into());
+        }
+        let mut ids = g.calendar_ids.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        out.push(CalendarGroup { name: name.to_string(), calendar_ids: ids });
+    }
+    Ok(out)
 }
 
 pub(crate) async fn read(pool: &SqlitePool, key: &str) -> Option<String> {
@@ -876,6 +943,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // turning the calendar into a list.
         list_mode: read(pool, LIST_MODE_KEY).await.map(|v| v == "1").unwrap_or(false),
         combine_identical_events: combine_identical_events(pool).await,
+        calendar_groups: calendar_groups(pool).await,
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
         show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
@@ -1498,6 +1566,10 @@ pub enum Setting {
     VisibleHours { start: u8, end: u8 },
     HideWeekends(bool),
     CombineIdenticalEvents(bool),
+    /// The whole list, replaced in one write: the UI edits it as a list
+    /// (add, rename, reorder, delete, "update to current"), and one value is
+    /// one decision, never a half-applied edit.
+    CalendarGroups(Vec<CalendarGroup>),
     /// Also leaves "Last view" mode, in the same write — `WeekStart`'s shape.
     DefaultView(DefaultView),
     /// The Tasks pane's within-group order. View-only, so it needs no reboot
@@ -1754,6 +1826,11 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         }
         S::HideWeekends(on) => write(pool, HIDE_WEEKENDS_KEY, flag(*on)).await?,
         S::CombineIdenticalEvents(on) => write(pool, COMBINE_IDENTICAL_EVENTS_KEY, flag(*on)).await?,
+        S::CalendarGroups(groups) => {
+            let groups = validate_calendar_groups(groups).map_err(SetError::Refused)?;
+            let json = serde_json::to_string(&groups).map_err(|e| SetError::Failed(e.into()))?;
+            write(pool, CALENDAR_GROUPS_KEY, &json).await?;
+        }
         S::DefaultView(view) => {
             write_all(pool, &[(DEFAULT_VIEW_KEY, view.as_str()), (DEFAULT_VIEW_FOLLOWS_LAST_KEY, "0")])
                 .await?;
@@ -1847,6 +1924,10 @@ mod tests {
         assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
         assert!(matches!(read(json!({"key": "keepRemindersOnScreen", "value": true})), Setting::KeepRemindersOnScreen(true)));
         assert!(matches!(read(json!({"key": "hideWeekends", "value": true})), Setting::HideWeekends(true)));
+        assert!(matches!(
+            read(json!({"key": "calendarGroups", "value": [{"name": "Work", "calendarIds": [1, 2]}]})),
+            Setting::CalendarGroups(ref g) if g == &[CalendarGroup { name: "Work".into(), calendar_ids: vec![1, 2] }]
+        ));
         assert!(matches!(
             read(json!({"key": "menubarDateFormat", "value": {"format": "custom", "custom": "%-d"}})),
             Setting::MenubarDateFormat { .. }
@@ -2907,6 +2988,30 @@ mod tests {
         assert!(!s.hide_weekends);
         write(&p, HIDE_WEEKENDS_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.hide_weekends, "a stray value must not change the app's face");
+    }
+
+    /// Calendar groups round-trip as one JSON row in the order given, the
+    /// stored form is trimmed and de-duplicated, what the switcher could not
+    /// tell apart or name is refused, and a hand-edited row reads as no groups.
+    #[tokio::test]
+    async fn calendar_groups_are_stored_validated_and_read_back() {
+        let p = pool().await;
+        assert!(read_settings(&p).await.calendar_groups.is_empty(), "a fresh install has none");
+        let g = |name: &str, ids: &[i64]| CalendarGroup { name: name.into(), calendar_ids: ids.to_vec() };
+        let s = set(&p, Setting::CalendarGroups(vec![g("  Work ", &[3, 1, 3]), g("Home", &[])])).await.unwrap();
+        assert_eq!(s.calendar_groups, vec![g("Work", &[1, 3]), g("Home", &[])]);
+        assert_eq!(read_settings(&p).await.calendar_groups, s.calendar_groups);
+        for bad in [
+            vec![g("   ", &[1])],
+            vec![g("Work", &[1]), g("work", &[2])],
+            vec![g(&"x".repeat(MAX_CALENDAR_GROUP_NAME + 1), &[1])],
+            (0..=MAX_CALENDAR_GROUPS).map(|i| g(&format!("g{i}"), &[])).collect(),
+        ] {
+            assert!(matches!(store(&p, &Setting::CalendarGroups(bad)).await, Err(SetError::Refused(_))));
+        }
+        assert_eq!(read_settings(&p).await.calendar_groups, s.calendar_groups, "a refusal stores nothing");
+        write(&p, CALENDAR_GROUPS_KEY, "not json").await.unwrap();
+        assert!(read_settings(&p).await.calendar_groups.is_empty());
     }
 
     /// The hour height round-trips, and a stored value the gesture could

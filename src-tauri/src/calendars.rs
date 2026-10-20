@@ -19,6 +19,21 @@ pub async fn set_calendar_selected(
         .map_err(|e| crate::errors::user_facing(&e))
 }
 
+/// Shows exactly these calendars and hides the rest of the sync-enabled ones
+/// (the ones the picker can toggle): applying a calendar group.
+/// All-or-nothing, and display only — see
+/// `omacal_store::set_selected_exactly`. The UI refreshes the way it does
+/// after a single toggle.
+#[tauri::command]
+pub async fn set_calendars_shown(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    omacal_store::set_selected_exactly(&state.pool, &ids)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))
+}
+
 /// Sets or clears a calendar's colour, **locally and only locally**.
 ///
 /// `hex` of `None` clears the override and the calendar follows Google's own

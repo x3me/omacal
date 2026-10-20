@@ -6,6 +6,8 @@
   import { escapeCloses } from './dismiss.svelte';
   import { listable } from './filmstrip';
   import CalendarPopover from './CalendarPopover.svelte';
+  import CalendarGroupSwitcher from './CalendarGroupSwitcher.svelte';
+  import type { CalendarGroup } from './calendargroups';
   import InviteTray from './InviteTray.svelte';
   import { pendingResponseCount, unshownResponseFailures, dismissResponseFailure } from './responses.svelte';
   import { pendingChangeCount } from './pending.svelte';
@@ -20,6 +22,7 @@
     busy, syncing = false, error, errorAction = null, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
+    groups = [], onapplygroup = () => {}, onsavegroups = async () => {},
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange, ontasks,
     onWhatsNew, onRestart, onUpdate,
     invites = [], declines = [], changes = [], oninvitesanswered = () => {}, oninvitesdismissed = () => {},
@@ -65,6 +68,12 @@
     /** Asked to flip it. Not flipped here: the value is stored in the settings
      *  table, and `App` owns every write in this app. */
     onToggleList: () => void;
+    /** The saved calendar groups, for the switcher beside the list toggle.
+     *  Applying and storing are `App`'s, like every other write: the same
+     *  apply is what ⌘1–⌘9 does with this panel closed. */
+    groups?: CalendarGroup[];
+    onapplygroup?: (i: number) => void;
+    onsavegroups?: (next: CalendarGroup[]) => Promise<void>;
     onPrev: () => void; onNext: () => void; onToday: () => void;
     /** Opens the search overlay. A small control rather than a field: the
      *  header was emptied on purpose (settings spec §1) and putting a
@@ -335,6 +344,12 @@
         title="List view (F)"
         onclick={onToggleList}
       >{listMode ? '☰' : '▦'}</button>
+    {/if}
+    <!-- Absent with no calendars at all (not yet connected): there is nothing
+         to group, and a switcher offering to save an empty set is noise. -->
+    {#if calendars.length > 0}
+      <CalendarGroupSwitcher {calendars} {groups} onapply={onapplygroup} onsave={onsavegroups}
+                             onchange={oncalendarchange} />
     {/if}
   </div>
 
