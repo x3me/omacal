@@ -1042,7 +1042,20 @@ mod today_of_month_tests {
 
 /// decisions ("what should I ask Google for?") must read one definition.
 pub(crate) fn synced_window(now_ms: i64) -> (i64, i64) {
+    window_for(now_ms, FULL_HISTORY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The "Sync full history" setting, mirrored here so the sync and the year
+/// views read one answer without each going to the database.
+pub(crate) static FULL_HISTORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Full history is 1900 to 2200, fixed rather than sliding: an end that moved
+/// every day would make `window_advanced_a_day` refetch everything daily.
+fn window_for(now_ms: i64, full_history: bool) -> (i64, i64) {
     const DAY: i64 = 24 * 3_600_000;
+    if full_history {
+        return (-2_208_988_800_000, 7_258_118_400_000);
+    }
     (now_ms - 180 * DAY, now_ms + 365 * DAY)
 }
 
@@ -1583,6 +1596,8 @@ pub fn run() {
                 quit_on_close: std::sync::atomic::AtomicBool::new(quit_on_close),
                 open_date: std::sync::Mutex::new(open_date),
             });
+            let full = tauri::async_runtime::block_on(settings::full_history_sync(&app.state::<AppState>().pool));
+            FULL_HISTORY.store(full, std::sync::atomic::Ordering::Relaxed);
             sync_loop::spawn(app.handle().clone());
             // Before the first palette is resolved: off Omarchy, "Follow the
             // desktop theme" follows the system's light-or-dark.
@@ -2104,6 +2119,8 @@ mod tests {
         let (from, to) = synced_window(now);
         assert_eq!(from, now - 180 * DAY);
         assert_eq!(to, now + 365 * DAY);
+        assert_eq!(window_for(now, true), window_for(now + 400 * DAY, true), "full history must not slide");
+        assert_eq!(omacal_sync::to_rfc3339(window_for(now, true).0), "1900-01-01T00:00:00Z");
         assert!(from < now && now < to);
     }
 

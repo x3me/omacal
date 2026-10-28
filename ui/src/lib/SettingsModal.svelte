@@ -1006,6 +1006,20 @@
         finite, and a desktop app has no business polling faster.
       </p>
 
+      <label class="check section-start">
+        <input
+          type="checkbox"
+          checked={settings?.fullHistorySync ?? false}
+          disabled={!settings}
+          onchange={async (e) => (settings = await setSetting('fullHistorySync', e.currentTarget.checked))}
+        />
+        Sync full history
+      </label>
+      <p class="hint">
+        Fetch every event, not just 180 days back and a year ahead. The next
+        sync refetches each calendar in full, which takes longer on a large one.
+      </p>
+
       <div class="row section-start">
         <label class="lab" for="default-cal">New events land on</label>
         <div class="inline">
