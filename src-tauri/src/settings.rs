@@ -117,6 +117,7 @@ const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
+const FULL_HISTORY_SYNC_KEY: &str = "full_history_sync";
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -529,6 +530,9 @@ pub struct AppSettings {
     /// say what the minimum is in order to refuse a smaller one with a reason,
     /// and a second copy of the number in TypeScript is one that drifts.
     pub min_sync_interval_ms: i64,
+    /// Sync everything rather than 180 days back and 365 ahead. Off by
+    /// default: turning it on refetches each calendar whole.
+    pub full_history_sync: bool,
     /// Whether Day, Week and Month draw as a list rather than a grid — the
     /// filmstrip toggle (filmstrip spec §4).
     ///
@@ -945,6 +949,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // so a stray value keeps today's behaviour.
         keep_reminders_on_screen: read(pool, KEEP_REMINDERS_KEY).await.as_deref() == Some("1"),
         min_sync_interval_ms: crate::sync_loop::MIN_INTERVAL_MS,
+        full_history_sync: full_history_sync(pool).await,
         // **The grid is what a calendar looks like until somebody says
         // otherwise**, so the absent row reads as off — the opposite polarity
         // to `notifications_enabled` above, and for the opposite reason. A
@@ -1465,6 +1470,10 @@ async fn visible_hours(pool: &SqlitePool) -> (u8, u8) {
     }).unwrap_or((0, 24))
 }
 
+pub(crate) async fn full_history_sync(pool: &SqlitePool) -> bool {
+    read(pool, FULL_HISTORY_SYNC_KEY).await.as_deref() == Some("1")
+}
+
 /// Display grouping is opt-in and never changes the stored calendar events.
 pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
     read(pool, COMBINE_IDENTICAL_EVENTS_KEY).await.as_deref() == Some("1")
@@ -1489,6 +1498,7 @@ pub enum Setting {
     /// Refused below the floor. `sync_loop::interval_ms` still clamps on the
     /// way *out*, because a row edited by hand never passed through here.
     SyncIntervalMs(i64),
+    FullHistorySync(bool),
     /// The convenience clock beside the real one; `None`/blank turns it off.
     /// Validated against jiff, as the display zone is. **No restart**, unlike
     /// the display zone (which keeps its own command for that reason):
@@ -1687,6 +1697,10 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
                 return Err(refused(INTERVAL_TOO_SHORT));
             }
             write(pool, SYNC_INTERVAL_KEY, &ms.to_string()).await?;
+        }
+        S::FullHistorySync(on) => {
+            write(pool, FULL_HISTORY_SYNC_KEY, flag(*on)).await?;
+            crate::FULL_HISTORY.store(*on, std::sync::atomic::Ordering::Relaxed);
         }
         S::SecondTimezone(tz) => {
             let tz = validate_second_timezone(tz.clone()).map_err(SetError::Refused)?;
@@ -1888,6 +1902,7 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
         S::QuitOnClose(on) => state.quit_on_close.store(*on, std::sync::atomic::Ordering::Relaxed),
         S::StartOnLogin(mode) => crate::tray::apply_autostart(app, state.demo, mode.registers()),
         S::InterfaceScalePercent(percent) => apply_interface_scale(app, *percent),
+        S::FullHistorySync(_) => crate::sync_loop::request_now(app),
         _ => {}
     }
     if setting.shows_on_menu_surfaces() {

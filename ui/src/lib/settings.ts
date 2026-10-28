@@ -110,6 +110,7 @@ export type AppSettings = {
    *  is what decides there. */
   keepRemindersOnScreen: boolean;
   minSyncIntervalMs: number;
+  fullHistorySync: boolean;
   /** Whether Day, Week and Month draw as a list rather than a grid (filmstrip
    *  spec §4). No settings tab shows it — the control is the `▦`/`☰` beside the
    *  view switcher — but it is a preference and is stored beside the others,
@@ -295,6 +296,7 @@ export const appearancePreviews = () =>
 export type SettingValues = {
   /** Refused below `minSyncIntervalMs`, never clamped. */
   syncIntervalMs: number;
+  fullHistorySync: boolean;
   /** `null` turns the second clock off. */
   secondTimezone: string | null;
   weatherEnabled: boolean;

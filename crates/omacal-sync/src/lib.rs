@@ -86,7 +86,9 @@ pub async fn window_advanced_a_day(
         };
     match stored {
         None => true,
-        Some(end) => end.div_euclid(DAY) < window_end_ms.div_euclid(DAY),
+        // `!=`, not `<`: turning "Sync full history" off brings the end back
+        // from 2200, and that calendar must still fetch what comes into range.
+        Some(end) => end.div_euclid(DAY) != window_end_ms.div_euclid(DAY),
     }
 }
 
@@ -456,6 +458,8 @@ mod tests {
 
         // The next day, once.
         assert!(window_advanced_a_day(&pool, 1, 11 * DAY).await);
+        // And a window that comes back (full history turned off) is moved too.
+        assert!(window_advanced_a_day(&pool, 1, 9 * DAY).await);
 
         // A feed records no window at all (migration 0017 made the columns
         // nullable); it fetches its file whole, so the answer is moot but must
