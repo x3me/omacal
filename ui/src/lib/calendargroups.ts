@@ -44,12 +44,15 @@ export function liveIds(group: CalendarGroup, cals: Calendar[]): number[] {
   return [...new Set(group.calendarIds)].filter((id) => known.has(id)).sort((a, b) => a - b);
 }
 
-/** The first group whose calendars are exactly the ones shown, or `-1`. */
+/** The first group whose calendars are exactly the ones shown, or `-1`. A
+ *  group with no live calendar is never active: with every calendar hidden,
+ *  its `[]` would equal the shown `[]` and the button would name a group that
+ *  shows nothing. */
 export function activeGroupIndex(groups: CalendarGroup[], cals: Calendar[]): number {
   const shown = shownIds(cals);
   return groups.findIndex((g) => {
     const ids = liveIds(g, cals);
-    return ids.length === shown.length && ids.every((id, i) => id === shown[i]);
+    return ids.length > 0 && ids.length === shown.length && ids.every((id, i) => id === shown[i]);
   });
 }
 

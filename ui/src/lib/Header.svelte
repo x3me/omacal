@@ -235,6 +235,9 @@
   /** The hamburger's menu. Everything that used to sit in the header and is
    *  used rarely now lives here (spec §1). */
   let menuOpen = $state(false);
+  /** The group switcher's panel, bound so the switcher outlives its last group
+   *  for as long as that panel is open. */
+  let groupsOpen = $state(false);
 
   function openSettings() {
     menuOpen = false;
@@ -345,11 +348,14 @@
         onclick={onToggleList}
       >{listMode ? '☰' : '▦'}</button>
     {/if}
-    <!-- Absent with no calendars at all (not yet connected): there is nothing
-         to group, and a switcher offering to save an empty set is noise. -->
-    {#if calendars.length > 0}
+    <!-- Absent until a group exists: the header was emptied on purpose
+         (settings spec §1), and someone who never makes a group should never
+         see a button for them. The first is made in Menu → Calendars. Kept
+         while its panel is open, so deleting the last group from there does
+         not yank the panel away mid-click. -->
+    {#if calendars.length > 0 && (groups.length > 0 || groupsOpen)}
       <CalendarGroupSwitcher {calendars} {groups} onapply={onapplygroup} onsave={onsavegroups}
-                             onchange={oncalendarchange} />
+                             onchange={oncalendarchange} bind:open={groupsOpen} />
     {/if}
   </div>
 
@@ -447,7 +453,8 @@
                  staying separate, the busy set, the keyed each — travels
                  unchanged. Its own specs mount it standalone and never knew
                  where it lived. -->
-            <CalendarPopover {calendars} onchange={oncalendarchange} bind:open />
+            <CalendarPopover {calendars} onchange={oncalendarchange} bind:open
+                             {groups} onapplygroup={onapplygroup} onsavegroups={onsavegroups} />
           {/if}
           {#if connected && !status?.demo}
             <!-- Demo mode's seeded account never went through OAuth, so a sync

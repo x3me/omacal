@@ -962,7 +962,7 @@
   }
 
   /** Shows exactly group `i`'s calendars and hides the rest — the header
-   *  switcher's click and ⌘1–⌘9 alike. The refresh is the one a single toggle
+   *  switcher's click, a row in Menu → Calendars, and ⌘1–⌘9 alike. The refresh is the one a single toggle
    *  already runs: the server filters on `selected`, so nothing else moves. */
   async function applyGroup(i: number) {
     const group = calendarGroups[i];
@@ -979,7 +979,8 @@
   }
 
   /** Stores the new list and keeps what came back — the stored form, with
-   *  names trimmed. A refusal propagates to the switcher, which shows it. */
+   *  names trimmed. A refusal propagates to the group panel — the header
+   *  switcher's or Menu → Calendars' — which shows it. */
   async function saveGroups(next: CalendarGroup[]) {
     calendarGroups = await saveCalendarGroups(next);
   }

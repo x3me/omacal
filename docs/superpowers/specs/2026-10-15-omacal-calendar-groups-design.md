@@ -13,10 +13,20 @@ every other calendar the picker can toggle. It is a view choice: it writes
 `selected`, never `sync_enabled`, so nothing stops syncing and nothing reaches
 the provider.
 
-- **Switcher.** A button after the list toggle in the header. Its label is the
-  active group's name, "All calendars", or "Custom". The popover lists the
-  groups (click to apply) and carries the same calendar checkboxes as
-  Menu -> Calendars, so a set can be built and saved from one place.
+- **Made in Menu -> Calendars.** Under its checkboxes sits one line, "Save
+  current as group…". With no group saved that line is all that is added: no
+  empty section, and no note about it when nothing is shown until the name
+  field is opened.
+- **Switcher, once a group exists.** A button after the list toggle in the
+  header, absent until the first group is saved: the header was emptied on
+  purpose (settings spec §1). Its label is the active group's name, "All
+  calendars", or "Custom". It stays while its popover is open, so deleting the
+  last group there does not pull the panel away; it goes when the panel closes.
+- **One panel body, two hosts.** The switcher's popover and Menu -> Calendars
+  float the same `CalendarGroupsPanel`: the groups (click to apply), the
+  calendar checkboxes, and the save line. There is one save field, not two.
+  Applying from the switcher closes it; applying from the menu leaves it open
+  so the boxes are seen to follow.
 - **Save, edit, delete.** "Save current as group…" names what is shown now.
   Each group can be renamed, updated to what is shown now, or deleted behind an
   inline confirm.
@@ -30,7 +40,9 @@ groups between machines, reordering by drag.
 
 - **The active group is derived, not stored.** It is the first group whose live
   ids equal the shown set. Ticking a calendar by hand moves the label or turns
-  it to "Custom", so no stale mark is left behind.
+  it to "Custom", so no stale mark is left behind. A group with no live ids is
+  never active: with every calendar hidden its empty set would otherwise equal
+  the empty shown set, and the button would name a group that shows nothing.
 - **Only calendars the picker can toggle count.** A removed calendar and an
   "On this device" list have a disabled checkbox. A group that hid one could
   not be undone by hand, so they are never saved into a group, compared, or
@@ -59,8 +71,8 @@ groups between machines, reordering by drag.
   `selected = (id in ids)` on `sync_enabled` rows only, so the grid never
   refreshes against half a switch. `App` then runs the same refresh as any
   other visibility change.
-- **Ownership.** `Header` and the switcher only call back. `App` owns the
-  writes, as it does for every other setting.
+- **Ownership.** `Header`, the switcher and the menu's popover only call
+  back. `App` owns the writes, as it does for every other setting.
 
 ## 4. Testing
 
@@ -69,9 +81,11 @@ groups between machines, reordering by drag.
 - `settings.rs`: groups round-trip; blank, duplicate, over-long and over-count
   lists are refused and store nothing; a mangled row reads as none.
 - `ui/tests/calendar-groups.spec.ts`: the pure helpers (active group, stale ids,
-  scoping, refusal, `e.code` mapping), then the App: save and switch by click
-  and by chord, rename/update/delete, tick a box in the switcher and save, a
-  local list is neither saved nor hidden, refusal by click and by chord, and
-  saving refused with nothing shown.
-- The `header-connected` goldens gain the switcher button and need
-  regenerating on the Linux baseline machine.
+  a dead group never active with nothing shown, scoping, refusal, `e.code`
+  mapping), then the App: no switcher until a group exists and the first made
+  in Menu -> Calendars, applying from the menu, save and switch by click and by
+  chord, rename/update/delete with the panel kept after the last delete, tick a
+  box in the switcher and save, a local list is neither saved nor hidden,
+  refusal by click and by chord, and saving refused with nothing shown.
+- No golden changes: no fixture has a saved group, so `header-connected` draws
+  no switcher, and no golden shows Menu -> Calendars open.

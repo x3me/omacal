@@ -1,6 +1,6 @@
-// Calendar groups: a saved set of which calendars are shown, switched from the
-// header or with ⌘1–⌘9. The helpers are pure and run without a page; the rest
-// drives the real App against the `calendar-groups` scenario, whose stub keeps
+// Calendar groups: a saved set of which calendars are shown, made in Menu →
+// Calendars, switched from the header (once one exists) or with ⌘1–⌘9. The
+// helpers are pure and run without a page; the rest drives the real App against the `calendar-groups` scenario, whose stub keeps
 // each calendar's `selected` flag so a switch is visible in the label.
 
 import { test, expect, type Page } from '@playwright/test';
@@ -42,6 +42,17 @@ test.describe('calendar group helpers', () => {
     expect(activeGroupIndex([{ name: 'Two', calendarIds: [1, 2] }], cals)).toBe(-1);
   });
 
+  test('a group whose calendars are all gone is never active, even with nothing shown', () => {
+    const hidden = [cal(1, false), cal(2, false), cal(3, true, false)];
+    expect(shownIds(hidden)).toEqual([]);
+    // Ids that name nothing, and an id whose calendar no longer syncs: both live as [].
+    expect(activeGroupIndex([{ name: 'Old', calendarIds: [5, 6] }], hidden)).toBe(-1);
+    expect(activeGroupIndex([{ name: 'Off', calendarIds: [3] }], hidden)).toBe(-1);
+    // Not the fix, ordering: a dead group listed first does not stop a live one matching.
+    const cals = [cal(1, true), cal(2, false)];
+    expect(activeGroupIndex([{ name: 'Old', calendarIds: [5] }, { name: 'One', calendarIds: [1] }], cals)).toBe(1);
+  });
+
   test('a group whose calendars are all gone is refused, not applied as "hide everything"', () => {
     const cals = [cal(1, true), cal(3, true, false)];
     expect(applyRefusal({ name: 'Old', calendarIds: [5, 6] }, cals)).toMatch(/gone/);
@@ -64,33 +75,63 @@ const trigger = (page: Page) => page.locator('button.cg-trigger');
 const shownCalls = (page: Page) =>
   page.evaluate(() => window.__harness.calls.filter((c) => c.cmd === 'set_calendars_shown').map((c) => (c.args as any).ids));
 
+/** Menu → Calendars, open; resolves to its panel. */
+async function menuCalendars(page: Page) {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('button', { name: /Calendars/ }).click();
+  return page.getByRole('group', { name: 'Calendars', exact: true });
+}
+
+/** One Escape for the Calendars panel, one for the menu. */
+async function closeMenu(page: Page) {
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+}
+
 async function saveGroup(page: Page, name: string) {
-  await trigger(page).click();
-  await page.getByRole('button', { name: 'Save current as group…' }).click();
+  const panel = await menuCalendars(page);
+  await panel.getByRole('button', { name: 'Save current as group…' }).click();
   await page.getByLabel('New group name').fill(name);
   await page.getByLabel('New group name').press('Enter');
   await expect(page.getByLabel('New group name')).toHaveCount(0);
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
 }
 
 async function toggleTeam(page: Page) {
-  await page.getByRole('button', { name: 'Menu', exact: true }).click();
-  await page.getByRole('button', { name: /Calendars/ }).click();
-  await page.getByRole('checkbox', { name: /Team/ }).first().click();
-  await page.keyboard.press('Escape');
-  await page.keyboard.press('Escape');
+  const panel = await menuCalendars(page);
+  await panel.getByRole('checkbox', { name: /Team/ }).first().click();
+  await closeMenu(page);
 }
 
-test.describe('calendar groups in the header', () => {
+test.describe('calendar groups in the header and the menu', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(APP_NOW);
     await page.goto(app);
   });
 
-  test('save the shown calendars, then switch by click and by the chord', async ({ page }) => {
-    // Nothing saved: everything is shown and no group says so.
-    await expect(trigger(page)).toContainText('All calendars');
+  test('no switcher until a group exists; the first is made in Menu → Calendars', async ({ page }) => {
+    // Nothing saved: the header carries no group button at all.
+    await expect(page.locator('.cg-wrap')).toHaveCount(0);
+    const panel = await menuCalendars(page);
+    // With no group, the menu's panel is the list and one save line, not an empty section.
+    await expect(panel.getByRole('button', { name: 'Save current as group…' })).toBeVisible();
+    await expect(panel.locator('.cg-pick')).toHaveCount(0);
+    await closeMenu(page);
 
+    await saveGroup(page, 'Everything');
+    await expect(trigger(page)).toContainText('Everything');
+    // The menu lists it too, and applies it without closing: the boxes follow.
+    await toggleTeam(page);
+    await expect(trigger(page)).toContainText('Custom');
+    const again = await menuCalendars(page);
+    await again.locator('.cg-pick', { hasText: 'Everything' }).click();
+    await expect(again).toBeVisible();
+    await expect(again.getByRole('checkbox', { name: /Team/ }).first()).toBeChecked();
+    await closeMenu(page);
+    await expect(trigger(page)).toContainText('Everything');
+  });
+
+  test('save the shown calendars, then switch by click and by the chord', async ({ page }) => {
     await saveGroup(page, '  Everything ');
     await expect(trigger(page)).toContainText('Everything');
     expect(await page.evaluate(() => window.__harness.settingValues('calendarGroups').slice(-1)[0]))
@@ -146,13 +187,18 @@ test.describe('calendar groups in the header', () => {
     await expect(page.getByRole('button', { name: 'Delete Lean' })).toBeVisible();
     await page.getByRole('button', { name: 'Delete Lean' }).click();
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
-    await expect(page.getByText('No groups yet.')).toBeVisible();
+    // The last group gone: the open panel stays, and the button goes once it closes.
+    const panel = page.getByRole('group', { name: 'Calendar groups' });
+    await expect(panel.locator('.cg-pick')).toHaveCount(0);
+    await expect(panel).toBeVisible();
     await expect(trigger(page)).toContainText('Custom');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.cg-wrap')).toHaveCount(0);
   });
 
   test('the switcher carries the calendar toggles: tick one there, then save the group', async ({ page }) => {
+    await saveGroup(page, 'Everything');
     await trigger(page).click();
-    await expect(page.getByText('No groups yet. Pick the calendars below, then save them as a group.')).toBeVisible();
     const panel = page.getByRole('group', { name: 'Calendar groups' });
     // The same rows as Menu → Calendars, with no menu opened.
     await panel.getByRole('checkbox', { name: /Team/ }).click();
@@ -166,11 +212,11 @@ test.describe('calendar groups in the header', () => {
     await expect(page.getByLabel('New group name')).toHaveCount(0);
     await expect(trigger(page)).toContainText('No team');
     expect(await page.evaluate(() => window.__harness.settingValues('calendarGroups').slice(-1)[0]))
-      .toEqual([{ name: 'No team', calendarIds: [7, 9] }]);
+      .toEqual([{ name: 'Everything', calendarIds: [7, 8, 9] }, { name: 'No team', calendarIds: [7, 9] }]);
 
-    // Ticking it back moves the label off the group again.
+    // Ticking it back moves the label to the group that matches that.
     await panel.getByRole('checkbox', { name: /Team/ }).click();
-    await expect(trigger(page)).toContainText('All calendars');
+    await expect(trigger(page)).toContainText('Everything');
     // Escape closes the panel; the list is not a second layer to dismiss first.
     await page.keyboard.press('Escape');
     await expect(panel).toHaveCount(0);
@@ -210,13 +256,19 @@ test.describe('calendar groups in the header', () => {
   });
 
   test('saving is refused when no calendar is shown', async ({ page }) => {
-    await page.getByRole('button', { name: 'Menu', exact: true }).click();
-    await page.getByRole('button', { name: /Calendars/ }).click();
-    for (const name of [/Holidays/, /Team/, /Personal/]) await page.getByRole('checkbox', { name }).first().click();
-    await page.keyboard.press('Escape');
-    await page.keyboard.press('Escape');
-    await trigger(page).click();
-    await expect(page.getByRole('button', { name: 'Save current as group…' })).toBeDisabled();
-    await expect(page.getByText('Show at least one calendar to save a group.')).toBeVisible();
+    // With no group yet, the line is disabled and nothing explains a feature not reached for.
+    let panel = await menuCalendars(page);
+    for (const name of [/Holidays/, /Team/, /Personal/]) await panel.getByRole('checkbox', { name }).first().click();
+    await expect(panel.getByRole('button', { name: 'Save current as group…' })).toBeDisabled();
+    await expect(panel.getByText('Show at least one calendar to save a group.')).toHaveCount(0);
+    for (const name of [/Holidays/, /Team/, /Personal/]) await panel.getByRole('checkbox', { name }).first().click();
+    await closeMenu(page);
+
+    // Once groups are in use, the note says why.
+    await saveGroup(page, 'Everything');
+    panel = await menuCalendars(page);
+    for (const name of [/Holidays/, /Team/, /Personal/]) await panel.getByRole('checkbox', { name }).first().click();
+    await expect(panel.getByRole('button', { name: 'Save current as group…' })).toBeDisabled();
+    await expect(panel.getByText('Show at least one calendar to save a group.')).toBeVisible();
   });
 });
