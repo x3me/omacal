@@ -33,6 +33,7 @@
   import { isIcs } from './lib/importics';
   import { changedMeetings, declinedGuests, pendingInvites } from './lib/invites';
   import { calendarColor, getCalendars, offerableCalendarId, setCalendarSelected, type Calendar } from './lib/calendars';
+  import { applyCalendarGroup, groupIndexForCode, saveCalendarGroups, type CalendarGroup } from './lib/calendargroups';
   import {
     createEvent, deleteEvent, getEventDetail, updateEvent,
     type EventDetail, type Occurrence, type SendUpdates,
@@ -203,6 +204,8 @@
 
   let status = $state<AppStatus | null>(null);
   let calendars = $state<Calendar[]>([]);
+  /** The saved calendar groups, in switcher order (⌘1–⌘9 count along it). */
+  let calendarGroups = $state<CalendarGroup[]>([]);
   let busy = $state(false);
   let syncing = $state(false);
   let syncInFlight: Promise<unknown> | null = null;
@@ -896,6 +899,7 @@
         loginAsked = s.startOnLoginAsked;
         desktop = s.desktop;
         combineIdenticalEvents = s.combineIdenticalEvents;
+        calendarGroups = s.calendarGroups;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
         setClockFormat(s.timeFormat);
@@ -955,6 +959,30 @@
       error = `${c.summary} · ${String(err)}`;
     }
     await handleCalendarChange();
+  }
+
+  /** Shows exactly group `i`'s calendars and hides the rest — the header
+   *  switcher's click, a row in Menu → Calendars, and ⌘1–⌘9 alike. The refresh is the one a single toggle
+   *  already runs: the server filters on `selected`, so nothing else moves. */
+  async function applyGroup(i: number) {
+    const group = calendarGroups[i];
+    if (!group) return;
+    try {
+      await applyCalendarGroup(group, calendars);
+    } catch (err) {
+      // No refresh after a refusal or a failure: the reload clears `error`, and
+      // nothing changed (the apply is one transaction) for it to show.
+      error = `${group.name} · ${String(err)}`;
+      return;
+    }
+    await handleCalendarChange();
+  }
+
+  /** Stores the new list and keeps what came back — the stored form, with
+   *  names trimmed. A refusal propagates to the group panel — the header
+   *  switcher's or Menu → Calendars' — which shows it. */
+  async function saveGroups(next: CalendarGroup[]) {
+    calendarGroups = await saveCalendarGroups(next);
   }
 
   async function handleCalendarChange() {
@@ -2392,6 +2420,25 @@
       }
       return;
     }
+    // ⌘1–⌘9 (Ctrl elsewhere) show the Nth saved calendar group. Matched on
+    // `e.code`, not `e.key`: a layout with its own script writes no ASCII
+    // digits on the top row (issue #38, `shortcutKeyFor`). Only the chord —
+    // bare 1–5 are views. Left alone when there is no Nth group, so the key
+    // means whatever the platform says until a group gives it a meaning, and
+    // held back by the same open-panel guards as paste (and by Settings, which
+    // is a dialog) so it cannot swap the calendars out from under a form.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      const n = groupIndexForCode(e.code);
+      if (n !== null) {
+        if (n < calendarGroups.length && !form && !pendingDelete && !searchOpen && !quickAdd && !helpOpen
+            && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+          e.preventDefault();
+          // A held chord is one apply, not one per auto-repeat.
+          if (!e.repeat) void applyGroup(n);
+        }
+        return;
+      }
+    }
     // Ctrl+= / Ctrl+- / Ctrl+0 zoom the hours in Day and Week — the keyboard's
     // pinch (2026-09-03). `=` as well as `+`, because on the layouts this
     // ships to `+` is Shift-`=`, and browsers have always read either as
@@ -2476,6 +2523,9 @@
     {busy} {error} {calendars} {view} {listMode}
     errorAction={retry && retry.forError === error ? retry : null}
     onToggleList={toggleList}
+    groups={calendarGroups}
+    onapplygroup={applyGroup}
+    onsavegroups={saveGroups}
     onPrev={() => { keyboardActive = false; step(-1); }}
     onNext={() => { keyboardActive = false; step(1); }}
     onToday={() => { keyboardActive = false; goToday(); }}
@@ -2491,6 +2541,7 @@
         combineIdenticalEvents = s.combineIdenticalEvents;
         void reload();
       }
+      calendarGroups = s.calendarGroups;
       defaultCalendarId = s.defaultCalendarId;
       defaultEventDurationMinutes = s.defaultEventDurationMinutes;
       setClockFormat(s.timeFormat);

@@ -7,6 +7,7 @@ import type { WeekStartDay } from './weekstart';
 import type { EventCornerStyle } from './appearance';
 import type { View } from './views';
 import type { TaskSort } from './tasks';
+import type { CalendarGroup } from './calendargroups';
 
 /** A `View`, plus `'last'` — "wherever the switcher was most recently,"
  *  which is `defaultViewFollowsLast`, not a sixth `View` value: `View` also
@@ -115,6 +116,9 @@ export type AppSettings = {
    *  which is what makes it survive a restart. */
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  /** The saved calendar groups, in switcher order. Which is active is derived
+   *  from what is shown, never stored — see `calendargroups.ts`. */
+  calendarGroups: CalendarGroup[];
   /** Pixels per hour in Day and Week — what a pinch, Ctrl+scroll or Ctrl+=/-
    *  left the grid at. Stored for `listMode`'s reason and, like it, shown by
    *  no tab: the gesture is the control. `zoom.ts` owns the range. */
@@ -334,6 +338,9 @@ export type SettingValues = {
   visibleHours: { start: number; end: number };
   hideWeekends: boolean;
   combineIdenticalEvents: boolean;
+  /** The whole list, replaced in one write; refused with a sentence for a
+   *  blank, over-long or duplicate name. */
+  calendarGroups: CalendarGroup[];
   /** Also leaves "Last view" mode. */
   defaultView: View;
   defaultViewFollowsLast: boolean;

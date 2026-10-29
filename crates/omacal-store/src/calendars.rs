@@ -349,6 +349,37 @@ pub async fn set_selected(pool: &SqlitePool, id: i64, on: bool) -> anyhow::Resul
     Ok(())
 }
 
+/// Shows exactly the calendars in `ids` and hides every other **that the
+/// picker can toggle**, in **one transaction** — what applying a calendar
+/// group does.
+///
+/// "Can toggle" is `sync_enabled = 1`: the picker disables the checkbox of a
+/// removed calendar and of an "On this device" local list, so a group that hid
+/// one could never be undone by hand. Those rows keep whatever `selected` they
+/// have, and an id naming one is ignored rather than switched on.
+///
+/// One statement per step and not a `set_selected` per row, so a group switch
+/// is never seen half-done (the grid refreshes on the first row that landed,
+/// and a failure partway would leave a mix that is neither the old view nor
+/// the new one). Ids that name no calendar match nothing and are ignored, which
+/// is what lets a group outlive a removed calendar. Only `selected` moves:
+/// `sync_enabled` is untouched, so hiding a calendar here stops drawing it
+/// and nothing else.
+pub async fn set_selected_exactly(pool: &SqlitePool, ids: &[i64]) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE calendars SET selected = 0 WHERE sync_enabled = 1")
+        .execute(&mut *tx)
+        .await?;
+    for id in ids {
+        sqlx::query("UPDATE calendars SET selected = 1 WHERE id = ?1 AND sync_enabled = 1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Sets or clears a calendar's colour override.
 ///
 /// `None` **clears** it, which is not the same as storing whatever Google
@@ -505,6 +536,42 @@ mod tests {
         assert!(rename_local_list(&pool, work, "Mine").await.is_err(), "a server's calendar is not renamed here");
         assert!(delete_local_list(&pool, work).await.is_err(), "nor deleted");
         assert!(list_calendars(&pool).await.unwrap().iter().any(|c| c.id == work));
+    }
+
+    /// Applying a group shows exactly its calendars and hides the rest of the
+    /// ones the picker can toggle (`sync_enabled`); an id that names nothing is
+    /// ignored, an empty set hides every such calendar, and a calendar the
+    /// picker cannot toggle keeps its `selected` whichever way the ids point.
+    #[tokio::test]
+    async fn set_selected_exactly_shows_the_named_calendars_and_only_those() {
+        let pool = seeded().await;
+        let locked_on = create_local_list(&pool, "Chores", "UTC", "#5aa84f", 1).await.unwrap();
+        let locked_off = create_local_list(&pool, "Books", "UTC", "#e2a03f", 2).await.unwrap();
+        let ids: Vec<i64> = list_calendars(&pool).await.unwrap().iter().map(|c| c.id).collect();
+        let live: Vec<i64> = ids.iter().copied().filter(|i| ![locked_on, locked_off].contains(i)).collect();
+        set_selected(&pool, locked_on, true).await.unwrap();
+        set_selected(&pool, locked_off, false).await.unwrap();
+        set_sync_enabled(&pool, locked_on, false).await.unwrap();
+        set_sync_enabled(&pool, locked_off, false).await.unwrap();
+        let shown = |pool: &SqlitePool| {
+            let pool = pool.clone();
+            async move {
+                let mut v: Vec<i64> = list_calendars(&pool).await.unwrap().into_iter()
+                    .filter(|c| c.selected).map(|c| c.id).collect();
+                v.sort();
+                v
+            }
+        };
+        let with_locked = |mut v: Vec<i64>| { v.push(locked_on); v.sort(); v };
+        set_selected_exactly(&pool, &[live[0], 9_999, locked_off]).await.unwrap();
+        assert_eq!(shown(&pool).await, with_locked(vec![live[0]]), "locked_off is named and stays hidden");
+        set_selected_exactly(&pool, &live[1..]).await.unwrap();
+        assert_eq!(shown(&pool).await, with_locked(live[1..].to_vec()));
+        set_selected_exactly(&pool, &[]).await.unwrap();
+        assert_eq!(shown(&pool).await, vec![locked_on], "a calendar the picker cannot toggle is not hidden");
+        let rows = list_calendars(&pool).await.unwrap();
+        assert!(!rows.iter().find(|c| c.id == locked_on).unwrap().sync_enabled, "sync is not a display choice");
+        assert!(live.len() >= 2 && rows.iter().filter(|c| live.contains(&c.id)).all(|c| c.sync_enabled));
     }
 
     #[tokio::test]
