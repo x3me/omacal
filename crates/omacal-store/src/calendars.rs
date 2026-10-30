@@ -37,6 +37,12 @@ pub struct CalendarRow {
     /// (`can_edit`, applied server-side against this same column via
     /// `calendar_for_write`); this field is what stops the UI walking into it.
     pub access_role: String,
+    /// Whether the collection takes events at all. Always true for Google; a
+    /// CalDAV collection can be tasks-only, and iCloud reports each Reminders
+    /// list as one its owner may write. Carried to the UI for `access_role`'s
+    /// reason: the role says nothing about what a collection holds, and an
+    /// event saved to a Reminders list is a PUT iCloud can only refuse.
+    pub supports_events: bool,
     /// The owning account's provider (`google` | `caldav` | `webcal` | `local`)
     /// — what the UI gates provider-specific affordances on.
     pub provider: String,
@@ -50,7 +56,7 @@ pub async fn list_calendars(pool: &SqlitePool) -> anyhow::Result<Vec<CalendarRow
                 c.summary AS provider_summary, c.label_override,
                 COALESCE(c.color_override, c.color_hex) AS color_hex,
                 c.color_override,
-                c.selected, c.sync_enabled, c.is_primary, c.access_role, a.provider
+                c.selected, c.sync_enabled, c.is_primary, c.access_role, c.supports_events, a.provider
          FROM calendars c
          JOIN accounts a ON a.id = c.account_id
          ORDER BY a.email, c.is_primary DESC, COALESCE(c.label_override, c.summary) COLLATE NOCASE",
@@ -73,6 +79,7 @@ pub async fn list_calendars(pool: &SqlitePool) -> anyhow::Result<Vec<CalendarRow
             sync_enabled: r.get::<i64, _>("sync_enabled") != 0,
             is_primary: r.get::<i64, _>("is_primary") != 0,
             access_role: r.get("access_role"),
+            supports_events: r.get::<i64, _>("supports_events") != 0,
             provider: r.get("provider"),
         })
         .collect())

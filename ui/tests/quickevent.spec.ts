@@ -21,7 +21,7 @@ const calendar = (
 ): Calendar => ({
   id, account_id: id, account_email: account, summary,
   color_hex: null, color_override: null, selected: true, sync_enabled: true,
-  is_primary: id === 1, access_role: 'owner', provider,
+  is_primary: id === 1, access_role: 'owner', supports_events: true, provider,
 });
 
 const calendars = [
@@ -326,6 +326,19 @@ test.describe('quick event natural language', () => {
     );
     expect(qualified.errors).toEqual([]);
     expect(qualified.value.calendarId).toBe(2);
+  });
+
+  test('a task list of the same name does not make a calendar ambiguous', () => {
+    // One iCloud account, a calendar and a Reminders list both called Family:
+    // no account qualifier can tell them apart, and only one takes events.
+    const icloud = [
+      calendar(1, 'Personal'),
+      { ...calendar(2, 'Family', 'caldav', 'me@icloud.com'), account_id: 3, supports_events: false },
+      calendar(3, 'Family', 'caldav', 'me@icloud.com'),
+    ];
+    const parsed = parseQuickEvent('2p Call cal:Family', context({ calendars: icloud }));
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.value.calendarId).toBe(3);
   });
 
   test('blocks conflicting facts and provider-incompatible actions', () => {

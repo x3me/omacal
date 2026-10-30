@@ -25,6 +25,9 @@ export type Calendar = {
    *  `reader`, `freeBusyReader`. Only the first two can be written to — see
    *  `writableCalendars` below, the one place that decides it. */
   access_role: string;
+  /** Takes events at all. Always true for Google; a CalDAV collection can be
+   *  tasks-only (an iCloud Reminders list). See `writableCalendars`. */
+  supports_events: boolean;
   /** The owning account's provider: `google` | `caldav` | `webcal` | `local`.
    *  Only Google mails guests (CalDAV has no guest management and no notify
    *  question; WebCal and local never mail) — `EventForm` gates on this field,
@@ -35,9 +38,12 @@ export type Calendar = {
 /** The two roles a create can land on. Google's `calendarList` reports two more
  *  — `reader` and `freeBusyReader` — and a subscribed holiday calendar is a
  *  `reader`, so a list that is not filtered offers Save buttons the backend can
- *  only refuse (`create_impl`'s own `can_edit` check, against the same column). */
+ *  only refuse (`create_impl`'s own `can_edit` check, against the same column).
+ *  A tasks-only collection is left out for the same reason: iCloud's Reminders
+ *  lists are `owner`, so the role alone offered them, and a create there is a
+ *  PUT iCloud can only refuse. */
 export const writableCalendars = (cals: Calendar[]) =>
-  cals.filter((c) => c.access_role === 'owner' || c.access_role === 'writer');
+  cals.filter((c) => c.supports_events && (c.access_role === 'owner' || c.access_role === 'writer'));
 
 /**
  * `wanted` if a create could land on it, otherwise the first calendar one

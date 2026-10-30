@@ -935,6 +935,25 @@ pub(crate) async fn create_event_body(
         .inspect(|_| crate::upcoming::refresh_soon(state.pool.clone(), state.demo))
 }
 
+/// What a create or a move earns when the calendar holds tasks only — an
+/// iCloud Reminders list, which iCloud reports as one its owner may write.
+/// Sent anyway, iCloud refuses the PUT, and that refusal reached the user as
+/// OPAQUE and the log as "the server rejected the credentials", which sent
+/// people to check a password that was fine. Allowlisted in `errors.rs`: the
+/// user can act on it by choosing another calendar.
+pub(crate) const NOT_AN_EVENT_CALENDAR: &str =
+    "that calendar holds tasks only — choose another calendar for the event";
+
+/// Whether calendar `id` takes events. `true` for one that is not there:
+/// that is the write path's own lookup to refuse, by its own message.
+async fn takes_events(pool: &SqlitePool, id: i64) -> anyhow::Result<bool> {
+    let flag: Option<i64> = sqlx::query_scalar("SELECT supports_events FROM calendars WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(flag.is_none_or(|f| f != 0))
+}
+
 /// The body of `create_event`, minus the Tauri `State` wrapper — the same
 /// split `respond_impl` gets, and for the same reason: a test can hand
 /// [`create_via_client`] a client pointed at `wiremock` without this function
@@ -965,6 +984,12 @@ async fn create_impl(
     // row is read (reminders spec §4).
     if let Some(r) = &fields.reminders {
         crate::write::validate_reminders(r).map_err(|m| anyhow::anyhow!(m))?;
+    }
+
+    // Ahead of both paths below, though only CalDAV has tasks-only calendars:
+    // the role checks look at `access_role`, and a Reminders list is `owner`.
+    if !takes_events(&state.pool, calendar_id).await? {
+        anyhow::bail!(NOT_AN_EVENT_CALENDAR);
     }
 
     // A CalDAV calendar takes the resource path: rewrite, etag-guarded PUT,
@@ -1756,6 +1781,10 @@ async fn move_target(
     // checked by: a calendar that cannot be written to cannot be moved onto.
     if !can_edit(false, &target_role) {
         anyhow::bail!("this calendar is not writable from OmaCal");
+    }
+    // Nor onto a tasks-only collection, for `NOT_AN_EVENT_CALENDAR`'s reason.
+    if !takes_events(&state.pool, target).await? {
+        anyhow::bail!(NOT_AN_EVENT_CALENDAR);
     }
     Ok(Some(target))
 }
@@ -4516,6 +4545,23 @@ mod tests {
             create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
         assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
+    }
+
+    /// An iCloud Reminders list is `owner` but takes no events. Refused before
+    /// any request is built, for the reader case's reason, and by name: iCloud's
+    /// own refusal reached the user as OPAQUE and the log as a bad password.
+    #[tokio::test]
+    async fn creating_into_a_task_list_is_refused() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let cal = seed_calendar(&pool, "owner").await;
+        sqlx::query("UPDATE calendars SET supports_events = 0, supports_tasks = 1 WHERE id = ?1")
+            .bind(cal)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err =
+            create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
+        assert_eq!(crate::errors::user_facing(&err), NOT_AN_EVENT_CALENDAR);
     }
 
     /// **A create carrying guests invites them.**
@@ -9679,6 +9725,24 @@ mod tests {
         read_only.execute(&state.pool).await.unwrap();
         let err = move_target(&state, id, "all", Some(elsewhere)).await.unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
+    }
+
+    /// A Reminders list is `owner`, so the role check lets it through; it is
+    /// refused as a destination for `NOT_AN_EVENT_CALENDAR`'s reason.
+    #[tokio::test]
+    async fn a_move_onto_a_task_list_is_refused() {
+        let mut ev = stored(vec![]);
+        let (pool, id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+        let task_list = seed_second_calendar(&pool, 1, "owner").await;
+        sqlx::query("UPDATE calendars SET supports_events = 0, supports_tasks = 1 WHERE id = ?1")
+            .bind(task_list)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = state_with(pool, false);
+
+        let err = move_target(&state, id, "all", Some(task_list)).await.unwrap_err();
+        assert_eq!(err.to_string(), NOT_AN_EVENT_CALENDAR);
     }
 
     /// Neither Google's `events.move` nor a CalDAV collection can re-file one
