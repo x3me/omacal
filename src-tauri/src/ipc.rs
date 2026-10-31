@@ -133,11 +133,12 @@ pub(crate) fn parse_request(line: &str) -> Result<Request, String> {
 /// is still writable, else the primary, else the first writable calendar —
 /// `offerableCalendarId`'s rule (calendars.ts), asked of the database
 /// because the CLI has no form to seed. `None` means nothing is writable,
-/// which is a refusal the caller words.
+/// which is a refusal the caller words. Writable as `writableCalendars`
+/// means it: a tasks-only collection is `owner` on iCloud and takes no event.
 pub(crate) async fn default_calendar(pool: &sqlx::SqlitePool) -> Option<i64> {
     let stored = crate::settings::read_settings(pool).await.default_calendar_id;
     sqlx::query_scalar(
-        "SELECT id FROM calendars WHERE access_role IN ('owner','writer')
+        "SELECT id FROM calendars WHERE access_role IN ('owner','writer') AND supports_events = 1
          ORDER BY (id = ?1) DESC, is_primary DESC, id ASC LIMIT 1",
     )
     .bind(stored)
@@ -426,6 +427,32 @@ mod tests {
         let o = ok_env(serde_json::json!({ "deleted": true }));
         assert_eq!(o["ok"], true);
         assert_eq!(o["data"]["deleted"], true);
+    }
+
+    /// A default left on a Reminders list falls back as the form's does
+    /// (`offerableCalendarId`), so `omacal events create` without
+    /// `--calendar` lands where the app's own Save would.
+    #[tokio::test]
+    async fn the_default_calendar_passes_over_a_task_list() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO calendars
+                 (id, account_id, google_id, summary, timezone, access_role, supports_events, supports_tasks)
+             VALUES (10, 1, 'events', 'Family', 'UTC', 'owner', 1, 0),
+                    (20, 1, 'reminders', 'Family', 'UTC', 'owner', 0, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('default_calendar_id', '20')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(default_calendar(&pool).await, Some(10));
     }
 
     /// The spec's one end-to-end (§8): a real socket in a temp dir, the

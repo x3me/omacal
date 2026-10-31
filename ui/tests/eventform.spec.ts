@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { calendarColor, offerableCalendarId, type Calendar } from '../src/lib/calendars';
+import { calendarColor, offerableCalendarId, writableCalendars, type Calendar } from '../src/lib/calendars';
 import type { EventDetail } from '../src/lib/eventdetail';
 import {
   addGuest, blankValue, blankValueAt, endAfterStart, isAddress, mailableGuests, pastedValue,
@@ -34,10 +34,10 @@ const spanOf = (value: EventFormValue): number => {
 // render; `ruleInWords`' fallbacks in particular are all about inputs the
 // component has no way to produce.
 
-const cal = (id: number, access_role: string): Calendar => ({
+const cal = (id: number, access_role: string, supports_events = true): Calendar => ({
   id, account_id: 1, account_email: 'me@x.com', summary: `Cal ${id}`,
   color_hex: null, color_override: null, selected: true, sync_enabled: true,
-  is_primary: false, access_role, provider: 'google',
+  is_primary: false, access_role, supports_events, provider: 'google',
 });
 
 const CALS = [cal(1, 'owner'), cal(2, 'writer'), cal(3, 'reader'), cal(4, 'freeBusyReader')];
@@ -70,6 +70,14 @@ test.describe('offerableCalendarId', () => {
     // returning a reader here would defeat the whole function.
     expect(offerableCalendarId(3, [cal(3, 'reader'), cal(4, 'freeBusyReader')])).toBeNull();
     expect(offerableCalendarId(null, [])).toBeNull();
+  });
+
+  test('replaces an id that holds tasks only', () => {
+    // An iCloud Reminders list is `owner`, so the role alone kept it: a
+    // default left on one failed every create, as OPAQUE.
+    const withList = [cal(5, 'owner', false), ...CALS];
+    expect(offerableCalendarId(5, withList)).toBe(1);
+    expect(writableCalendars(withList).map((c) => c.id)).toEqual([1, 2]);
   });
 });
 

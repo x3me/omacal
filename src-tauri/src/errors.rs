@@ -246,6 +246,13 @@ const SAFE_EXACT: &[&str] = &[
     // into a fault report about a save that did nothing.
     crate::events::MOVE_ONE_OCCURRENCE,
     crate::events::MOVE_ACROSS_ACCOUNTS,
+    // src-tauri/src/events.rs — `NOT_AN_EVENT_CALENDAR`, `create_impl`'s and
+    // `move_target`'s refusal of a tasks-only collection. Fixed literal,
+    // `bail!`ed before any request is built, reaching the user through
+    // `create_event`'s and `update_event`'s own `.map_err(user_facing)` with no
+    // `.context(..)` on the way. OPAQUE for it is how it was found: a default
+    // calendar left on an iCloud Reminders list failed every create.
+    crate::events::NOT_AN_EVENT_CALENDAR,
     // src-tauri/src/events.rs — `MOVED_NOT_REMOVED`, raised by
     // `caldav_write::move_to` when the copy landed and the original would not
     // go. Fixed literal; the transport error that caused it is logged and
@@ -588,6 +595,9 @@ mod tests {
             crate::events::MOVE_ONE_OCCURRENCE,
             crate::events::MOVE_ACROSS_ACCOUNTS,
             crate::events::MOVED_NOT_REMOVED,
+            // Checked against the same rule: a fixed literal `bail!`ed by
+            // `create_impl` and `move_target` before any request is built.
+            crate::events::NOT_AN_EVENT_CALENDAR,
             // Checked against the same rule: the `.ics` export's three (#113)
             // are fixed literals raised by `map_err(|_| …to_string())`, with
             // the failing path and the `std::io::Error` going to `tracing`
