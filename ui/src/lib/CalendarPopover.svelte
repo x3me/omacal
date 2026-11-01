@@ -1,17 +1,29 @@
 <!-- ui/src/lib/CalendarPopover.svelte -->
 <script lang="ts">
   import { escapeCloses } from './dismiss.svelte';
-  import CalendarList from './CalendarList.svelte';
+  import CalendarGroupsPanel from './CalendarGroupsPanel.svelte';
   import type { Calendar } from './calendars';
+  import type { CalendarGroup } from './calendargroups';
 
   let {
     calendars,
     onchange,
     open = $bindable(false),
+    groups = [],
+    onapplygroup = () => {},
+    onsavegroups = async () => {},
   }: {
     calendars: Calendar[];
     onchange: () => void;
     open?: boolean;
+    /** The saved calendar groups. This is where the first one is made: the
+     *  header's switcher only appears once one exists. */
+    groups?: CalendarGroup[];
+    /** A group's row was clicked. The panel stays open, so the boxes below
+     *  are seen to follow it. */
+    onapplygroup?: (i: number) => void;
+    /** Asked to store the whole new list. Rejects with the sentence to show. */
+    onsavegroups?: (next: CalendarGroup[]) => Promise<void>;
   } = $props();
 
   const shown = $derived(calendars.filter((c) => c.sync_enabled && c.selected).length);
@@ -41,7 +53,10 @@
   the busy set, the messages, the focus reclaim — is `CalendarList`'s, so the
   same rows can appear here and in the settings modal's Calendars tab without a
   second implementation to keep in step. What is left here is the popover: a
-  trigger, a count, a scrim, and a panel to float them in.
+  trigger, a count, a scrim, and a panel to float them in. The panel's body is
+  `CalendarGroupsPanel` — the list plus saved groups — the same body the
+  header's group switcher floats, so a group is made and managed in one piece
+  of code whichever door it is reached by.
 
   The `$effect` that used to clear a stale note whenever `open` became true is
   **gone, and its behaviour is not.** The list lives inside `{#if open}`, so
@@ -60,7 +75,7 @@
     <button class="scrim" aria-label="Close" onclick={close}></button>
 
     <div class="panel" role="group" aria-label="Calendars">
-      <CalendarList {calendars} {onchange} />
+      <CalendarGroupsPanel {calendars} {groups} onapply={onapplygroup} onsave={onsavegroups} {onchange} />
     </div>
   {/if}
 </div>
@@ -75,7 +90,8 @@
   .scrim { position: fixed; inset: 0; background: none; border: 0; cursor: default; z-index: 40; }
 
   .panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 41;
-           min-width: 260px; max-height: 60vh; overflow-y: auto;
+           min-width: 300px; max-height: 60vh; overflow-y: auto;
+           display: flex; flex-direction: column; gap: 2px;
            background: var(--surface); border: 1px solid var(--hairline);
            border-radius: 8px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.45); }
 </style>

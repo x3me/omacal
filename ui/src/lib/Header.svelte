@@ -6,6 +6,8 @@
   import { escapeCloses } from './dismiss.svelte';
   import { listable } from './filmstrip';
   import CalendarPopover from './CalendarPopover.svelte';
+  import CalendarGroupSwitcher from './CalendarGroupSwitcher.svelte';
+  import type { CalendarGroup } from './calendargroups';
   import InviteTray from './InviteTray.svelte';
   import { pendingResponseCount, unshownResponseFailures, dismissResponseFailure } from './responses.svelte';
   import { pendingChangeCount } from './pending.svelte';
@@ -20,6 +22,7 @@
     busy, syncing = false, error, errorAction = null, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
+    groups = [], onapplygroup = () => {}, onsavegroups = async () => {},
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange, ontasks,
     onWhatsNew, onRestart, onUpdate,
     invites = [], declines = [], changes = [], oninvitesanswered = () => {}, oninvitesdismissed = () => {},
@@ -65,6 +68,12 @@
     /** Asked to flip it. Not flipped here: the value is stored in the settings
      *  table, and `App` owns every write in this app. */
     onToggleList: () => void;
+    /** The saved calendar groups, for the switcher beside the list toggle.
+     *  Applying and storing are `App`'s, like every other write: the same
+     *  apply is what ⌘1–⌘9 does with this panel closed. */
+    groups?: CalendarGroup[];
+    onapplygroup?: (i: number) => void;
+    onsavegroups?: (next: CalendarGroup[]) => Promise<void>;
     onPrev: () => void; onNext: () => void; onToday: () => void;
     /** Opens the search overlay. A small control rather than a field: the
      *  header was emptied on purpose (settings spec §1) and putting a
@@ -226,6 +235,9 @@
   /** The hamburger's menu. Everything that used to sit in the header and is
    *  used rarely now lives here (spec §1). */
   let menuOpen = $state(false);
+  /** The group switcher's panel, bound so the switcher outlives its last group
+   *  for as long as that panel is open. */
+  let groupsOpen = $state(false);
 
   function openSettings() {
     menuOpen = false;
@@ -336,6 +348,15 @@
         onclick={onToggleList}
       >{listMode ? '☰' : '▦'}</button>
     {/if}
+    <!-- Absent until a group exists: the header was emptied on purpose
+         (settings spec §1), and someone who never makes a group should never
+         see a button for them. The first is made in Menu → Calendars. Kept
+         while its panel is open, so deleting the last group from there does
+         not yank the panel away mid-click. -->
+    {#if calendars.length > 0 && (groups.length > 0 || groupsOpen)}
+      <CalendarGroupSwitcher {calendars} {groups} onapply={onapplygroup} onsave={onsavegroups}
+                             onchange={oncalendarchange} bind:open={groupsOpen} />
+    {/if}
   </div>
 
   <div class="right">
@@ -432,7 +453,8 @@
                  staying separate, the busy set, the keyed each — travels
                  unchanged. Its own specs mount it standalone and never knew
                  where it lived. -->
-            <CalendarPopover {calendars} onchange={oncalendarchange} bind:open />
+            <CalendarPopover {calendars} onchange={oncalendarchange} bind:open
+                             {groups} onapplygroup={onapplygroup} onsavegroups={onsavegroups} />
           {/if}
           {#if connected && !status?.demo}
             <!-- Demo mode's seeded account never went through OAuth, so a sync

@@ -152,6 +152,8 @@ export const CHORDS: { label: string; text: string; hint?: string }[] = [
     hint: 'Day and Week — a trackpad pinch or Ctrl+scroll over the grid does the same' },
   { label: `${MOD_LABEL} -`, text: 'Shorter hours' },
   { label: `${MOD_LABEL} 0`, text: 'Hours back to their usual height' },
+  { label: `${MOD_LABEL} 1–9`, text: 'Show a saved calendar group',
+    hint: 'the Nth group in the header switcher — it shows those calendars and hides the rest' },
   { label: `${ALT_LABEL} drag`, text: 'Create over an existing event',
     hint: 'Day and Week — hold the key before dragging to select a new time range' },
 ];

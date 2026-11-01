@@ -1787,6 +1787,7 @@ pub fn run() {
             import::run_ics_import,
             calendars::get_calendars,
             calendars::set_calendar_selected,
+            calendars::set_calendars_shown,
             calendars::set_calendar_sync,
             calendars::set_calendar_color,
             calendars::set_calendar_label,
