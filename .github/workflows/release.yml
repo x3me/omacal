@@ -132,7 +132,9 @@ jobs:
       # (2026-09-30) bundled a different AppImage — no xdg-open, a pinned
       # linuxdeploy — and the repair below, written against the old layout,
       # failed the v5.2.1 cut. A new bundler is a change made on purpose,
-      # through the lockfile, not one a tag picks up.
+      # through the lockfile, not one a tag picks up — and one that is not
+      # proven until this repair step has run against its image: CI never
+      # bundles, and the 2.12.4 bump failed the first v6.2.0 cut the same way.
       - name: Build the bundles
         uses: tauri-apps/tauri-action@v0
         with:
@@ -156,14 +158,22 @@ jobs:
           cd target/release/bundle/appimage
           image=$(ls *.AppImage)
           ./"$image" --appimage-extract >/dev/null
+          # The extraction writes every directory 0700, whatever the image
+          # holds, and appimagetool's continuous build of 2026-10-31 refuses
+          # to pack a root it cannot show other users (earlier builds packed
+          # it as it was). 0755 directories and readable files are what the
+          # bundler itself writes.
+          chmod -R a+rX squashfs-root
           rm -v squashfs-root/usr/lib/libwayland-*
           # The bundled Debian xdg-open shadows the host's own launcher (the
           # AppImage prepends its usr/bin to PATH) and execs the browser
           # handler directly, re-sanitising nothing — half of issue #1. The
           # host's xdg-open is the one that knows how the host opens things;
           # `browser::open_external` also filters the child's PATH, for every
-          # image shipped before this line existed.
-          rm -v squashfs-root/usr/bin/xdg-open
+          # image shipped before this line existed. The 2.12 bundler ships no
+          # xdg-open at all, so this removes one only if a bundler brings it
+          # back; the check after the repack holds either way.
+          rm -fv squashfs-root/usr/bin/xdg-open
           # The image's own icon — what `.DirIcon` resolves to, and what any
           # tool extracting one gets — was the **32px** file: the bundler
           # links the root `omacal.png` at `hicolor/32x32`, even though the
@@ -263,6 +273,10 @@ jobs:
           ./"$image" --appimage-extract >/dev/null
           if ls squashfs-root/usr/lib/libwayland-* 2>/dev/null; then
             echo "libwayland survived the repack" >&2
+            exit 1
+          fi
+          if [ -e squashfs-root/usr/bin/xdg-open ]; then
+            echo "xdg-open survived the repack" >&2
             exit 1
           fi
           if ! grep -qx "X-AppImage-Version=$version" squashfs-root/*.desktop; then
