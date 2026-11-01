@@ -23,7 +23,9 @@ omacal events show 41 --json         # ONE event whole (v0.7.4+): the guest
 omacal search quarterly review --json   # event AND task titles (v5.3+): events
                                      # nearest first, open tasks by due date;
                                      # --json answers {"events":[…],"tasks":[…]}
-omacal calendars --json              # every calendar with ids
+omacal calendars --json              # every calendar with ids; one with
+                                     # supports_events false is a task list
+                                     # and takes no events
 omacal weather --json                # the app's forecast (v2.2+): place +
                                      # how it was decided, now, eight days
 omacal tasks --json                  # what still needs doing (v2.3+), with

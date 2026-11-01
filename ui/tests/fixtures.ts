@@ -440,6 +440,7 @@ const cal = (o: Partial<Calendar> & { id: number; account_email: string; summary
   // `EventForm`'s own fixtures name the role explicitly, because for that
   // component it is the thing under test.
   access_role: 'owner',
+  supports_events: true,
   ...o,
 });
 

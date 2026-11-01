@@ -374,9 +374,13 @@ function directive(
 
 function resolveCalendar(raw: string, calendars: Calendar[]): { id: number | null; error: string | null } {
   const wanted = raw.trim().toLowerCase();
-  const exact = calendars.filter((c) => c.summary.trim().toLowerCase() === wanted);
+  // Collections that take events only: one iCloud account can hold a calendar
+  // and a Reminders list of the same name, and the account email that tells
+  // other duplicates apart is the same for both.
+  const events = calendars.filter((c) => c.supports_events);
+  const exact = events.filter((c) => c.summary.trim().toLowerCase() === wanted);
   if (exact.length === 1) return { id: exact[0].id, error: null };
-  const qualified = calendars.filter((c) => {
+  const qualified = events.filter((c) => {
     const names = [
       `${c.summary}@${c.account_email}`,
       `${c.summary} ${c.account_email}`,
