@@ -886,7 +886,11 @@ test.describe('App', () => {
       await expect(page.locator('h1')).toHaveText('January 2024');
       // A finger drag, up, fast enough and far enough to be strong. The moves
       // are paced at ~16ms so the velocity estimate sees real speed rather than
-      // three events in one tick.
+      // three events in one tick. 80px a step is ~5 px/ms against the 2 px/ms
+      // threshold: at 40px (2.5 px/ms) a timer running late on a loaded runner
+      // took it under, and CI failed it on both engines. The threshold's edges
+      // are `swipePage`'s own tests (periodscroll.spec.ts); this one is the
+      // wiring.
       await page.locator('.view').evaluate((view) => new Promise<void>((resolve) => {
         const fire = (type: string, y: number) => view.dispatchEvent(new PointerEvent(type, {
           pointerType: 'touch', pointerId: 7, clientX: 120, clientY: y, bubbles: true,
@@ -894,9 +898,9 @@ test.describe('App', () => {
         let y = 400;
         fire('pointerdown', y);
         const step = () => {
-          y -= 40;
+          y -= 80;
           fire('pointermove', y);
-          if (y > 280) { setTimeout(step, 16); } else { fire('pointerup', y); resolve(); }
+          if (y > 160) { setTimeout(step, 16); } else { fire('pointerup', y); resolve(); }
         };
         setTimeout(step, 16);
       }));
