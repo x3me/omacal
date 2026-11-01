@@ -86,9 +86,45 @@ pub async fn window_advanced_a_day(
         };
     match stored {
         None => true,
-        // `!=`, not `<`: turning "Sync full history" off brings the end back
-        // from 2200, and that calendar must still fetch what comes into range.
+        // `!=`, not `<`: an end that moves either way is a different window.
+        // Coming back still has to fetch what is in range now.
         Some(end) => end.div_euclid(DAY) != window_end_ms.div_euclid(DAY),
+    }
+}
+
+/// Whether this calendar must take the full-window fetch rather than trust
+/// its cursor.
+///
+/// The end moving is [`window_advanced_a_day`]. The start moving *earlier*
+/// is the other half: a longer history reaches events the cursor will never
+/// mention, and the end — a year ahead, for every span — did not move. A
+/// start that moved later is not a reason to fetch. Those rows are already
+/// local, and shortening the span drops them itself.
+pub async fn window_needs_refetch(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    window_start_ms: i64,
+    window_end_ms: i64,
+) -> bool {
+    if window_advanced_a_day(pool, calendar_id, window_end_ms).await {
+        return true;
+    }
+    const DAY: i64 = 24 * 3_600_000;
+    let stored: Option<i64> =
+        match sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = ?1")
+            .bind(calendar_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row.flatten(),
+            Err(e) => {
+                tracing::warn!(calendar_id, %e, "could not read the fetched window");
+                return false;
+            }
+        };
+    match stored {
+        None => true,
+        Some(start) => window_start_ms.div_euclid(DAY) < start.div_euclid(DAY),
     }
 }
 
@@ -128,10 +164,10 @@ pub async fn sync_calendar(
     // not set it would pull everything and still leave a row deleted upstream
     // sitting in the store. Only when a token was actually discarded: a first
     // sync has no token and no local rows for the sweep to find.
-    let dropped_for_window =
-        stored_token.is_some() && window_advanced_a_day(pool, calendar_id, window_end_ms).await;
+    let dropped_for_window = stored_token.is_some()
+        && window_needs_refetch(pool, calendar_id, window_start_ms, window_end_ms).await;
     if dropped_for_window {
-        tracing::info!(calendar_id, "window advanced a day; full fetch rather than incremental");
+        tracing::info!(calendar_id, "synced window changed; full fetch rather than incremental");
     }
     let mut token = if dropped_for_window { None } else { stored_token };
     let mut did_full_resync = dropped_for_window;
@@ -458,8 +494,15 @@ mod tests {
 
         // The next day, once.
         assert!(window_advanced_a_day(&pool, 1, 11 * DAY).await);
-        // And a window that comes back (full history turned off) is moved too.
+        // And a window that comes back is moved too.
         assert!(window_advanced_a_day(&pool, 1, 9 * DAY).await);
+
+        // A longer history moves the *start* earlier without touching the
+        // end. The cursor will not mention those older events.
+        assert!(window_needs_refetch(&pool, 1, -DAY, 10 * DAY + 3_600_000).await);
+        // A shorter one does not. The rows that fell out are dropped locally.
+        assert!(!window_needs_refetch(&pool, 1, DAY, 10 * DAY + 3_600_000).await);
+        assert!(!window_needs_refetch(&pool, 1, 0, 10 * DAY + 3_600_000).await);
 
         // A feed records no window at all (migration 0017 made the columns
         // nullable); it fetches its file whole, so the answer is moot but must

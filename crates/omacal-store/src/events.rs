@@ -656,6 +656,11 @@ pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec
     Ok(rows.iter().map(row_to_event).collect())
 }
 
+/// Masters are not date-bounded here. A series' own start says nothing about
+/// when it still occurs, and a long history keeps every series that ever
+/// did. `omacal_core::recur::expand` skips a rule that has already ended, so
+/// a view of today does not re-expand those; an open-ended series still
+/// expands, because it still occurs.
 pub async fn events_in_window(
     pool: &SqlitePool,
     from_ms: i64,

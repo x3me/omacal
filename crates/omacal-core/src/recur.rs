@@ -106,6 +106,95 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+const DAY_MS: i64 = 24 * 3_600_000;
+
+/// Whether every rule in `recurrence` has finished before `from_ms`, so
+/// expanding it cannot produce an occurrence in the window.
+///
+/// False — expand as usual — when any line is an `RDATE` (it can add a date
+/// the rule itself has passed), when any rule has no `UNTIL` and no `COUNT`,
+/// or when a bound cannot be read. The bound overestimates on purpose: a
+/// series this skips has no occurrence left, and one it fails to skip only
+/// costs the expansion it would have paid anyway.
+fn rule_ended_before(recurrence: &[String], dtstart_ms: i64, from_ms: i64, duration_ms: i64) -> bool {
+    if recurrence.iter().any(|line| {
+        let t = line.trim();
+        t.len() >= 5 && t[..5].eq_ignore_ascii_case("RDATE")
+    }) {
+        return false;
+    }
+    let horizon = from_ms.saturating_sub(duration_ms.max(0));
+    let mut saw_rule = false;
+    for line in recurrence {
+        let upper = line.to_ascii_uppercase();
+        if !upper.contains("RRULE") {
+            continue;
+        }
+        saw_rule = true;
+        let has_until = upper.contains("UNTIL=");
+        let has_count = upper.contains("COUNT=");
+        if !has_until && !has_count {
+            return false;
+        }
+        // Two days of slack: a floating or date-only UNTIL is a local day,
+        // and the last zone on earth ends it well after UTC midnight.
+        let until_ended = match until_ms(&upper) {
+            Some(until) => until.saturating_add(2 * DAY_MS) < horizon,
+            None => false,
+        };
+        let count_ended = match count_end_ms(&upper, dtstart_ms) {
+            Some(end) => end < horizon,
+            None => false,
+        };
+        let ended = (!has_until || until_ended) && (!has_count || count_ended);
+        if !ended {
+            return false;
+        }
+    }
+    saw_rule
+}
+
+fn param<'a>(upper: &'a str, key: &str) -> Option<&'a str> {
+    let rest = upper.split(key).nth(1)?;
+    Some(rest.split([';', ':']).next()?.trim())
+}
+
+fn until_ms(upper: &str) -> Option<i64> {
+    let token = param(upper, "UNTIL=")?;
+    if token.len() < 8 {
+        return None;
+    }
+    let y: i16 = token[0..4].parse().ok()?;
+    let m: i8 = token[4..6].parse().ok()?;
+    let d: i8 = token[6..8].parse().ok()?;
+    let date = jiff::civil::Date::new(y, m, d).ok()?;
+    let (hh, mm, ss) = if token.len() >= 15 && token.as_bytes().get(8) == Some(&b'T') {
+        (token[9..11].parse().ok()?, token[11..13].parse().ok()?, token[13..15].parse().ok()?)
+    } else {
+        (0, 0, 0)
+    };
+    date.at(hh, mm, ss, 0).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
+}
+
+/// A generous last instant for a `COUNT` rule: `(count + 1)` periods, so a
+/// `BY*` shift cannot hide an occurrence that is still inside the window.
+fn count_end_ms(upper: &str, dtstart_ms: i64) -> Option<i64> {
+    let count = param(upper, "COUNT=")?.parse::<i64>().ok()?;
+    let freq = param(upper, "FREQ=")?;
+    let interval = param(upper, "INTERVAL=").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let period = match freq {
+        "YEARLY" => 366 * DAY_MS,
+        "MONTHLY" => 32 * DAY_MS,
+        "WEEKLY" => 8 * DAY_MS,
+        "DAILY" => 2 * DAY_MS,
+        "HOURLY" => 2 * 3_600_000,
+        "MINUTELY" => 2 * 60_000,
+        "SECONDLY" => 2_000,
+        _ => return None,
+    };
+    Some(dtstart_ms.saturating_add((count + 1).saturating_mul(interval).saturating_mul(period)))
+}
+
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
 ///
 /// `limit` bounds the number of occurrences generated, guarding against
@@ -134,6 +223,15 @@ pub fn expand(
             Vec::new()
         };
         return Ok(Expansion { intervals, truncated: false });
+    }
+
+    // A long history keeps every series that ever occurred. Expanding each of
+    // them on a view of today is the cost that grows with the span, and a
+    // rule that has already ended cannot overlap the window. Open-ended
+    // series still expand — their own dates never say they stopped — and an
+    // RDATE can land after UNTIL, so that line is never skipped.
+    if rule_ended_before(series.recurrence, series.dtstart_ms, from_ms, series.duration_ms) {
+        return Ok(Expansion { intervals: Vec::new(), truncated: false });
     }
 
     let mut source = String::with_capacity(128);
@@ -580,5 +678,52 @@ mod tests {
         for kept in ["RRULE:FREQ=WEEKLY;BYDAY=MO", "EXDATE;TZID=Europe/Sofia:20260804T090000", "EXDATE;TZID=Customized Time Zone:20261019T180000"] {
             assert_eq!(with_iana_tzid(kept), kept);
         }
+    }
+
+    /// A long history keeps series that ended years ago. A view of today must
+    /// not expand them: the rule cannot produce an occurrence in the window.
+    #[test]
+    fn a_series_that_ended_before_the_window_expands_to_nothing() {
+        let day = 24 * 3_600_000;
+        // 1990-01-01T00:00:00Z.
+        let start = 631_152_000_000;
+        let until = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: 3_600_000,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;UNTIL=19901231T000000Z"]),
+        };
+        let now = 1_786_341_600_000; // 2026
+        let out = expand(&until, now, now + 7 * day, 512).unwrap();
+        assert!(out.intervals.is_empty());
+        assert!(!out.truncated, "an ended series is finished, not cut short");
+
+        let count = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: 3_600_000,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;COUNT=10"]),
+        };
+        assert!(expand(&count, now, now + 7 * day, 512).unwrap().intervals.is_empty());
+
+        // The same COUNT, asked while it is still running, is unaffected.
+        let during = expand(&count, start, start + 5 * day, 50).unwrap();
+        assert!(!during.intervals.is_empty());
+        assert_eq!(during.intervals.len(), 5);
+    }
+
+    /// An RDATE can sit after UNTIL. Skipping on the rule alone would drop it.
+    #[test]
+    fn an_rdate_after_until_is_not_treated_as_ended() {
+        let lines = weekly(&[
+            "RRULE:FREQ=DAILY;UNTIL=19900102T000000Z",
+            "RDATE:20260810T090000Z",
+        ]);
+        assert!(
+            !rule_ended_before(&lines, 631_152_000_000, 1_786_341_600_000, 3_600_000),
+            "an RDATE is another way for the series to occur"
+        );
     }
 }

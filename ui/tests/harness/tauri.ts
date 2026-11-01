@@ -16,7 +16,7 @@ import type { PendingInvite, DeclineNotice, ChangeNotice } from '../../src/lib/i
 import type { EventDetail } from '../../src/lib/eventdetail';
 import type { TimeFormat } from '../../src/lib/timefmt';
 import type { WeekStartDay } from '../../src/lib/weekstart';
-import type { Appearance, StartOnLogin, WeekViewDays, WindowFrame } from '../../src/lib/settings';
+import type { Appearance, HistorySpan, StartOnLogin, WeekViewDays, WindowFrame } from '../../src/lib/settings';
 import type { View } from '../../src/lib/views';
 import type { TaskSort } from '../../src/lib/tasks';
 import type { EventCornerStyle } from '../../src/lib/appearance';
@@ -698,6 +698,7 @@ type StubSettings = {
   taskNotificationsEnabled: boolean;
   keepRemindersOnScreen: boolean;
   minSyncIntervalMs: number;
+  historySpan: HistorySpan;
   listMode: boolean;
   combineIdenticalEvents: boolean;
   calendarGroups: { name: string; calendarIds: number[] }[];
@@ -778,6 +779,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   taskNotificationsEnabled: true,
   keepRemindersOnScreen: false,
   minSyncIntervalMs: 60_000,
+  // Two years: the fresh-install default. Six months is what an install
+  // already in use keeps, written by the migration rather than read here.
+  historySpan: 24,
   // The backend's own shipped default (fallback spec §3).
   fallbackReminderMinutes: [60, 10],
   defaultCalendarId: null,
@@ -1222,6 +1226,11 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_setting': {
         const { key, value } = args.setting as { key: string; value: any };
         switch (key) {
+          case 'historySpan':
+            if (![6, 24, 60, 0].includes(value)) {
+              throw new Error('Choose 6 months, 2 years, 5 years, or everything.');
+            }
+            break;
           case 'syncIntervalMs':
             if ((value as number) < settings.minSyncIntervalMs) {
               throw new Error(

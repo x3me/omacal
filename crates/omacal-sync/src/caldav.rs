@@ -202,6 +202,49 @@ pub async fn sync_caldav_calendar(
     window_end_ms: i64,
     now_ms: i64,
 ) -> Result<SyncOutcome, CalDavError> {
+    sync_caldav_fetch(
+        pool,
+        client,
+        calendar_id,
+        collection_url,
+        supports_events,
+        supports_tasks,
+        &[(window_start_ms, window_end_ms)],
+        window_start_ms,
+        window_end_ms,
+        true,
+        now_ms,
+    )
+    .await
+}
+
+/// [`sync_caldav_calendar`] over one or more report ranges.
+///
+/// `record_start_ms`/`record_end_ms` are what `sync_state` keeps afterwards.
+/// A full sync records the range it asked about. A post-write resync asks
+/// about the recent window — and the saved event, when that sits outside it —
+/// but records the window the calendar already had, so one save cannot shrink
+/// the span a later sync believes it has fetched.
+///
+/// `masters_in_reach` is true for that full sync: a master the report did not
+/// return is gone, because a report over the whole window would have named
+/// every series that occurs in it. A resync sets it false. Its report never
+/// asked about a series that ended earlier, and deleting those masters would
+/// throw away the history a longer span exists to keep.
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_caldav_fetch(
+    pool: &SqlitePool,
+    client: &CalDavClient,
+    calendar_id: i64,
+    collection_url: &str,
+    supports_events: bool,
+    supports_tasks: bool,
+    ranges: &[(i64, i64)],
+    record_start_ms: i64,
+    record_end_ms: i64,
+    masters_in_reach: bool,
+    now_ms: i64,
+) -> Result<SyncOutcome, CalDavError> {
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
         .bind(calendar_id)
         .fetch_one(pool)
@@ -227,8 +270,8 @@ pub async fn sync_caldav_calendar(
             .flatten();
 
     // An unchanged ctag means nothing was edited — but it says nothing about
-    // what the window has newly reached, so the day-advance check gets a say
-    // before the short-circuit. See `crate::window_advanced_a_day`.
+    // what the window has newly reached, so the window check gets a say
+    // before the short-circuit. See `crate::window_needs_refetch`.
     let ctag = client.ctag(collection_url).await?;
     // `supports_events` gates the check, because the window write below is
     // inside that branch: a tasks-only collection never records one, so an
@@ -237,7 +280,7 @@ pub async fn sync_caldav_calendar(
     if ctag.is_some()
         && ctag == stored_ctag
         && !(supports_events
-            && crate::window_advanced_a_day(pool, calendar_id, window_end_ms).await)
+            && crate::window_needs_refetch(pool, calendar_id, record_start_ms, record_end_ms).await)
     {
         return Ok(SyncOutcome::default());
     }
@@ -245,29 +288,12 @@ pub async fn sync_caldav_calendar(
     let mut outcome = SyncOutcome::default();
 
     if supports_events {
-        let resources = client
-            .events_in_window(collection_url, window_start_ms, window_end_ms)
-            .await?;
-        let mut seen: Vec<String> = Vec::new();
-        let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
-        for res in &resources {
-            let Some(root) = omacal_caldav::parse(&res.ics) else {
-                tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
-                continue;
-            };
-            for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
-                let Some(stored) =
-                    caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
-                else {
-                    tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
-                    continue;
-                };
-                seen.push(stored.google_id.clone());
-                // The master (first, by events_in's ordering) carries the
-                // resource pointer and raw bytes for the write path.
-                let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
-                rows.push((stored, src));
-            }
+        // Fetched before the write transaction: a REPORT must not hold the
+        // database lock.
+        let mut fetched = Vec::with_capacity(ranges.len());
+        for &(start_ms, end_ms) in ranges {
+            let resources = client.events_in_window(collection_url, start_ms, end_ms).await?;
+            fetched.push((start_ms, end_ms, resources));
         }
 
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(anyhow::Error::from)?;
@@ -282,36 +308,61 @@ pub async fn sync_caldav_calendar(
             return Ok(SyncOutcome::default());
         }
 
-        for (row, src) in &rows {
-            let id = omacal_store::upsert_event(&mut *tx, row).await?;
-            if let Some((href, ics)) = src {
-                sqlx::query("UPDATE events SET caldav_href = ?2, raw_ics = ?3 WHERE id = ?1")
-                    .bind(id)
-                    .bind(href)
-                    .bind(ics)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(anyhow::Error::from)?;
+        for (start_ms, end_ms, resources) in &fetched {
+            let mut seen: Vec<String> = Vec::new();
+            let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
+            for res in resources {
+                let Some(root) = omacal_caldav::parse(&res.ics) else {
+                    tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
+                    continue;
+                };
+                for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
+                    let Some(stored) =
+                        caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
+                    else {
+                        tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
+                        continue;
+                    };
+                    seen.push(stored.google_id.clone());
+                    // The master (first, by events_in's ordering) carries the
+                    // resource pointer and raw bytes for the write path.
+                    let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
+                    rows.push((stored, src));
+                }
             }
-            outcome.upserted += 1;
-        }
 
-        // Inferred deletions, bounded to what the query would have returned:
-        // anything alive in (or recurring into) the window that the server
-        // did not mention no longer exists.
-        //
-        // **Bounded at both ends, unlike the Google sweep** — see
-        // `reap::Reach` for why each provider reaches exactly as far as its
-        // own fetch asked, and no further.
-        let deleted = crate::reap::delete_unnamed(
-            &mut tx,
-            calendar_id,
-            &seen,
-            crate::reap::Reach::Overlapping { start_ms: window_start_ms, end_ms: window_end_ms },
-        )
-        .await
-        .map_err(anyhow::Error::from)?;
-        outcome.deleted += deleted as usize;
+            for (row, src) in &rows {
+                let id = omacal_store::upsert_event(&mut *tx, row).await?;
+                if let Some((href, ics)) = src {
+                    sqlx::query("UPDATE events SET caldav_href = ?2, raw_ics = ?3 WHERE id = ?1")
+                        .bind(id)
+                        .bind(href)
+                        .bind(ics)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(anyhow::Error::from)?;
+                }
+                outcome.upserted += 1;
+            }
+
+            // Each range is swept with only the names *it* returned. A union
+            // of two disjoint reports would treat everything between them as
+            // absent and delete it.
+            //
+            // **Bounded at both ends, unlike the Google sweep** — see
+            // `reap::Reach` for why each provider reaches exactly as far as
+            // its own fetch asked, and no further. A resync uses `Dated` so
+            // a series the recent window did not ask about is left alone.
+            let reach = if masters_in_reach {
+                crate::reap::Reach::Overlapping { start_ms: *start_ms, end_ms: *end_ms }
+            } else {
+                crate::reap::Reach::Dated { start_ms: *start_ms, end_ms: *end_ms }
+            };
+            let deleted = crate::reap::delete_unnamed(&mut tx, calendar_id, &seen, reach)
+                .await
+                .map_err(anyhow::Error::from)?;
+            outcome.deleted += deleted as usize;
+        }
 
         sqlx::query(
             "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
@@ -323,8 +374,8 @@ pub async fn sync_caldav_calendar(
         )
         .bind(calendar_id)
         .bind(&ctag)
-        .bind(window_start_ms)
-        .bind(window_end_ms)
+        .bind(record_start_ms)
+        .bind(record_end_ms)
         .execute(&mut *tx)
         .await
         .map_err(anyhow::Error::from)?;
@@ -395,8 +446,8 @@ pub async fn sync_caldav_calendar(
             )
             .bind(calendar_id)
             .bind(&ctag)
-            .bind(window_start_ms)
-            .bind(window_end_ms)
+            .bind(record_start_ms)
+            .bind(record_end_ms)
             .execute(pool)
             .await
             .map_err(anyhow::Error::from)?;

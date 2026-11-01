@@ -2,11 +2,16 @@
 //!
 //! The shape every operation shares: **rewrite the resource, PUT it behind
 //! its etag, then resync the collection through the read path.** The store is
-//! never hand-edited after a write; the same `sync_caldav_calendar` that
-//! passes the Radicale end-to-end reconciles it from what the server now
-//! holds. One code path decides what rows exist, whichever direction the
-//! change came from — and a write that raced another client either wins the
-//! etag or surfaces `PreconditionFailed`, never both.
+//! never hand-edited after a write; the same sync that passes the Radicale
+//! end-to-end reconciles it from what the server now holds. One code path
+//! decides what rows exist, whichever direction the change came from — and a
+//! write that raced another client either wins the etag or surfaces
+//! `PreconditionFailed`, never both.
+//!
+//! That resync asks about the recent window, plus the saved event when it
+//! sits further back. A long history must not be downloaded again on every
+//! save, and the series that ended before the recent window must not be
+//! reaped by a report that never asked about them.
 //!
 //! Scope vocabulary maps onto ICS structure rather than onto Google calls:
 //! - **all** (and any edit of a one-off): rewrite the master component in
@@ -107,7 +112,7 @@ async fn resource_of(state: &AppState, master_id: i64) -> anyhow::Result<(String
 
 /// `When` + the authoring zone → the two serializable endpoints, plus the
 /// new start instant (what decides whether a series edit moved its times).
-fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, WriteTime, i64)> {
+fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, WriteTime, i64, i64)> {
     match when {
         When::Timed { start_ms, end_ms } => {
             let zone = jiff::tz::TimeZone::get(tz)
@@ -121,6 +126,7 @@ fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, 
                 WriteTime::Zoned { dt: civil(*start_ms)?, tzid: name.clone() },
                 WriteTime::Zoned { dt: civil(*end_ms)?, tzid: name },
                 *start_ms,
+                *end_ms,
             ))
         }
         When::AllDay { start_date, end_date } => {
@@ -131,7 +137,12 @@ fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, 
                 .in_tz(cal_tz)?
                 .timestamp()
                 .as_millisecond();
-            Ok((WriteTime::Date(start), WriteTime::Date(end), start_ms))
+            let end_ms = end
+                .to_datetime(jiff::civil::Time::midnight())
+                .in_tz(cal_tz)?
+                .timestamp()
+                .as_millisecond();
+            Ok((WriteTime::Date(start), WriteTime::Date(end), start_ms, end_ms))
         }
     }
 }
@@ -229,9 +240,39 @@ fn friendly(e: CalDavError) -> anyhow::Error {
     }
 }
 
-/// Post-write reconciliation: one collection resynced through the read path,
-/// and the bar's feed refreshed.
-async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+/// Report ranges for a post-write resync: the recent six months, plus each
+/// saved span that sits entirely outside it. The span is padded by a day so
+/// an all-day event's exclusive end still overlaps the report.
+///
+/// Two ranges, not their union. An edit of an old event must not download
+/// everything between then and today, and a sweep of that union would delete
+/// the years in between.
+pub(crate) fn resync_ranges(now_ms: i64, spans: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    const DAY: i64 = 24 * 3_600_000;
+    let (near_start, near_end) = crate::settings::history_window(now_ms, crate::settings::SPAN_6_MONTHS);
+    let mut ranges = vec![(near_start, near_end)];
+    for &(start, end) in spans {
+        let start = start.saturating_sub(DAY);
+        let end = end.saturating_add(DAY);
+        if end <= near_start || start >= near_end {
+            ranges.push((start, end));
+        }
+    }
+    ranges
+}
+
+/// Post-write reconciliation: the recent window, and the saved event when it
+/// lies outside that, applied through the read path. The calendar's recorded
+/// span is left as it was, and series masters outside the reports are not
+/// reaped. `removed_uid` is a resource this call just deleted: a narrow
+/// report does not treat every master as in reach, so the uid is dropped
+/// explicitly or an old series would stay.
+async fn resync(
+    state: &AppState,
+    calendar_id: i64,
+    spans: &[(i64, i64)],
+    removed_uid: Option<&str>,
+) -> anyhow::Result<()> {
     let (client, collection_url) =
         crate::caldav_account::client_for_calendar(state, calendar_id).await?;
     let (supports_events, supports_tasks): (i64, i64) = sqlx::query_as(
@@ -241,20 +282,61 @@ async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
     .fetch_one(&state.pool)
     .await?;
     let now = crate::now_ms();
-    let (ws, we) = crate::synced_window(now);
-    omacal_sync::caldav::sync_caldav_calendar(
-        &state.pool,
-        &client,
-        calendar_id,
-        &collection_url,
-        supports_events != 0,
-        supports_tasks != 0,
-        ws,
-        we,
-        now,
+    let recorded: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT window_start, window_end FROM sync_state WHERE calendar_id = ?1",
     )
-    .await
-    .map_err(friendly)?;
+    .bind(calendar_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    // Nothing fetched yet: the ordinary sync, which may reap series the
+    // window does not contain. After that, a save only refreshes the recent
+    // window and the event it touched.
+    match recorded {
+        Some((Some(start), Some(end))) => {
+            let ranges = resync_ranges(now, spans);
+            omacal_sync::caldav::sync_caldav_fetch(
+                &state.pool,
+                &client,
+                calendar_id,
+                &collection_url,
+                supports_events != 0,
+                supports_tasks != 0,
+                &ranges,
+                start,
+                end,
+                false,
+                now,
+            )
+            .await
+            .map_err(friendly)?;
+        }
+        _ => {
+            let (ws, we) = crate::synced_window(state, now);
+            omacal_sync::caldav::sync_caldav_calendar(
+                &state.pool,
+                &client,
+                calendar_id,
+                &collection_url,
+                supports_events != 0,
+                supports_tasks != 0,
+                ws,
+                we,
+                now,
+            )
+            .await
+            .map_err(friendly)?;
+        }
+    }
+    if let Some(uid) = removed_uid {
+        sqlx::query(
+            "DELETE FROM events WHERE calendar_id = ?1 AND (google_id = ?2 OR recurring_event_id = ?2)",
+        )
+        .bind(calendar_id)
+        .bind(uid)
+        .execute(&state.pool)
+        .await?;
+    }
     crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     Ok(())
 }
@@ -281,7 +363,7 @@ pub(crate) async fn create(
         .fetch_one(&state.pool)
         .await?;
 
-    let (start, end, _) = endpoints(&fields.when, &fields.tz, &cal_tz)?;
+    let (start, end, start_ms, end_ms) = endpoints(&fields.when, &fields.tz, &cal_tz)?;
     let uid = uuid::Uuid::new_v4().to_string();
     let ev = EventWrite {
         uid: uid.clone(),
@@ -303,7 +385,7 @@ pub(crate) async fn create(
 
     created_but(
         async {
-            resync(state, calendar_id).await?;
+            resync(state, calendar_id, &[(start_ms, end_ms)], None).await?;
             let id = row_id_by_uid(state, calendar_id, &uid).await?;
             crate::events::event_detail_impl(state, id).await
         }
@@ -373,7 +455,7 @@ pub(crate) async fn update(
     let uid = master.google_id.clone();
     let is_series = master.recurrence.is_some();
 
-    let (start, end, new_start_ms) = endpoints(&fields.when, &fields.tz, &cal_tz)?;
+    let (start, end, new_start_ms, new_end_ms) = endpoints(&fields.when, &fields.tz, &cal_tz)?;
     let now = now_ts();
 
     let (new_raw, follow_up, detail_uid): (String, Option<(String, String)>, String) =
@@ -459,7 +541,16 @@ pub(crate) async fn update(
 
     saved_but(
         async {
-            resync(state, master.calendar_id).await?;
+            let dur = (master.end_utc - master.start_utc).max(0);
+            let mut spans = vec![
+                (master.start_utc, master.end_utc),
+                (viewed.start_utc, viewed.end_utc),
+                (new_start_ms, new_end_ms),
+            ];
+            if is_series && scope != "all" {
+                spans.push((occurrence_start_ms, occurrence_start_ms.saturating_add(dur)));
+            }
+            resync(state, master.calendar_id, &spans, None).await?;
             let row = row_id_by_uid(state, master.calendar_id, &detail_uid).await;
             // An exception the resync collapsed away (or a row the server
             // renamed) falls back to the master — the popover shows
@@ -540,7 +631,12 @@ pub(crate) async fn respond(
     })?;
 
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
-    resync(state, master.calendar_id).await?;
+    let dur = (viewed.end_utc - viewed.start_utc).max(0);
+    let mut spans = vec![(master.start_utc, master.end_utc), (viewed.start_utc, viewed.end_utc)];
+    if is_series && scope != "all" {
+        spans.push((occurrence_start_ms, occurrence_start_ms.saturating_add(dur)));
+    }
+    resync(state, master.calendar_id, &spans, None).await?;
     let row = match row_id_by_uid(state, master.calendar_id, &detail_uid).await {
         Ok(r) => r,
         Err(_) => row_id_by_uid(state, master.calendar_id, &uid).await?,
@@ -610,8 +706,9 @@ pub(crate) async fn move_to(
     // last so the row this returns is the one it just brought in.
     saved_but(
         async {
-            resync(state, master.calendar_id).await?;
-            resync(state, target_calendar_id).await?;
+            let span = [(master.start_utc, master.end_utc)];
+            resync(state, master.calendar_id, &span, Some(&uid)).await?;
+            resync(state, target_calendar_id, &span, None).await?;
             let row = row_id_by_uid(state, target_calendar_id, &uid).await?;
             crate::events::event_detail_impl(state, row).await
         }
@@ -658,7 +755,22 @@ pub(crate) async fn delete(
         client.put(&href, &excluded, master.etag.as_deref()).await.map_err(friendly)?;
     }
 
-    saved_but(resync(state, master.calendar_id).await)
+    let dur = (master.end_utc - master.start_utc).max(0);
+    let mut spans = vec![(master.start_utc, master.end_utc), (viewed.start_utc, viewed.end_utc)];
+    if is_series && scope != "all" {
+        spans.push((occurrence_start_ms, occurrence_start_ms.saturating_add(dur)));
+    }
+    // The whole resource is gone only when the master itself was deleted.
+    // One occurrence, or the rest of a series, leaves the master in place.
+    let removed = if !is_series
+        || scope == "all"
+        || (scope == "following" && occurrence_start_ms <= master.start_utc)
+    {
+        Some(uid.as_str())
+    } else {
+        None
+    };
+    saved_but(resync(state, master.calendar_id, &spans, removed).await)
 }
 
 #[cfg(test)]
@@ -808,7 +920,7 @@ mod tests {
 
     #[test]
     fn endpoints_resolve_both_shapes() {
-        let (s, _, ms) = endpoints(
+        let (s, _, ms, _) = endpoints(
             &When::Timed { start_ms: 1_786_352_400_000, end_ms: 1_786_356_000_000 },
             "Europe/Sofia",
             "UTC",
@@ -817,7 +929,7 @@ mod tests {
         assert_eq!(ms, 1_786_352_400_000);
         assert!(matches!(s, WriteTime::Zoned { ref tzid, .. } if tzid == "Europe/Sofia"));
 
-        let (s, e, ms) = endpoints(
+        let (s, e, ms, _) = endpoints(
             &When::AllDay { start_date: "2026-08-20".into(), end_date: "2026-08-21".into() },
             "Europe/Sofia",
             "Europe/Sofia",
@@ -827,5 +939,25 @@ mod tests {
         assert_eq!(e, WriteTime::Date(jiff::civil::date(2026, 8, 21)));
         // Midnight Sofia = 21:00Z the day before.
         assert_eq!(ms % 86_400_000, 75_600_000);
+    }
+
+    /// A save refetches the recent window, and a saved event that sits
+    /// outside it, as its own range. The union of the two would be the whole
+    /// history between them.
+    #[test]
+    fn a_save_refetches_the_recent_window_and_the_event_not_the_span_between() {
+        const DAY: i64 = 24 * 3_600_000;
+        let now = 1_786_341_600_000;
+        let (near_start, near_end) = crate::settings::history_window(now, crate::settings::SPAN_6_MONTHS);
+
+        let inside = resync_ranges(now, &[(now, now + DAY)]);
+        assert_eq!(inside, vec![(near_start, near_end)], "an event inside the recent window adds no second report");
+
+        let old_start = now - 10 * 365 * DAY;
+        let old = resync_ranges(now, &[(old_start, old_start + DAY)]);
+        assert_eq!(old.len(), 2);
+        assert_eq!(old[0], (near_start, near_end));
+        assert!(old[1].1 < near_start, "the event's range must not stretch forward to today");
+        assert!(old[1].0 <= old_start && old[1].1 >= old_start + DAY);
     }
 }

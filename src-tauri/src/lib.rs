@@ -129,6 +129,13 @@ pub struct AppState {
     /// not a state, and a later reader replaying it would yank the calendar
     /// back to a day the user has already navigated away from.
     pub open_date: std::sync::Mutex<Option<String>>,
+    /// How far back sync reaches, in months — one of `settings::HISTORY_SPANS`,
+    /// `0` for everything. Mirrored here for `quit_on_close`'s reason: the
+    /// sync loop reads it where it cannot await the row. Seeded from the row
+    /// at startup and rewritten by `settings::Setting::HistorySpan`. A number
+    /// on the state, so a test that builds its own state does not share one
+    /// with the rest of the process.
+    pub history_months: std::sync::atomic::AtomicI64,
 }
 
 /// The notification transport, managed on its own rather than inside
@@ -390,7 +397,8 @@ async fn get_year(
     )
     .await
     .map_err(|e| e.to_string())?;
-    Ok(commands::assemble_year(&events, year, now_ms(), &tz, week_start))
+    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(commands::assemble_year_with(&events, year, now_ms(), &tz, week_start, months))
 }
 
 #[tauri::command]
@@ -400,7 +408,8 @@ async fn get_big_year(
 ) -> Result<commands::BigYearPayload, String> {
     let tz = display_tz(&state.pool);
     let week_start = settings::read_settings(&state.pool).await.week_start;
-    get_big_year_impl(&state.pool, year, &tz, now_ms(), week_start).await
+    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
+    get_big_year_impl(&state.pool, year, &tz, now_ms(), week_start, months).await
 }
 
 /// The body of `get_big_year`, minus the Tauri `State` wrapper so it is
@@ -411,6 +420,7 @@ async fn get_big_year_impl(
     tz: &str,
     now: i64,
     week_start: settings::WeekStart,
+    history_months: i64,
 ) -> Result<commands::BigYearPayload, String> {
     let ribbon_start_ms = commands::big_year_start_ms(year, tz, week_start);
     // Same widening as `get_week`/`get_day`/`get_month`/`get_year`, for the
@@ -425,8 +435,10 @@ async fn get_big_year_impl(
     .await
     .map_err(|e| e.to_string())?;
     Ok(if settings::combine_identical_events(pool).await {
-        commands::assemble_big_year_combining(&events, year, now, tz, week_start, true)
-    } else { commands::assemble_big_year(&events, year, now, tz, week_start) })
+        commands::assemble_big_year_combining(&events, year, now, tz, week_start, true, history_months)
+    } else {
+        commands::assemble_big_year_combining(&events, year, now, tz, week_start, false, history_months)
+    })
 }
 
 pub(crate) const KEYRING_SERVICE: &str = "omacal";
@@ -1040,23 +1052,11 @@ mod today_of_month_tests {
     }
 }
 
-/// decisions ("what should I ask Google for?") must read one definition.
-pub(crate) fn synced_window(now_ms: i64) -> (i64, i64) {
-    window_for(now_ms, FULL_HISTORY.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// The "Sync full history" setting, mirrored here so the sync and the year
-/// views read one answer without each going to the database.
-pub(crate) static FULL_HISTORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Full history is 1900 to 2200, fixed rather than sliding: an end that moved
-/// every day would make `window_advanced_a_day` refetch everything daily.
-fn window_for(now_ms: i64, full_history: bool) -> (i64, i64) {
-    const DAY: i64 = 24 * 3_600_000;
-    if full_history {
-        return (-2_208_988_800_000, 7_258_118_400_000);
-    }
-    (now_ms - 180 * DAY, now_ms + 365 * DAY)
+/// The window sync fetches and the year views hatch outside of. One
+/// definition, read off this state's span, so a test with its own state
+/// does not share a process-wide flag.
+pub(crate) fn synced_window(state: &AppState, now_ms: i64) -> (i64, i64) {
+    settings::history_window(now_ms, state.history_months.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Refreshes the access token and syncs every calendar of every account.
@@ -1086,7 +1086,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
     let google = accounts_to_attempt(google, &marked);
 
     let now = now_ms();
-    let (window_start, window_end) = synced_window(now);
+    let (window_start, window_end) = synced_window(state, now);
 
     let mut total = 0u64;
     let mut failed: Vec<String> = Vec::new();
@@ -1585,6 +1585,7 @@ pub fn run() {
             // `start_on_login` above and for the same reason: the answer is
             // needed by a synchronous handler later.
             let quit_on_close = tauri::async_runtime::block_on(settings::quit_on_close(&pool));
+            let history_months = tauri::async_runtime::block_on(settings::history_months(&pool));
 
             app.manage(AppState {
                 pool, demo,
@@ -1595,9 +1596,8 @@ pub fn run() {
                 system_tz_change: Default::default(),
                 quit_on_close: std::sync::atomic::AtomicBool::new(quit_on_close),
                 open_date: std::sync::Mutex::new(open_date),
+                history_months: std::sync::atomic::AtomicI64::new(history_months),
             });
-            let full = tauri::async_runtime::block_on(settings::full_history_sync(&app.state::<AppState>().pool));
-            FULL_HISTORY.store(full, std::sync::atomic::Ordering::Relaxed);
             sync_loop::spawn(app.handle().clone());
             // Before the first palette is resolved: off Omarchy, "Follow the
             // desktop theme" follows the system's light-or-dark.
@@ -1914,7 +1914,8 @@ mod tests {
         const DAY: i64 = 24 * 3_600_000;
         let events = omacal_store::events_in_window(&pool, grid_start - DAY, grid_start + 43 * DAY).await.unwrap();
         write("month", serde_json::to_value(commands::assemble_month(&events, year, month, &tz, week_start)).unwrap());
-        write("bigyear", serde_json::to_value(get_big_year_impl(&pool, year, &tz, now, week_start).await.unwrap()).unwrap());
+        let history_months = settings::history_months(&pool).await;
+        write("bigyear", serde_json::to_value(get_big_year_impl(&pool, year, &tz, now, week_start, history_months).await.unwrap()).unwrap());
 
         write("calendars", serde_json::to_value(omacal_store::list_calendars(&pool).await.unwrap()).unwrap());
         // Writable, as a signed-in user's lists are: demo mode greys the boxes.
@@ -1931,6 +1932,7 @@ mod tests {
             pool: pool.clone(), demo: false, tokens: Default::default(), reauth: Default::default(),
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
         };
         write("event_detail", serde_json::to_value(events::event_detail_impl(&state, id).await.unwrap()).unwrap());
 
@@ -2110,19 +2112,30 @@ mod tests {
         assert!(!cached_is_usable(Some(&cached(NOW)), NOW));
     }
 
-    #[test]
-    fn the_synced_window_is_180_days_back_and_365_forward() {
-        // Both year views render dates outside this, and must say "not fetched"
-        // rather than draw them as free. One definition, so the views and the
-        // sync loop can never disagree about where the edge is.
+    #[tokio::test]
+    async fn the_synced_window_reads_the_span_on_this_state() {
+        // The year views and the sync loop must share one edge. The spans
+        // themselves are `settings::each_history_span_has_one_window`; this
+        // is the half that says the number comes off the state a test built,
+        // not off a process-wide flag.
         const DAY: i64 = 24 * 3_600_000;
-        let now = 1_786_341_600_000; // Mon 10 Aug 2026 09:00 Europe/Sofia
-        let (from, to) = synced_window(now);
-        assert_eq!(from, now - 180 * DAY);
-        assert_eq!(to, now + 365 * DAY);
-        assert_eq!(window_for(now, true), window_for(now + 400 * DAY, true), "full history must not slide");
-        assert_eq!(omacal_sync::to_rfc3339(window_for(now, true).0), "1900-01-01T00:00:00Z");
-        assert!(from < now && now < to);
+        let now = 1_786_341_600_000;
+        let state = AppState {
+            pool: omacal_store::connect_memory().await.unwrap(),
+            demo: false,
+            tokens: Default::default(),
+            reauth: Default::default(),
+            update: Default::default(),
+            update_checked_at: Default::default(),
+            system_tz_change: Default::default(),
+            quit_on_close: Default::default(),
+            open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(settings::SPAN_6_MONTHS),
+        };
+        assert_eq!(synced_window(&state, now), (now - 180 * DAY, now + 365 * DAY));
+        state.history_months.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(synced_window(&state, now).0, settings::history_window(now, 0).0);
+        assert_eq!(synced_window(&state, now).1, now + 365 * DAY);
     }
 
     /// The message is shown for whichever button the user pressed, so it has

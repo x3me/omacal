@@ -682,6 +682,8 @@ pub(crate) fn year_start_ms(year: i32, tz: &str) -> i64 {
 /// is dotted too, and because a span lying entirely outside the month must dot
 /// nothing — which comparing dates gives for free and clamping two
 /// out-of-window sentinels does not.
+/// The six-month window the year-grid tests were written against.
+#[cfg(test)]
 pub fn assemble_year(
     events: &[StoredEvent],
     year: i32,
@@ -689,10 +691,24 @@ pub fn assemble_year(
     tz: &str,
     week_start: crate::settings::WeekStart,
 ) -> YearPayload {
+    assemble_year_with(events, year, now_ms, tz, week_start, crate::settings::SPAN_6_MONTHS)
+}
+
+/// The year grid for a chosen history span. Tests of the six-month hatch
+/// call the wrapper that passes [`crate::settings::SPAN_6_MONTHS`]; the
+/// running app passes the span on its state.
+pub fn assemble_year_with(
+    events: &[StoredEvent],
+    year: i32,
+    now_ms: i64,
+    tz: &str,
+    week_start: crate::settings::WeekStart,
+    history_months: i64,
+) -> YearPayload {
     use jiff::civil::date;
 
     let suppressed = suppressed_slots(events);
-    let (synced_from, synced_to) = crate::synced_window(now_ms);
+    let (synced_from, synced_to) = crate::settings::history_window(now_ms, history_months);
 
     let months = (1..=12u32)
         .map(|month| {
@@ -823,6 +839,8 @@ pub(crate) fn big_year_start_ms(
 /// month grids — see `date_column`. Bucketing the stored instant against the
 /// display zone's day boundaries, which this did, drew a foreign calendar's
 /// one-day event as two pills: the end of one row and the start of the next.
+/// The six-month window the ribbon tests were written against.
+#[cfg(test)]
 pub fn assemble_big_year(
     events: &[StoredEvent],
     year: i32,
@@ -830,7 +848,7 @@ pub fn assemble_big_year(
     tz: &str,
     week_start: crate::settings::WeekStart,
 ) -> BigYearPayload {
-    assemble_big_year_combining(events, year, now_ms, tz, week_start, false)
+    assemble_big_year_combining(events, year, now_ms, tz, week_start, false, crate::settings::SPAN_6_MONTHS)
 }
 
 pub fn assemble_big_year_combining(
@@ -840,6 +858,7 @@ pub fn assemble_big_year_combining(
     tz: &str,
     week_start: crate::settings::WeekStart,
     combine: bool,
+    history_months: i64,
 ) -> BigYearPayload {
     use jiff::civil::date;
 
@@ -851,7 +870,7 @@ pub fn assemble_big_year_combining(
 
     let year_start_ms = local_midnight_ms(date(year as i16, 1, 1), tz);
     let next_year_start_ms = local_midnight_ms(date((year + 1) as i16, 1, 1), tz);
-    let (synced_from, synced_to) = crate::synced_window(now_ms);
+    let (synced_from, synced_to) = crate::settings::history_window(now_ms, history_months);
     let suppressed = suppressed_slots(events);
 
     let rows = (0..14)
@@ -1049,7 +1068,9 @@ mod tests {
         assert_eq!(week.all_day_events[0].copies.len(), 2);
         let month = assemble_month_combining(&events, 2026, 8, "UTC", crate::settings::WeekStart::Monday, true);
         assert_eq!(month.rows.iter().map(|r| r.bar_events.len()).sum::<usize>(), 1);
-        let year = assemble_big_year_combining(&events, 2026, MON, "UTC", crate::settings::WeekStart::Monday, true);
+        let year = assemble_big_year_combining(
+            &events, 2026, MON, "UTC", crate::settings::WeekStart::Monday, true, crate::settings::SPAN_6_MONTHS,
+        );
         assert_eq!(year.rows.iter().map(|r| r.pill_events.len()).sum::<usize>(), 1);
     }
 

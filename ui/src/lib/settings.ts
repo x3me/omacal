@@ -50,6 +50,19 @@ export const START_ON_LOGIN_OPTIONS: ReadonlyArray<[StartOnLogin, string]> = [
   ['background', 'Start OmaCal in the background'],
 ];
 
+/** How far back events are kept, in months. `0` is everything. The values
+ *  `settings::HISTORY_SPANS` offers; anything else is refused. A fresh
+ *  install is two years. */
+export type HistorySpan = 6 | 24 | 60 | 0;
+
+/** The order the General tab offers them, shortest first. */
+export const HISTORY_SPAN_OPTIONS: ReadonlyArray<[HistorySpan, string]> = [
+  [6, '6 months'],
+  [24, '2 years'],
+  [60, '5 years'],
+  [0, 'Everything'],
+];
+
 /**
  * The preferences the settings modal edits.
  *
@@ -110,7 +123,10 @@ export type AppSettings = {
    *  is what decides there. */
   keepRemindersOnScreen: boolean;
   minSyncIntervalMs: number;
-  fullHistorySync: boolean;
+  /** Months of history to keep. `0` is everything; ahead is a year either way.
+   *  Two years until chosen. An install that already had a calendar keeps
+   *  six (migration 0019). */
+  historySpan: HistorySpan;
   /** Whether Day, Week and Month draw as a list rather than a grid (filmstrip
    *  spec §4). No settings tab shows it — the control is the `▦`/`☰` beside the
    *  view switcher — but it is a preference and is stored beside the others,
@@ -296,7 +312,8 @@ export const appearancePreviews = () =>
 export type SettingValues = {
   /** Refused below `minSyncIntervalMs`, never clamped. */
   syncIntervalMs: number;
-  fullHistorySync: boolean;
+  /** One of 6, 24, 60, or 0. Refused otherwise. */
+  historySpan: HistorySpan;
   /** `null` turns the second clock off. */
   secondTimezone: string | null;
   weatherEnabled: boolean;
