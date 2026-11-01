@@ -216,10 +216,10 @@
     if (syncInFlight) {
       if (!afterWrite) return syncInFlight;
       await syncInFlight.catch(() => {});
-      return syncCalendar();
+      return syncCalendar(afterWrite);
     }
     syncing = true;
-    syncInFlight = syncNow().finally(() => { syncing = false; syncInFlight = null; });
+    syncInFlight = syncNow(afterWrite).finally(() => { syncing = false; syncInFlight = null; });
     return syncInFlight;
   }
   let signingIn = $state(false);

@@ -212,6 +212,7 @@ pub(crate) async fn sync_account(
     client: &CalDavClient,
     window_start_ms: i64,
     window_end_ms: i64,
+    after_write: bool,
 ) -> Result<u64, CalDavError> {
     let cals: Vec<(i64, String, i64, i64)> = sqlx::query_as(
         "SELECT id, google_id, supports_events, supports_tasks FROM calendars
@@ -224,20 +225,53 @@ pub(crate) async fn sync_account(
 
     sync_contacts(pool, account_id, client).await;
 
+    let now = crate::now_ms();
     let mut total = 0u64;
     for (cal_id, url, ev, tasks) in cals {
-        let outcome = omacal_sync::caldav::sync_caldav_calendar(
-            pool,
-            client,
-            cal_id,
-            &url,
-            ev != 0,
-            tasks != 0,
-            window_start_ms,
-            window_end_ms,
-            crate::now_ms(),
-        )
-        .await?;
+        let outcome = if after_write {
+            // The save already refetched this event. Ask only about the
+            // recent window, and leave the recorded span where it was: writing
+            // the recent start back would make the next sync think history
+            // had widened and download it all.
+            let recorded: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+                "SELECT window_start, window_end FROM sync_state WHERE calendar_id = ?1",
+            )
+            .bind(cal_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(anyhow::Error::from)?;
+            let (record_start, record_end) = match recorded {
+                Some((Some(start), Some(end))) => (start, end),
+                _ => (window_start_ms, window_end_ms),
+            };
+            omacal_sync::caldav::sync_caldav_fetch(
+                pool,
+                client,
+                cal_id,
+                &url,
+                ev != 0,
+                tasks != 0,
+                &[(window_start_ms, window_end_ms)],
+                record_start,
+                record_end,
+                false,
+                now,
+            )
+            .await?
+        } else {
+            omacal_sync::caldav::sync_caldav_calendar(
+                pool,
+                client,
+                cal_id,
+                &url,
+                ev != 0,
+                tasks != 0,
+                window_start_ms,
+                window_end_ms,
+                now,
+            )
+            .await?
+        };
         total += outcome.upserted as u64;
     }
     Ok(total)
@@ -333,5 +367,67 @@ mod tests {
             base_url_for("caldav", Some(" https://dav.example.com/ ")).unwrap(),
             "https://dav.example.com/"
         );
+    }
+
+    /// A save's follow-up sync. The calendar's recorded window reaches 1900,
+    /// and the ctag moved because the save itself wrote. The report must be
+    /// the recent window that was asked for, and the recorded span must stay
+    /// where it was — writing the recent start back would make the next sync
+    /// download the history to catch up.
+    #[tokio::test]
+    async fn a_save_does_not_report_the_whole_history() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let collection = format!("{}/cal/", server.uri());
+        let ctag = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:href>/cal/</d:href><d:propstat><d:prop><cs:getctag>after-put</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(ctag, "application/xml"))
+            .mount(&server)
+            .await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>"#,
+                "application/xml",
+            ))
+            .mount(&server)
+            .await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, provider, created_at) VALUES ('s','e@x','caldav',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, supports_events, supports_tasks)
+             VALUES (1, ?1, 'Work', 'UTC', 'owner', 1, 0)",
+        )
+        .bind(&collection)
+        .execute(&pool).await.unwrap();
+        let history = crate::settings::history_window(0, 0).0;
+        let now = crate::now_ms();
+        let (near, near_end) = crate::settings::history_window(now, crate::settings::SPAN_6_MONTHS);
+        sqlx::query(
+            "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, 'before-put', ?1, ?2)",
+        )
+        .bind(history)
+        .bind(near_end)
+        .execute(&pool).await.unwrap();
+
+        let client = omacal_caldav::CalDavClient::new(server.uri().as_str(), "u", "p").unwrap();
+        sync_account(&pool, 1, &client, near, near_end, true).await.unwrap();
+
+        let reports: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "REPORT")
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .collect();
+        assert_eq!(reports.len(), 1, "the changed ctag is fetched once");
+        assert!(!reports[0].contains("19000101"), "a save must not report the whole history: {}", reports[0]);
+        let kept: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(kept, history, "the recorded span stays the history already fetched");
     }
 }

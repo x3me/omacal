@@ -1059,12 +1059,34 @@ pub(crate) fn synced_window(state: &AppState, now_ms: i64) -> (i64, i64) {
     settings::history_window(now_ms, state.history_months.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// The window one sync asks a calendar for.
+///
+/// A save's follow-up is the recent six months, never the history the user
+/// keeps. The command that saved the event already refetched it; the queue
+/// then asks for another sync, and that one used to repeat the whole span —
+/// a changed ctag, or an end that had moved a day, is enough to make CalDAV
+/// report everything back to 1900.
+pub(crate) fn sync_bounds(now_ms: i64, history_months: i64, after_write: bool) -> (i64, i64) {
+    let months = if after_write { settings::SPAN_6_MONTHS } else { history_months };
+    settings::history_window(now_ms, months)
+}
+
 /// Refreshes the access token and syncs every calendar of every account.
 ///
 /// Pure sync work, with no demo check and no status bookkeeping of its own —
-/// shared by the `sync_now` command and the background loop (Task 4), each of
-/// which handles the demo gate and `record_sync` itself.
-pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
+/// shared by the `sync_now` command and the background loop, each of which
+/// handles the demo gate and `record_sync` itself. `after_write` is the
+/// queue's follow-up after a save: CalDAV must not report the whole history
+/// again. Concurrent callers share one run ([`sync_loop::coalesce`]).
+pub(crate) async fn sync_all(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
+    match sync_loop::coalesce(sync_all_inner(state, after_write)).await {
+        Some(result) => result,
+        // Someone else's sync covered this request. Nothing more to download.
+        None => Ok(0),
+    }
+}
+
+async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
     let pool = &state.pool;
     // `ORDER BY id`, so which account goes first is a decision rather than
     // whatever rowid order happens to be — it used to decide whose failure
@@ -1086,7 +1108,8 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
     let google = accounts_to_attempt(google, &marked);
 
     let now = now_ms();
-    let (window_start, window_end) = synced_window(state, now);
+    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
+    let (window_start, window_end) = sync_bounds(now, months, after_write);
 
     let mut total = 0u64;
     let mut failed: Vec<String> = Vec::new();
@@ -1133,8 +1156,10 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
                     continue;
                 }
             };
-        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end)
-            .await
+        match caldav_account::sync_account(
+            pool, *account_id, &client, window_start, window_end, after_write,
+        )
+        .await
         {
             Ok(n) => total += n,
             Err(e) if e.needs_reauth() => {
@@ -1161,6 +1186,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
 async fn sync_now(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    after_write: Option<bool>,
 ) -> Result<u64, String> {
     // Checked here, at the command boundary, rather than inside `sync_all` —
     // Task 4's background sync loop is a second caller that needs its own
@@ -1168,7 +1194,7 @@ async fn sync_now(
     // caller with no way to see it.
     demo_sync_guard(state.demo)?;
 
-    let n = sync_all(&state).await.map_err(|e| errors::user_facing(&e))?;
+    let n = sync_all(&state, after_write.unwrap_or(false)).await.map_err(|e| errors::user_facing(&e))?;
     status::record_sync(&state.pool, now_ms()).await.map_err(|e| e.to_string())?;
     invites::after_sync(&app).await;
     Ok(n)
@@ -2136,6 +2162,19 @@ mod tests {
         state.history_months.store(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(synced_window(&state, now).0, settings::history_window(now, 0).0);
         assert_eq!(synced_window(&state, now).1, now + 365 * DAY);
+    }
+
+    /// The queue calls `sync_now` after every save. That pass must not ask
+    /// for the history span: the write already refetched the event, and a
+    /// changed ctag would otherwise report everything back to 1900.
+    #[test]
+    fn a_save_does_not_ask_for_the_whole_history() {
+        let now = 1_786_341_600_000;
+        let (full, _) = sync_bounds(now, 0, false);
+        let (after, _) = sync_bounds(now, 0, true);
+        assert_eq!(omacal_sync::to_rfc3339(full), "1900-01-01T00:00:00Z");
+        assert_eq!(after, settings::history_window(now, settings::SPAN_6_MONTHS).0);
+        assert!(after > full);
     }
 
     /// The message is shown for whichever button the user pressed, so it has

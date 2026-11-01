@@ -85,13 +85,89 @@ fn sync_failed_payload(_e: &anyhow::Error) -> serde_json::Value {
     serde_json::json!({ "message": SYNC_FAILED_MESSAGE })
 }
 
+/// One sync at a time. A second request that arrives while one is running
+/// waits for it and does not start another: the ticker and the focus event
+/// both fire at launch, a few dozen milliseconds apart, and each used to
+/// download every calendar on its own.
+pub(crate) struct SyncGate {
+    running: std::sync::Mutex<Running>,
+    done: tokio::sync::Notify,
+}
+
+struct Running {
+    on: bool,
+    /// Bumped when a run finishes, so a waiter can tell "still the run I
+    /// saw" from "that run ended before I subscribed".
+    gen: u64,
+}
+
+impl SyncGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            running: std::sync::Mutex::new(Running { on: false, gen: 0 }),
+            done: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Runs `work` unless a sync is already in progress, in which case this
+    /// waits for that one and returns `None`. The future is lazy, so a
+    /// coalesced caller never polls it.
+    pub(crate) async fn run<T>(&self, work: impl std::future::Future<Output = T>) -> Option<T> {
+        // The guard must not live across an await: it is not `Send`, and a
+        // sync runs on Tauri's thread pool.
+        let waiting_on = {
+            let mut slot = self.running.lock().expect("sync gate");
+            if slot.on {
+                Some(slot.gen)
+            } else {
+                slot.on = true;
+                None
+            }
+        };
+        if let Some(gen) = waiting_on {
+            loop {
+                // Subscribe first, then look: a finish that lands between the
+                // two must not be missed, and a finish that already happened
+                // shows up as a moved generation.
+                let notified = self.done.notified();
+                let still = {
+                    let slot = self.running.lock().expect("sync gate");
+                    slot.on && slot.gen == gen
+                };
+                if !still {
+                    return None;
+                }
+                notified.await;
+            }
+        }
+        let result = work.await;
+        {
+            let mut slot = self.running.lock().expect("sync gate");
+            slot.on = false;
+            slot.gen = slot.gen.wrapping_add(1);
+        }
+        self.done.notify_waiters();
+        Some(result)
+    }
+}
+
+fn shared_gate() -> &'static SyncGate {
+    static GATE: std::sync::OnceLock<SyncGate> = std::sync::OnceLock::new();
+    GATE.get_or_init(SyncGate::new)
+}
+
+/// [`SyncGate::run`] on the process-wide gate `sync_all` uses.
+pub(crate) async fn coalesce<T>(work: impl std::future::Future<Output = T>) -> Option<T> {
+    shared_gate().run(work).await
+}
+
 /// Runs one sync and reports the outcome to the UI. Shared by the ticker and
 /// the focus path so both record the timestamp and, crucially, both *say* when
 /// a sync fails — silence on this path is what let the header read "Synced 4
 /// min ago" all night with the network down.
 async fn sync_and_report(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
-    match crate::sync_all(&state).await {
+    match crate::sync_all(&state, false).await {
         Ok(n) => {
             if let Err(e) = crate::status::record_sync(&state.pool, crate::now_ms()).await {
                 tracing::warn!(%e, "sync succeeded but recording it failed");
@@ -310,5 +386,41 @@ mod tests {
         sqlx::query("INSERT INTO settings (key, value) VALUES ('sync_interval_ms', 'soon')")
             .execute(&pool).await.unwrap();
         assert_eq!(interval_ms(&pool).await, DEFAULT_INTERVAL_MS);
+    }
+
+    /// Launch fires the ticker and a focus within a few dozen milliseconds.
+    /// The second must wait, not download every calendar beside the first.
+    #[tokio::test]
+    async fn a_sync_already_running_is_not_started_again() {
+        let gate = std::sync::Arc::new(SyncGate::new());
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let wait_entered = entered.notified();
+        let (g1, r1, e1, rel1) = (gate.clone(), runs.clone(), entered.clone(), release.clone());
+        let first = tokio::spawn(async move {
+            g1.run(async {
+                r1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                e1.notify_waiters();
+                rel1.notified().await;
+            })
+            .await
+        });
+        wait_entered.await;
+
+        let (g2, r2) = (gate.clone(), runs.clone());
+        let second = tokio::spawn(async move {
+            g2.run(async {
+                r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        release.notify_waiters();
+        assert!(first.await.unwrap().is_some(), "the first request is the one that runs");
+        assert!(second.await.unwrap().is_none(), "the one that arrived during it does not");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
