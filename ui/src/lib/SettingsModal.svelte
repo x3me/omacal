@@ -1040,7 +1040,7 @@
           <select
             id="history-span"
             disabled={!settings}
-            value={settings?.historySpan ?? 24}
+            value={settings?.historySpan ?? 6}
             onchange={(e) => saveHistorySpan(Number((e.currentTarget as HTMLSelectElement).value) as HistorySpan)}
           >
             {#each HISTORY_SPAN_OPTIONS as [months, label] (months)}
