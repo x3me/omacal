@@ -113,6 +113,7 @@ pub(crate) const MENUBAR_TOMORROW_KEY: &str = "menubar_tomorrow";
 pub(crate) const MENUBAR_DAYS_AHEAD_KEY: &str = "menubar_days_ahead";
 pub(crate) const DATE_FORMAT_KEY: &str = "date_format";
 pub(crate) const VISIBLE_HOURS_KEY: &str = "visible_hours";
+const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
@@ -742,6 +743,10 @@ pub struct AppSettings {
     pub week_view_days: u8,
     pub visible_start_hour: u8,
     pub visible_end_hour: u8,
+    /// Whether Day and Week draw the whole day and size the visible hours to
+    /// fill the window, the rest a scroll away, rather than leaving the rest
+    /// out. The menu bar's day view keeps the plain range either way.
+    pub visible_hours_fit: bool,
     /// Whether Saturday and Sunday columns are dropped from Week and Day
     /// view. Month, Year and Big Year are unaffected, for `week_starts_today`'s
     /// reason: those grids need every weekday to keep their rows aligned.
@@ -1084,6 +1089,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // return to the old seven-day shape.
         visible_start_hour,
         visible_end_hour,
+        visible_hours_fit: read(pool, VISIBLE_HOURS_FIT_KEY).await.map(|v| v == "1").unwrap_or(false),
         hide_weekends: read(pool, HIDE_WEEKENDS_KEY).await.map(|v| v == "1").unwrap_or(false),
         week_view_days: match read(pool, WEEK_VIEW_DAYS_KEY).await.as_deref() {
             Some("3") => 3,
@@ -1574,6 +1580,8 @@ pub enum Setting {
     /// invoke from asking for an arbitrary number of day columns.
     WeekViewDays(u8),
     VisibleHours { start: u8, end: u8 },
+    /// Not a menu surface's: the menu bar's day view draws the plain range.
+    VisibleHoursFit(bool),
     HideWeekends(bool),
     CombineIdenticalEvents(bool),
     /// The whole list, replaced in one write: the UI edits it as a list
@@ -1838,6 +1846,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             }
             write(pool, VISIBLE_HOURS_KEY, &format!("{start},{end}")).await?;
         }
+        S::VisibleHoursFit(on) => write(pool, VISIBLE_HOURS_FIT_KEY, flag(*on)).await?,
         S::HideWeekends(on) => write(pool, HIDE_WEEKENDS_KEY, flag(*on)).await?,
         S::CombineIdenticalEvents(on) => write(pool, COMBINE_IDENTICAL_EVENTS_KEY, flag(*on)).await?,
         S::CalendarGroups(groups) => {
@@ -1936,6 +1945,7 @@ mod tests {
             Setting::MenubarSections { tomorrow: true, days_ahead: 2, .. }
         ));
         assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
+        assert!(matches!(read(json!({"key": "visibleHoursFit", "value": true})), Setting::VisibleHoursFit(true)));
         assert!(matches!(read(json!({"key": "keepRemindersOnScreen", "value": true})), Setting::KeepRemindersOnScreen(true)));
         assert!(matches!(read(json!({"key": "hideWeekends", "value": true})), Setting::HideWeekends(true)));
         assert!(matches!(
@@ -3017,6 +3027,21 @@ mod tests {
         assert!(!s.hide_weekends);
         write(&p, HIDE_WEEKENDS_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.hide_weekends, "a stray value must not change the app's face");
+    }
+
+    /// The fit switch round-trips through `Setting`, and a fresh install
+    /// leaves the hours out as before, for `hide_weekends`' reason.
+    #[tokio::test]
+    async fn the_visible_hours_fit_switch_is_stored_and_read_back() {
+        let p = pool().await;
+        assert!(!read_settings(&p).await.visible_hours_fit, "a fresh install crops to the visible hours");
+        let s = set(&p, Setting::VisibleHoursFit(true)).await.unwrap();
+        assert!(s.visible_hours_fit);
+        assert_eq!(read(&p, VISIBLE_HOURS_FIT_KEY).await.as_deref(), Some("1"));
+        let s = set(&p, Setting::VisibleHoursFit(false)).await.unwrap();
+        assert!(!s.visible_hours_fit);
+        write(&p, VISIBLE_HOURS_FIT_KEY, "yes").await.unwrap();
+        assert!(!read_settings(&p).await.visible_hours_fit, "a stray value must not change the app's face");
     }
 
     /// Calendar groups round-trip as one JSON row in the order given, the

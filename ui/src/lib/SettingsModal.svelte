@@ -33,6 +33,10 @@
     try { settings = await setSetting('visibleHours', { start, end }); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
   }
+  async function changeVisibleHoursFit(on: boolean) {
+    try { settings = await setSetting('visibleHoursFit', on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; }
+  }
   async function changeHideWeekends(on: boolean) {
     try { settings = await setSetting('hideWeekends', on); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
@@ -1341,7 +1345,16 @@
             {#each Array.from({ length: 24 }, (_, h) => h + 1) as h}<option value={h} disabled={h <= (settings?.visibleStartHour ?? 0)}>{h === 24 ? 'Midnight (end of day)' : formatClock(new Date(2020, 0, 1, h).getTime(), settings?.timeFormat ?? '24h')}</option>{/each}
           </select></label>
         </div>
-        <p class="hint">Hours shown in Day, Week, and the menu-bar day view. Events outside this range remain in the agenda and search.</p>
+        <label class="check">
+          <input type="checkbox" checked={settings?.visibleHoursFit ?? false} disabled={!settings}
+            onchange={(e) => changeVisibleHoursFit(e.currentTarget.checked)} />
+          Fit these hours to the window
+        </label>
+        {#if settings?.visibleHoursFit}
+          <p class="hint">Day and Week size these hours to fill the window, and the rest of the day is a scroll away. Zooming works as usual until the window is closed, and Ctrl+0 fits them again. The menu-bar day view shows these hours only.</p>
+        {:else}
+          <p class="hint">Hours shown in Day, Week, and the menu-bar day view. Events outside this range remain in the agenda and search.</p>
+        {/if}
       </section>
       {#if settings?.transparentWindow ?? true}
       <section class="appearance-section" aria-labelledby="background-style-heading">

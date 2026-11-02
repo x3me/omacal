@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import {
   HOUR_PX_DEFAULT, HOUR_PX_MAX, HOUR_PX_MIN,
-  clampHourPx, hourPxAfterPinch, hourPxAfterWheel, hourPxStepped, scrollTopKeeping,
+  clampHourPx, hourPxAfterPinch, hourPxAfterWheel, hourPxFitting, hourPxStepped, scrollTopKeeping,
 } from '../src/lib/zoom';
 
 test.describe('hour zoom arithmetic', () => {
@@ -39,6 +39,16 @@ test.describe('hour zoom arithmetic', () => {
     expect(hourPxStepped(100, -1)).toBe(80);
     expect(hourPxStepped(HOUR_PX_MAX, 1)).toBe(HOUR_PX_MAX);
     expect(hourPxStepped(HOUR_PX_MIN, -1)).toBe(HOUR_PX_MIN);
+  });
+
+  test('fitted hours share the pane in whole pixels, within the same reach', () => {
+    // 08:00-18:00 in a 792px pane is 79.2px an hour, drawn at 79 so that
+    // 18:00's rule is on screen rather than a pixel past it.
+    expect(hourPxFitting(792, 10)).toBe(79);
+    // A long day in a short pane stops at the floor and scrolls for the
+    // rest; a short one in a tall pane stops at the ceiling and shows more.
+    expect(hourPxFitting(600, 18)).toBe(HOUR_PX_MIN);
+    expect(hourPxFitting(1200, 2)).toBe(HOUR_PX_MAX);
   });
 
   test('the instant under the anchor stays under it', () => {

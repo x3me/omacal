@@ -190,6 +190,9 @@ export type AppSettings = {
   weekViewDays: WeekViewDays;
   visibleStartHour: number;
   visibleEndHour: number;
+  /** Whether Day and Week draw the whole day and size the visible hours
+   *  to fill the window, rather than leaving the rest of the day out. */
+  visibleHoursFit: boolean;
   /** Whether Saturday and Sunday columns are dropped from Week and Day
    *  view. Month, Year and Big Year are unaffected. */
   hideWeekends: boolean;
@@ -336,6 +339,7 @@ export type SettingValues = {
   weekStartsToday: boolean;
   weekViewDays: WeekViewDays;
   visibleHours: { start: number; end: number };
+  visibleHoursFit: boolean;
   hideWeekends: boolean;
   combineIdenticalEvents: boolean;
   /** The whole list, replaced in one write; refused with a sentence for a

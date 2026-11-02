@@ -735,6 +735,7 @@ type StubSettings = {
   weekViewDays: WeekViewDays;
   visibleStartHour: number;
   visibleEndHour: number;
+  visibleHoursFit: boolean;
   hideWeekends: boolean;
   displayTimezone: string | null;
   /** What the backend names the zone the process runs in. `null` derives it
@@ -827,6 +828,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   weekViewDays: 7,
   visibleStartHour: 0,
   visibleEndHour: 24,
+  visibleHoursFit: false,
   hideWeekends: false,
   displayTimezone: null,
   effectiveTimezone: null,
