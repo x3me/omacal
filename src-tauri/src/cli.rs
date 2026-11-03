@@ -64,12 +64,12 @@ WRITES (the running app executes them, through its own guards)
   omacal events create --title T --date D --start HH:MM --end HH:MM
          [--end-date D] [--all-day --last-day D] [--calendar ID]
          [--location L] [--description TEXT] [--guest a@b]…
-         [--notify all|none] [--json]
+         [--notify all|none] [--meet] [--json]
          [--repeat daily|weekdays|weekly|monthly|yearly]
          [--days MO,WE,FR] [--until YYYY-MM-DD | --count N]
   omacal events update ID --occurrence MS [--title T] [--date D]
          [--start HH:MM] [--end HH:MM] [--location L] [--description TEXT]
-         [--scope this|following|all] [--notify all|none] [--json]
+         [--scope this|following|all] [--notify all|none] [--meet] [--json]
   omacal events delete ID --occurrence MS [--scope this|following|all] [--json]
   omacal events respond ID yes|maybe|no [--scope this|all] [--occurrence MS]
          [--keep-meeting] [--json]
@@ -79,6 +79,11 @@ WRITES (the running app executes them, through its own guards)
   an event with guests needs --notify said out loud — neither is guessed.
   A No on your own meeting tells nobody, so it needs either `events delete`
   (which cancels it for everyone) or --keep-meeting (you are out, it stays).
+
+  --meet asks Google to mint a Google Meet link with the event, the form's
+  own 'Google Meet' choice; the link prints after the save (`conference_uri`
+  in --json). Google calendars only. On update it adds a link to an event that
+  has none, never replaces one; removing a link is the app's form.
 
   --repeat is the app form's own vocabulary, not an RRULE. Without it a
   create makes one event, as it always has. --days refines a weekly cadence
@@ -171,11 +176,11 @@ pub(crate) fn command_catalog() -> Vec<CommandInfo> {
             description: "create through the running app's guards, repeating or not",
             flags: &["--title", "--date", "--start", "--end", "--end-date", "--all-day",
                      "--last-day", "--calendar", "--location", "--description", "--guest",
-                     "--notify", "--repeat", "--days", "--until", "--count", "--json"] },
+                     "--notify", "--repeat", "--days", "--until", "--count", "--meet", "--json"] },
         CommandInfo { name: "events update", usage: "events update ID --occurrence MS …", writes: true,
             description: "reschedule or retitle; scope and notify never guessed",
             flags: &["--occurrence", "--scope", "--title", "--date", "--start", "--end",
-                     "--location", "--description", "--notify", "--json"] },
+                     "--location", "--description", "--notify", "--meet", "--json"] },
         CommandInfo { name: "events delete", usage: "events delete ID --occurrence MS", writes: true,
             description: "delete at a scope, through the app",
             flags: &["--occurrence", "--scope", "--json"] },
