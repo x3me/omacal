@@ -68,6 +68,10 @@ pub(crate) struct CreateArgs {
     pub days: Option<String>,
     pub until: Option<String>,
     pub count: Option<String>,
+    /// `--meet`: ask Google to mint a Meet conference with the event — the
+    /// form's "Google Meet" choice (`EventInput.conference = "googleMeet"`).
+    /// Refused before the socket on any calendar but Google's ([`meet_rule`]).
+    pub meet: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -82,6 +86,9 @@ pub(crate) struct UpdateArgs {
     pub start: Option<String>,
     pub end: Option<String>,
     pub notify: Option<String>,
+    /// `--meet`: add a Meet conference to an event that has no meeting link
+    /// yet. Add only — removing one is the app's form, not a flag.
+    pub meet: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -172,6 +179,7 @@ pub(crate) fn parse_events(verb: &str, rest: &[&String]) -> Result<WriteCmd, Str
                 days: take("--days")?,
                 until: take("--until")?,
                 count: take("--count")?,
+                meet: flag("--meet"),
             };
             if all_day {
                 if args.start.is_some() || args.end.is_some() {
@@ -199,6 +207,7 @@ pub(crate) fn parse_events(verb: &str, rest: &[&String]) -> Result<WriteCmd, Str
                 start: take("--start")?,
                 end: take("--end")?,
                 notify: take("--notify")?,
+                meet: flag("--meet"),
             };
             if args.title.is_none()
                 && args.location.is_none()
@@ -206,9 +215,10 @@ pub(crate) fn parse_events(verb: &str, rest: &[&String]) -> Result<WriteCmd, Str
                 && args.date.is_none()
                 && args.start.is_none()
                 && args.end.is_none()
+                && !args.meet
             {
                 return Err("nothing to change — pass --title, --location, --description, \
-                            --date, --start or --end"
+                            --date, --start, --end or --meet"
                     .into());
             }
             Ok(WriteCmd::Update(args))
@@ -297,6 +307,43 @@ pub(crate) fn notify_without_mail(asked: Option<&str>) -> Result<&'static str, S
         ),
         Some(other) => Err(format!("--notify takes all|none, not \"{other}\"")),
     }
+}
+
+/// Whether `--meet` can do what it says. Only Google mints a Meet
+/// conference, and Google is also the one provider that mails guests, so
+/// `is_google` is [`calendar_mails_guests`]'s answer — one question, asked
+/// once. The app refuses the same thing behind the socket (`events.rs`);
+/// this is the CLI's usage error first, with the way out named.
+///
+/// An update also carries `reach` and the event's current meeting link,
+/// whichever way it is held — structured conference data, or a URL in
+/// Location or Description (`upcoming::conference_join_url`, the same
+/// fallback `events list` prints as `conference`). A guest's own copy has
+/// no conference of its own to set: the organizer owns it. And an event
+/// that already has a link keeps it: `--meet` there would put a second
+/// meeting beside, or in place of, the one the guests were sent.
+pub(crate) fn meet_rule(
+    is_google: bool,
+    reach: Option<crate::events::Reach>,
+    existing_link: Option<&str>,
+) -> Result<(), String> {
+    if !is_google {
+        return Err("only Google calendars can create Google Meet links; drop --meet or \
+                    pick a Google calendar with --calendar"
+            .into());
+    }
+    if reach == Some(crate::events::Reach::OwnCopy) {
+        return Err("this is your copy of somebody else's event — its organizer owns the \
+                    meeting link, so --meet cannot add one; drop --meet"
+            .into());
+    }
+    if let Some(url) = existing_link {
+        return Err(format!(
+            "this event already has a meeting link ({url}); --meet would add a second one, \
+             so drop --meet"
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a calendar's provider mails the people on an event: the rule
@@ -613,6 +660,12 @@ pub(crate) fn create_request(
             .map(|email| serde_json::json!({ "email": email }))
             .collect::<Vec<_>>());
     }
+    // `EventInput.conference`, which the form has always sent. Only ever
+    // `googleMeet`: absent means "no conference" on a create and "leave it
+    // alone" on an update, so the CLI never needs to say `none`.
+    if args.meet {
+        fields["conference"] = serde_json::json!("googleMeet");
+    }
     serde_json::json!({
         "v": crate::ipc::PROTOCOL_VERSION,
         "cmd": "events-create",
@@ -633,13 +686,18 @@ pub(crate) fn update_request(
     notify: &str,
     tz_name: &str,
 ) -> serde_json::Value {
+    let mut fields = base_fields(summary, location, description, when, tz_name);
+    // See `create_request`: `googleMeet` or absent, never `none`.
+    if args.meet {
+        fields["conference"] = serde_json::json!("googleMeet");
+    }
     serde_json::json!({
         "v": crate::ipc::PROTOCOL_VERSION,
         "cmd": "events-update",
         "id": args.id,
         "scope": scope,
         "occurrence_start_ms": args.occurrence,
-        "fields": base_fields(summary, location, description, when, tz_name),
+        "fields": fields,
         "send_updates": notify,
     })
 }
@@ -762,6 +820,8 @@ struct Target {
     summary: Option<String>,
     location: Option<String>,
     description: Option<String>,
+    /// The event's meeting link, however it is held — see [`meet_rule`].
+    conference: Option<String>,
 }
 
 /// An update's descriptive fields: the flag when given, the event's own
@@ -801,6 +861,12 @@ async fn target(pool: &SqlitePool, id: i64) -> Result<Target, String> {
         summary: event.summary.clone(),
         location: event.location.clone(),
         description: event.description.clone(),
+        conference: event.conference_uri.clone().or_else(|| {
+            crate::upcoming::conference_join_url(
+                event.location.as_deref(),
+                event.description.as_deref(),
+            )
+        }),
     })
 }
 
@@ -816,12 +882,20 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
     let tz_name = tz.iana_name().unwrap_or("UTC").to_string();
 
     let refuse = |m: &str| fail(json, "usage", m, EXIT_USAGE);
+    let meet = matches!(cmd, WriteCmd::Create(CreateArgs { meet: true, .. })
+        | WriteCmd::Update(UpdateArgs { meet: true, .. }));
 
     let (request, done_word) = match cmd {
         // Taken above; the compiler wants it named all the same.
         WriteCmd::Task(_) => unreachable!("handled at the top of execute"),
         WriteCmd::Create(args) => {
-            let notify = if create_mails_guests(pool, args.calendar).await {
+            let mails_guests = create_mails_guests(pool, args.calendar).await;
+            if args.meet {
+                if let Err(m) = meet_rule(mails_guests, None, None) {
+                    return refuse(&m);
+                }
+            }
+            let notify = if mails_guests {
                 notify_for(!args.guests.is_empty(), args.notify.as_deref())
             } else {
                 notify_without_mail(args.notify.as_deref())
@@ -866,6 +940,11 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
                 return refuse(
                     "editing an all-day event from the CLI is not built yet — the app's form is",
                 );
+            }
+            if args.meet {
+                if let Err(m) = meet_rule(t.mails_guests, Some(t.reach), t.conference.as_deref()) {
+                    return refuse(&m);
+                }
             }
             let scope = match scope_for(t.recurring, args.scope.as_deref()) {
                 Ok(s) => s,
@@ -972,7 +1051,7 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
         }
     };
 
-    send(&request, json, done_word)
+    send_reporting(&request, json, done_word, meet)
 }
 
 /// Sends one request to the running app and reports what came back.
@@ -981,8 +1060,38 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
 /// "the write's fate is unknown" wording are the same contract whichever
 /// verb asked, and two copies of it would be two chances to drift.
 pub(crate) fn send(request: &serde_json::Value, json: bool, done_word: &str) -> i32 {
+    send_reporting(request, json, done_word, false)
+}
+
+/// [`send`], and for a `--meet` write the link Google minted. `--json`
+/// already carries it as `data.conference_uri` (the saved event, as the
+/// app answers it), relayed untouched; text mode
+/// prints it on its own line. A saved event that came back without one is
+/// still saved — exit 0 and a warning, never an error, because an error
+/// is what invites the retry that creates the event twice.
+/// The Meet link in the app's answer to a write: the saved event's
+/// `conference_uri` (`events::EventDetail`, snake_case on this wire, unlike
+/// `events show`'s `conference`).
+fn minted_link(envelope: &serde_json::Value) -> Option<&str> {
+    envelope["data"]["conference_uri"].as_str()
+}
+
+fn send_reporting(request: &serde_json::Value, json: bool, done_word: &str, meet: bool) -> i32 {
     match call(request) {
-        Ok(envelope) => finish(json, envelope, done_word),
+        Ok(envelope) => {
+            let link = minted_link(&envelope).map(str::to_string);
+            let code = finish(json, envelope, done_word);
+            if meet && !json && code == EXIT_OK {
+                match link {
+                    Some(url) => println!("Meet: {url}"),
+                    None => eprintln!(
+                        "warning: saved, but Google returned no Meet link yet — check the event \
+                         with `omacal events show` before trying again"
+                    ),
+                }
+            }
+            code
+        }
         Err(CallError::NotRunning) => fail(
             json,
             "not_running",
@@ -1398,6 +1507,7 @@ mod tests {
                 start: None,
                 end: None,
                 notify: None,
+                meet: false,
             },
             "this",
             when,
@@ -1408,11 +1518,175 @@ mod tests {
             "UTC",
         );
         assert!(crate::ipc::parse_request(&update.to_string()).is_ok(), "{update}");
+        assert!(update["fields"].get("conference").is_none(), "{update}");
 
         let delete = delete_request(41, "all", s);
         assert!(crate::ipc::parse_request(&delete.to_string()).is_ok(), "{delete}");
 
         let respond = respond_request(41, "accepted", "all", s);
         assert!(crate::ipc::parse_request(&respond.to_string()).is_ok(), "{respond}");
+    }
+
+    /// `--meet` is a bare flag on both verbs: it takes no value, swallows no
+    /// neighbour, and counts as a change on its own for an update.
+    #[test]
+    fn meet_is_a_bare_flag_on_create_and_update() {
+        match parse("create", "--meet --title Standup --date 2026-09-01 --start 09:00 --end 09:30")
+            .unwrap()
+        {
+            WriteCmd::Create(a) => {
+                assert!(a.meet);
+                assert_eq!(a.title, "Standup", "the flag is not mistaken for a value");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse("create", "--title Standup --date 2026-09-01 --start 09:00 --end 09:30").unwrap() {
+            WriteCmd::Create(a) => assert!(!a.meet),
+            other => panic!("{other:?}"),
+        }
+        match parse("update", "41 --occurrence 1786352400000 --meet").unwrap() {
+            WriteCmd::Update(a) => assert!(a.meet, "--meet alone is a change"),
+            other => panic!("{other:?}"),
+        }
+        let err = parse("update", "41 --occurrence 1786352400000").unwrap_err();
+        assert!(err.contains("--meet"), "the refusal names the new way out: {err}");
+    }
+
+    /// Where `--meet` is refused before the socket: not Google, a guest's
+    /// own copy, or an event that already has a link. Everything else passes.
+    #[test]
+    fn meet_is_refused_where_google_cannot_or_should_not_mint_one() {
+        use crate::events::Reach;
+        let err = meet_rule(false, None, None).unwrap_err();
+        assert!(err.contains("only Google calendars"), "{err}");
+        let err = meet_rule(false, Some(Reach::Organizer), None).unwrap_err();
+        assert!(err.contains("only Google calendars"), "update too: {err}");
+
+        let err = meet_rule(true, Some(Reach::OwnCopy), None).unwrap_err();
+        assert!(err.contains("organizer owns"), "{err}");
+
+        let link = "https://meet.google.com/abc-defg-hij";
+        let err = meet_rule(true, Some(Reach::Organizer), Some(link)).unwrap_err();
+        assert!(err.contains(link), "the refusal names the link it found: {err}");
+
+        assert!(meet_rule(true, None, None).is_ok(), "a create on Google");
+        assert!(meet_rule(true, Some(Reach::Organizer), None).is_ok());
+        assert!(meet_rule(true, Some(Reach::Shared), None).is_ok(), "guests may modify");
+    }
+
+    /// The link `meet_rule` refuses over is read the way `events list`
+    /// prints it: structured conference data first, then a meeting URL
+    /// already sitting in Location or Description.
+    #[tokio::test]
+    async fn an_events_meeting_link_is_found_wherever_it_is_held() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for q in [
+            "INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','me@x.test',0)",
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, is_primary)
+             VALUES (1, 'me@x.test', 'Work', 'UTC', 'owner', 1)",
+            "INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc,
+                                 start_tz, end_tz, is_all_day, status, updated_at)
+             VALUES (1, 'g1', 'Book club', 1786352400000, 1786356000000,
+                     'UTC', 'UTC', 0, 'confirmed', 0)",
+        ] {
+            sqlx::query(q).execute(&pool).await.unwrap();
+        }
+        assert_eq!(target(&pool, 1).await.unwrap().conference, None, "no link anywhere");
+
+        sqlx::query("UPDATE events SET location = 'Room 4 · Zoom: https://zoom.us/j/123456789'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            target(&pool, 1).await.unwrap().conference.as_deref(),
+            Some("https://zoom.us/j/123456789"),
+            "a pasted link in Location counts"
+        );
+
+        sqlx::query("UPDATE events SET conference_uri = 'https://meet.google.com/abc-defg-hij'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            target(&pool, 1).await.unwrap().conference.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij"),
+            "structured conference data comes first"
+        );
+    }
+
+    /// `--meet` speaks `EventInput.conference` exactly as the form does —
+    /// proven through `ipc::parse_request`, the app's own reader — and an
+    /// untouched flag sends no `conference` key at all, because on an update
+    /// `"none"` would remove the meeting everyone was sent.
+    #[test]
+    fn meet_travels_as_the_forms_own_conference_field() {
+        let tz = jiff::tz::TimeZone::get("UTC").unwrap();
+        let (s, e) = timed_when("2026-09-01", "09:00", "09:30", None, &tz).unwrap();
+        let when = serde_json::json!({ "kind": "timed", "startMs": s, "endMs": e });
+
+        let mut args = CreateArgs {
+            title: "Standup".into(),
+            date: "2026-09-01".into(),
+            start: Some("09:00".into()),
+            end: Some("09:30".into()),
+            meet: true,
+            ..Default::default()
+        };
+        let create = create_request(&args, when.clone(), "none", "UTC", None);
+        assert_eq!(create["fields"]["conference"], "googleMeet", "{create}");
+        match crate::ipc::parse_request(&create.to_string()).unwrap() {
+            crate::ipc::Request::Create { fields, .. } => assert!(
+                matches!(fields.conference, Some(crate::write::ConferenceInput::GoogleMeet)),
+                "{create}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        args.meet = false;
+        let plain = create_request(&args, when.clone(), "none", "UTC", None);
+        assert!(plain["fields"].get("conference").is_none(), "{plain}");
+
+        let mut update_args = UpdateArgs {
+            id: 41,
+            occurrence: s,
+            scope: None,
+            title: None,
+            location: None,
+            description: None,
+            date: None,
+            start: None,
+            end: None,
+            notify: None,
+            meet: true,
+        };
+        let update =
+            update_request(&update_args, "this", when.clone(), Some("Standup"), None, None, "none", "UTC");
+        assert_eq!(update["fields"]["conference"], "googleMeet", "{update}");
+        match crate::ipc::parse_request(&update.to_string()).unwrap() {
+            crate::ipc::Request::Update { fields, .. } => assert!(
+                matches!(fields.conference, Some(crate::write::ConferenceInput::GoogleMeet)),
+                "{update}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        update_args.meet = false;
+        let plain = update_request(&update_args, "this", when, Some("Standup"), None, None, "none", "UTC");
+        assert!(plain["fields"].get("conference").is_none(), "{plain}");
+    }
+
+    /// The link is read from the app's real answer — this envelope is the
+    /// shape a `--meet` create came back with against Google, trimmed.
+    #[test]
+    fn the_minted_link_is_read_from_the_apps_own_answer() {
+        let answer = serde_json::json!({
+            "ok": true,
+            "data": {
+                "id": 975, "calendar_id": 5, "title": "Meet test",
+                "conference_uri": "https://meet.google.com/tpr-mvez-srw",
+                "is_organizer": true, "mails_guests": true, "attendees": []
+            }
+        });
+        assert_eq!(minted_link(&answer), Some("https://meet.google.com/tpr-mvez-srw"));
+        let none = serde_json::json!({ "ok": true, "data": { "id": 976, "conference_uri": null } });
+        assert_eq!(minted_link(&none), None, "a save with no link reads as none, not an error");
     }
 }

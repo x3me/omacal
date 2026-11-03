@@ -97,7 +97,10 @@ omacal events create --title "Gym" --date 2026-09-14 --start 20:00 --end 21:30 \
        --repeat weekly --days MO,TU,TH,FR --json    # one series, four days a week
 omacal events create --title "Standup" --date 2026-09-14 --start 09:00 --end 09:15 \
        --repeat weekdays --until 2026-12-19 --json
+omacal events create --title "Coffee" --date 2026-09-01 --start 14:00 --end 14:45 \
+       --guest a@b --notify all --meet --json    # with a Google Meet link
 omacal events update 41 --occurrence 1786352400000 --start 10:00 --end 10:30 --json
+omacal events update 41 --occurrence 1786352400000 --meet --json  # add Meet (v6.4+)
 omacal events delete 41 --occurrence 1786352400000 --json
 omacal events respond 41 yes --json          # yes | maybe | no
 omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
@@ -139,6 +142,18 @@ omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
 - **Changing an existing event's repeat is not in the CLI** — `events
   update` moves and retitles occurrences, it does not turn a single event
   into a series or edit a cadence. Send the user to the app's form.
+- **`--meet` (v6.4+) asks Google to mint a Google Meet link** — the app
+  form's own "Google Meet" choice. The link comes back as `data.conference_uri`
+  in `--json` (text mode prints `Meet: URL`); give the user that URL, never
+  one you made up. It is refused (exit 2), with the reason, on anything but
+  a Google calendar (`mailsGuests` = false), on `reach` = `own-copy` (the
+  organizer owns the meeting link), and on an event that already has a
+  meeting link (`conference` in `events show`). It changes nothing about
+  `--notify`: adding Meet to an event with guests still asks, and on
+  Google `all` emails them the new link. Removing a link is not in the
+  CLI — send the user to the app's form. If the save succeeds with no link,
+  the CLI warns and exits 0: check with `events show`, do not re-run the
+  create (that makes a second event).
 - Times read in the user's display zone, `HH:MM`, strict.
 - All-day events cannot be *edited* from the CLI yet (create/delete/respond
   work); send the user to the app for that.
