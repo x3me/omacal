@@ -8,7 +8,7 @@
   import { overlayWeek, overlayMonth, overlayBigYear, overlayDetail, isUnsaved, type PendingChange } from './lib/pendingview';
   import { landedButNotStored, storeHoldsShift } from './lib/pendingqueue';
   import { createChange, editChange } from './lib/pendingedit';
-  import { applyVisibleHours } from './lib/visiblehours.svelte';
+  import { applyVisibleHours, visibleHours } from './lib/visiblehours.svelte';
   import { applyHideWeekends, hideWeekends } from './lib/hideweekends.svelte';
   import type { EventCopy } from './lib/api';
   import { formatDate } from './lib/datefmt';
@@ -284,8 +284,11 @@
   // Through `pick`, not a bare assignment, for its Year reseed and its
   // `viewChoices` stamp. Deliberately not wired to `open-date` or a clicked
   // reminder — both name an actual destination, unlike a plain reopen.
+  // Fitted hours open fitted for the same reason: a zoom made over them is
+  // for the while the window is open.
   $effect(() => {
     const un = listen('app-opened', () => {
+      if (visibleHours().fit) weekGrid?.fitAgain();
       void getSettings().then((s) => pick(effectiveDefaultView(s))).catch(() => {});
     });
     return () => { un.then((f) => f()); };
@@ -903,7 +906,7 @@
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
         setClockFormat(s.timeFormat);
-        applyVisibleHours(s.visibleStartHour, s.visibleEndHour);
+        applyVisibleHours(s.visibleStartHour, s.visibleEndHour, s.visibleHoursFit);
         applyHideWeekends(s.hideWeekends);
         setDateFormat(s.dateFormat);
         setSecondZone(s.secondTimezone);
@@ -1758,6 +1761,9 @@
    *  prop, because the form's `value` deliberately stops tracking its props
    *  the moment the user types — see `applySpan`. */
   let formEl = $state<{ applySpan: (s: { startMs: number; endMs: number }) => void } | null>(null);
+  /** The grid, for the keys' zoom over fitted hours: that height is the
+   *  grid's own, since only the grid knows the pane it fits them to. */
+  let weekGrid = $state<{ fitAgain: () => void; zoomFitted: (dir: 1 | -1) => void } | null>(null);
   $effect(() => {
     if (!form) formPreview = null;
   });
@@ -2445,10 +2451,17 @@
     // zoom in; Shift is therefore allowed here alone among the chords. The
     // webview's own zoom hotkeys are off (`zoomHotkeysEnabled: false`), so
     // these keys meant nothing before. Claimed only where a grid is on
-    // screen; anywhere else they still mean nothing.
+    // screen; anywhere else they still mean nothing. With the visible hours
+    // fitted they zoom the grid's own height over them, never the stored
+    // one, and Ctrl+0 fits them again.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && ['=', '+', '-', '0'].includes(e.key)) {
       if ((view === 'day' || view === 'week') && !listMode) {
         e.preventDefault();
+        if (visibleHours().fit) {
+          if (e.key === '0') weekGrid?.fitAgain();
+          else weekGrid?.zoomFitted(e.key === '-' ? -1 : 1);
+          return;
+        }
         hourPx = e.key === '0' ? HOUR_PX_DEFAULT : hourPxStepped(hourPx, e.key === '-' ? -1 : 1);
       }
       return;
@@ -2545,7 +2558,7 @@
       defaultCalendarId = s.defaultCalendarId;
       defaultEventDurationMinutes = s.defaultEventDurationMinutes;
       setClockFormat(s.timeFormat);
-      applyVisibleHours(s.visibleStartHour, s.visibleEndHour);
+      applyVisibleHours(s.visibleStartHour, s.visibleEndHour, s.visibleHoursFit);
       applyHideWeekends(s.hideWeekends);
       // Answering in Settings → General is an answer too.
       loginAsked = s.startOnLoginAsked;
@@ -2649,7 +2662,7 @@
                    keyboardCursor={visibleKeyboardCursor}
                    onopen={openGridEvent} />
       {:else}
-        <WeekGrid week={shownWeek} {calendars} {visibleStartMs} visibleDays={visibleCount}
+        <WeekGrid bind:this={weekGrid} week={shownWeek} {calendars} {visibleStartMs} visibleDays={visibleCount}
                   onerror={(m) => (error = m)}
                   {weather} {weatherStale} onweather={openWeather}
                   tasks={weekTasks} ontaskmove={moveTask} ontaskdue={retimeTask} ontasktoggle={completeTask}

@@ -8407,6 +8407,94 @@ test('visible hours persist, shorten Day and Week, and keep click creation at th
   await expect(modal.getByLabel('Visible hours end time')).toHaveValue('23');
 });
 
+test('fitted visible hours fill the pane, and the rest of the day is a scroll away', async ({ page }) => {
+  await page.clock.setFixedTime(APP_NOW);
+  await page.goto(app('writable'));
+  const body = page.getByTestId('week-body');
+  await expect(body).toBeVisible();
+  const modal = page.getByRole('dialog', { name: 'Settings' });
+  const openAppearance = async () => {
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+  };
+  await openAppearance();
+  await modal.getByLabel('Visible hours start time').selectOption('8');
+  await modal.getByLabel('Visible hours end time').selectOption('18');
+  await modal.getByLabel('Fit these hours to the window').check();
+  await page.keyboard.press('Escape');
+
+  // The pane less the first label's 8px of headroom, shared by ten hours.
+  const fitted = () => body.evaluate((el) => Math.floor((el.clientHeight - 8) / 10));
+  const colHeight = () => page.locator('.col').first().evaluate((el) => el.getBoundingClientRect().height);
+  const scrolled = () => body.evaluate((el) => Math.round(el.scrollTop));
+  const px = await fitted();
+  // The whole day is drawn, 08:00 is at the top and 18:00 at the bottom.
+  await expect.poll(colHeight).toBe(px * 24);
+  await expect(body.locator('.gutter span')).toHaveCount(24);
+  await expect.poll(scrolled).toBe(8 * px);
+  const below = await body.evaluate((el, px) => el.clientHeight - (8 + 10 * px), px);
+  expect(below).toBeGreaterThanOrEqual(0);
+  expect(below).toBeLessThan(10);
+
+  // A click lands where it is drawn: half an hour below 08:00 is 08:30.
+  const top = (await body.boundingBox())!.y + 8;
+  const col = (await body.locator('.hour-crop').nth(1).boundingBox())!;
+  await page.mouse.click(col.x + 20, top + px / 2 + 2);
+  const form = page.getByRole('dialog', { name: 'New event' });
+  await expect(form.getByLabel('Start', { exact: true })).toHaveValue('08:30');
+  await page.keyboard.press('Escape');
+  await expect(form).toBeHidden();
+
+  // Scrolled to midnight, Today puts the chosen hours back.
+  await body.evaluate((el) => { el.scrollTop = 0; });
+  await page.getByRole('button', { name: 'Today', exact: true }).click();
+  await expect.poll(scrolled).toBe(8 * px);
+
+  // A taller window refits them, still from the top.
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await expect.poll(fitted).toBeGreaterThan(px);
+  const taller = await fitted();
+  await expect.poll(colHeight).toBe(taller * 24);
+  await expect.poll(scrolled).toBe(8 * taller);
+
+  // Kept for next time.
+  await page.reload();
+  await expect.poll(scrolled).toBe(8 * taller);
+
+  // They zoom like any grid, a key's step holding the first of them at the
+  // top, and reopening the window fits them again.
+  await page.keyboard.press('Control+=');
+  const zoomed = Math.round(taller * 1.25);
+  await expect.poll(colHeight).toBe(zoomed * 24);
+  await expect.poll(async () => (await scrolled()) / zoomed).toBeCloseTo(8, 1);
+  await body.hover();
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -300);
+  await page.keyboard.up('Control');
+  await expect.poll(colHeight).toBeGreaterThan(zoomed * 24);
+  await page.evaluate(() => window.__harness.emit('app-opened', null));
+  await expect.poll(colHeight).toBe(taller * 24);
+  await expect.poll(scrolled).toBe(8 * taller);
+
+  // Ctrl+0 fits them again too, and puts them back in place.
+  await page.keyboard.press('Control+-');
+  await expect.poll(colHeight).toBe(Math.round(taller / 1.25) * 24);
+  await body.evaluate((el) => { el.scrollTop = 0; });
+  await page.keyboard.press('Control+0');
+  await expect.poll(colHeight).toBe(taller * 24);
+  await expect.poll(scrolled).toBe(8 * taller);
+
+  // Off again, the grid crops to ten hours at the stored zoom, which none
+  // of that touched.
+  await openAppearance();
+  await expect(modal.getByLabel('Fit these hours to the window')).toBeChecked();
+  await modal.getByLabel('Fit these hours to the window').uncheck();
+  await page.keyboard.press('Escape');
+  await expect(body.locator('.gutter span')).toHaveCount(10);
+  await expect.poll(colHeight).toBe(70 * 24);
+});
+
   test('a menu bar quick-add request opens the NLP form without submitting', async ({ page }) => {
     await page.goto(app('writable'));
     await page.evaluate(() => window.__harness.emit('quick-add-requested', null));

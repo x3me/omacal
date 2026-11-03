@@ -60,6 +60,14 @@ export const ZOOM_STEP = 1.25;
 export const hourPxStepped = (px: number, dir: 1 | -1) =>
   clampHourPx(dir > 0 ? px * ZOOM_STEP : px / ZOOM_STEP);
 
+/** "Fit these hours to the window": `hours` share the pane's height, held
+ *  to the zoom's own reach — below the floor the range runs past the pane
+ *  and is a scroll long, above the ceiling the pane shows more than asked.
+ *  Whole pixels, rounded down, so the last hour's rule is never drawn a
+ *  pixel past the bottom edge. */
+export const hourPxFitting = (paneHeight: number, hours: number) =>
+  clampHourPx(Math.floor(paneHeight / hours));
+
 /**
  * Where to scroll so the instant that was under `anchorY` (pixels below the
  * scroller's top edge) is still under it after the hours change height.

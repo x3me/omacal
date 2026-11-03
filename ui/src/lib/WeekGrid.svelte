@@ -18,7 +18,7 @@
   import { layOutDay } from './daylayout';
   import { formatClock, gutterLabel, zoneAbbrev, zoneGutterLabel } from './timefmt';
   import { tick, untrack } from 'svelte';
-  import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
+  import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, hourPxFitting, hourPxStepped, scrollTopKeeping } from './zoom';
   import { onPinch, type Pinch } from './pinch';
   import {
     BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, STRONG_SWIPE_MIN_PX, STRONG_SWIPE_PX_PER_MS, TOUCH_LIFT_WHEEL_MS,
@@ -218,10 +218,36 @@
   const bandRows = $derived(bandExpanded ? Infinity : BAND_ROWS);
   const visibleWeek = $derived(sliceWeek(filteredWeek, visStart, visible, bandRows));
 
+  /** The hours drawn: the visible ones, or with those fitted to the pane,
+   *  the whole day around them. */
+  const drawnHours = $derived(visibleHours().fit ? { start: 0, end: 24 } : visibleHours());
+  /** The pane's height, which fitted hours share: watched only while they
+   *  are fitted, so the plain grid carries no observer it does not need. */
+  let bodyHeight = $state(0);
+  $effect(() => {
+    const el = bodyEl;
+    if (!visibleHours().fit || !el) return;
+    const ro = new ResizeObserver(() => { bodyHeight = el.clientHeight; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+  /** A zoom over fitted hours, or `null` while they are as fitted. Never
+   *  stored, so the grid opens fitted every time; `fitAgain` clears it. */
+  let fitHourPx: number | null = $state(null);
+  /** How tall an hour draws: the zoom's, or with the visible hours fitted,
+   *  the pane less `.body`'s headroom for the first label, shared among
+   *  them. Never written to `hourPx`: that is the stored zoom, and it stays
+   *  what it was for the day the switch goes off. */
+  const drawnPx = $derived.by(() => {
+    if (!visibleHours().fit) return hourPx;
+    if (fitHourPx !== null) return fitHourPx;
+    const headroom = bodyEl ? parseFloat(getComputedStyle(bodyEl).paddingTop) || 0 : 0;
+    return hourPxFitting(bodyHeight - headroom, visibleHours().end - visibleHours().start);
+  });
   // Every hour, not every second one: a rule at 10:00 with nothing at 11:00
   // makes a meeting's edge unplaceable by eye.
-  const HOURS = $derived(Array.from({ length: visibleHours().end - visibleHours().start }, (_, i) => i + visibleHours().start));
-  const visibleHeight = $derived(Math.round(hourPx) * (visibleHours().end - visibleHours().start));
+  const HOURS = $derived(Array.from({ length: drawnHours.end - drawnHours.start }, (_, i) => i + drawnHours.start));
+  const visibleHeight = $derived(Math.round(drawnPx) * (drawnHours.end - drawnHours.start));
   const DOW = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
   // Named from the day's own date, not its position in the week — the same
   // rule works for a 7-column week and a 1-column day.
@@ -240,7 +266,7 @@
   };
 
   function crop(day: { start_ms: number; end_ms: number }) {
-    const start = hourFrac(day, visibleHours().start), end = hourFrac(day, visibleHours().end);
+    const start = hourFrac(day, drawnHours.start), end = hourFrac(day, drawnHours.end);
     return end > start ? { start, span: end - start } : { start: 0, span: 1 };
   }
   /** Whether the draft's ghost in `day` is tall enough to carry resize
@@ -322,7 +348,7 @@
   let hasScrolled = false;
 
   // ---- Zoom: the one absolute number, and keeping the pointer's instant put.
-  /** The height the columns currently draw at. Compared against `hourPx` in
+  /** The height the columns currently draw at. Compared against `drawnPx` in
    *  the effect below to tell a change apart from a re-run. */
   let appliedPx = hourPx;
   /** Where the next change should hold still, in pixels below the body's
@@ -338,11 +364,14 @@
    *  write waits for the DOM, since until then the taller column does not
    *  exist to scroll into. */
   $effect.pre(() => {
-    const target = hourPx;
+    const target = drawnPx;
     if (target === appliedPx) return;
     const el = bodyEl;
     if (!el) { appliedPx = target; return; }
-    const anchorY = zoomAnchorY ?? el.clientHeight / 2;
+    // Fitted hours change height with the window, and the top edge is where
+    // they start: holding it keeps the chosen hours filling the pane, and a
+    // key's step over them keeps the first of them where it is.
+    const anchorY = zoomAnchorY ?? (visibleHours().fit ? 0 : el.clientHeight / 2);
     const next = scrollTopKeeping(el.scrollTop, anchorY, appliedPx, target);
     appliedPx = target;
     zoomAnchorY = null;
@@ -357,14 +386,21 @@
     if (!bodyEl) return;
     const r = bodyEl.getBoundingClientRect();
     if (p.clientX < r.left || p.clientX > r.right || p.clientY > r.bottom) return;
-    if (p.phase === 'begin') { pinchStartPx = hourPx; return; }
+    if (p.phase === 'begin') { pinchStartPx = drawnPx; return; }
     if (p.phase === 'end') { pinchStartPx = 0; return; }
     // An update with no begin — the gesture began off the grid and drifted
     // on — takes the current height as its start, undoing the scale it has
     // already accumulated, so it continues from here rather than jumping.
-    if (!pinchStartPx) pinchStartPx = hourPx / p.scale;
+    if (!pinchStartPx) pinchStartPx = drawnPx / p.scale;
     zoomAnchorY = Math.max(0, p.clientY - r.top);
-    hourPx = hourPxAfterPinch(pinchStartPx, p.scale);
+    zoomTo(hourPxAfterPinch(pinchStartPx, p.scale));
+  }
+
+  /** Where a gesture's height goes: over fitted hours it is theirs for the
+   *  session, otherwise it is the stored zoom. */
+  function zoomTo(px: number) {
+    if (visibleHours().fit) fitHourPx = px;
+    else hourPx = px;
   }
 
   $effect(() => {
@@ -595,6 +631,9 @@
     if (revealRequested) handledRevealNowRequest = revealNowRequest;
     // After layout: scrollHeight is meaningless until the columns have height.
     requestAnimationFrame(() => {
+      // Fitted hours are the view itself: they open at the top, and Today
+      // puts them back there rather than centring now.
+      if (visibleHours().fit) { el.scrollTop = fittedTop(); return; }
       const viewportFraction = revealRequested
         ? NOW_VIEWPORT_FRACTION
         : INITIAL_VIEWPORT_FRACTION;
@@ -603,6 +642,33 @@
         frac * el.scrollHeight - el.clientHeight * viewportFraction,
       );
     });
+  });
+
+  /** With the visible hours fitted: the scroll that puts the first of them
+   *  where hour 0 sits unscrolled, its label in the same headroom. Before the
+   *  first payload there is no day to measure, and the top is the top. */
+  const fittedTop = () => gutterDay ? hourFrac(gutterDay, visibleHours().start) * visibleHeight : 0;
+
+  /** The hours as fitted again, the first of them at the top: Ctrl+0 and a
+   *  reopened window, from `App`. */
+  export function fitAgain() {
+    fitHourPx = null;
+    const el = bodyEl;
+    if (el) requestAnimationFrame(() => { el.scrollTop = fittedTop(); });
+  }
+
+  /** Ctrl+= / Ctrl+- over fitted hours, from `App`: a step from the height
+   *  drawn, the fitted one at first. */
+  export function zoomFitted(dir: 1 | -1) {
+    fitHourPx = hourPxStepped(drawnPx, dir);
+  }
+
+  // Turning the switch on, or changing the hours under it, places them as
+  // opening does. Not on a change of week: like every other placement here,
+  // navigating keeps where you were looking.
+  $effect(() => {
+    const { fit } = visibleHours();
+    if (fit && bodyEl) fitAgain();
   });
 
   // The open popover. `selectedId`/`selectedStartMs` name the *UiEvent block
@@ -1935,7 +2001,7 @@
     if (e.ctrlKey) {
       e.preventDefault();
       if (bodyEl) zoomAnchorY = Math.max(0, e.clientY - bodyEl.getBoundingClientRect().top);
-      hourPx = hourPxAfterWheel(hourPx, e.deltaY);
+      zoomTo(hourPxAfterWheel(drawnPx, e.deltaY));
       return;
     }
     if (!onpan) return;
@@ -2113,7 +2179,7 @@
   onopen={openPopover}
 />
 
-<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --gutter:{gutterWidth()}; --hour-px:{Math.round(hourPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan} onpointerdowncapture={notePress}>
+<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --gutter:{gutterWidth()}; --hour-px:{Math.round(drawnPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan} onpointerdowncapture={notePress}>
   <div class="hour-crop ruler" style:height={`${visibleHeight}px`}><div class="gutter" style={columnStyle(gutterDay)}>
     {#each HOURS as h}
       {#if secondZone()}
