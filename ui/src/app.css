@@ -95,6 +95,18 @@ input[type='checkbox']:checked {
 input[type='checkbox']:checked::before {
   transform: scale(1);
 }
+/* Mixed — some of what a box stands for, not all (the calendar list's Hide
+   all / Show all). The ticked box's fill, a dash for the tick. Left to the
+   reset above it would look exactly like an empty box. */
+input[type='checkbox']:indeterminate {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type='checkbox']:indeterminate::before {
+  height: 2px;
+  clip-path: none;
+  transform: scale(1);
+}
 input[type='checkbox']:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;

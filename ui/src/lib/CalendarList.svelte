@@ -2,7 +2,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import {
-    byAccount, calendarInk, setCalendarLabel, setCalendarColor, setCalendarSelected, setCalendarSync, type Calendar,
+    byAccount, calendarInk, setCalendarLabel, setCalendarColor, setCalendarSelected, setCalendarsShown, setCalendarSync,
+    type Calendar,
   } from './calendars';
   import { CALENDAR_COLOURS } from './theme';
 
@@ -108,6 +109,44 @@
     }
   }
 
+  /** What Hide all / Show all reaches: the calendars whose own box can be
+   *  ticked. A removed calendar and an "On this device" list keep whatever
+   *  they have, as they do when a group is applied. */
+  const tickable = $derived(calendars.filter((c) => c.sync_enabled));
+  const allShown = $derived(tickable.every((c) => c.selected));
+  const mixed = $derived(!allShown && tickable.some((c) => c.selected));
+  /** A Hide all / Show all in flight. The rows' boxes wait for it, and it
+   *  waits for theirs: a single toggle landing inside it would undo it, or be
+   *  undone by it, depending on which the backend saw last. */
+  let bulkBusy = $state(false);
+  let allBox = $state<HTMLInputElement | null>(null);
+  // `indeterminate` is a property with no attribute to bind, and a click
+  // clears it, so it is set from `mixed` rather than declared in the markup.
+  $effect(() => {
+    if (allBox) allBox.indeterminate = mixed;
+  });
+
+  async function showOrHideAll(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    message = null;
+    bulkBusy = true;
+    try {
+      await setCalendarsShown(allShown ? [] : tickable.map((c) => c.id));
+      onchange();
+    } catch (err) {
+      // The click already moved the box; nothing else did. Put it back the
+      // way `toggleShown` does, mixed included.
+      input.checked = allShown;
+      input.indeterminate = mixed;
+      message = { text: `All calendars · ${String(err)}`, kind: 'error' };
+      onchange();
+    } finally {
+      bulkBusy = false;
+      await tick();
+      input.focus();
+    }
+  }
+
   async function toggleSync(c: Calendar, e: Event) {
     const btn = e.currentTarget as HTMLButtonElement;
     message = null;
@@ -162,6 +201,25 @@
   `two calendars with the same name in one account both render`.
 -->
 <div class="list" class:spacious>
+  <!-- Hide all / Show all (#171): one box over every row's, ticked when all
+       are shown, mixed when some are, its words the click it offers. Only
+       with two rows or more to reach; over one it would be that row twice.
+       Neither a `.row` nor a `.name`: hosts and specs count those as
+       calendars. -->
+  {#if tickable.length > 1}
+    <div class="all">
+      <label>
+        <input
+          type="checkbox"
+          bind:this={allBox}
+          checked={allShown}
+          disabled={bulkBusy || busy.size > 0}
+          onchange={showOrHideAll}
+        />
+        <span class="all-say">{allShown ? 'Hide all' : 'Show all'}</span>
+      </label>
+    </div>
+  {/if}
   {#each groups as group (group.id)}
     <div class="acct">{group.label}</div>
     {#each group.calendars as c (c.id)}
@@ -170,7 +228,7 @@
           <input
             type="checkbox"
             checked={c.selected}
-            disabled={!c.sync_enabled || busy.has(c.id)}
+            disabled={!c.sync_enabled || busy.has(c.id) || bulkBusy}
             onchange={(e) => toggleShown(c, e)}
           />
           <span class="dot" aria-hidden="true" style="background:{calendarInk(c.color_hex)}"></span>
@@ -257,6 +315,8 @@
   .label-editor div { display: flex; gap: 8px; flex-wrap: wrap; }
   .spacious .acct { padding: 24px 6px 10px; }
   .spacious .acct:first-child { padding-top: 0; }
+  .spacious .all { padding-bottom: 10px; }
+  .spacious .all + .acct { padding-top: 12px; }
   /* No box of its own — no background, no border, no padding. Each host frames
      it: the popover puts it in a floating panel, the settings tab in a column
      that is already inside one. A component that carried its own surface would
@@ -272,6 +332,10 @@
   .row { display: flex; align-items: center; gap: 8px;
          padding: 3px 6px; border-radius: 5px; }
   .row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  /* Lined up with the rows' boxes, and set off from the first account by a
+     hairline: it is about the list, not one of its calendars. */
+  .all { padding: 3px 6px 6px; margin-bottom: 2px; border-bottom: 1px solid var(--hairline); }
+  .all-say { color: var(--muted); }
   .row.off .name { opacity: .45; }
 
   label { display: flex; align-items: center; gap: 7px; font-size: 12.5px;

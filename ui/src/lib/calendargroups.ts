@@ -1,8 +1,7 @@
 // ui/src/lib/calendargroups.ts
-import { invoke } from '@tauri-apps/api/core';
 import { MOD_LABEL } from './shortcuts';
 import { setSetting } from './settings';
-import type { Calendar } from './calendars';
+import { setCalendarsShown, type Calendar } from './calendars';
 
 /**
  * A named, saved choice of which calendars are **shown** — the `selected`
@@ -86,7 +85,7 @@ export function applyRefusal(group: CalendarGroup, cals: Calendar[]): string | n
  *  against half a switch. Rejects with the [`applyRefusal`] sentence. */
 export const applyCalendarGroup = (group: CalendarGroup, cals: Calendar[]) => {
   const why = applyRefusal(group, cals);
-  return why ? Promise.reject(why) : invoke<void>('set_calendars_shown', { ids: liveIds(group, cals) });
+  return why ? Promise.reject(why) : setCalendarsShown(liveIds(group, cals));
 };
 
 /** Replaces the whole list; resolves to the list as stored (names trimmed,

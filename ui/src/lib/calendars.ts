@@ -98,6 +98,10 @@ export const calendarInk = (color: string | null | undefined): string => color |
 export const getCalendars = () => invoke<Calendar[]>('get_calendars');
 export const setCalendarSelected = (id: number, on: boolean) =>
   invoke<void>('set_calendar_selected', { id, on });
+/** Shows exactly `ids` and hides every other calendar whose box can be
+ *  ticked (`sync_enabled`), in one transaction: a calendar group's apply, and
+ *  the list's Hide all / Show all. Display only, like a row's box. */
+export const setCalendarsShown = (ids: number[]) => invoke<void>('set_calendars_shown', { ids });
 /** Resolves to the number of local events the removal deleted. */
 export const setCalendarSync = (id: number, on: boolean) =>
   invoke<number>('set_calendar_sync', { id, on });

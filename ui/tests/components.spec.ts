@@ -1861,7 +1861,7 @@ test.describe('Header', () => {
   test('a calendar can be hidden from the tab, and the app is told', async ({ page }) => {
     await page.goto(show('Header', 'connected'));
     const modal = await openSettings(page, 'Calendars');
-    await modal.getByRole('tabpanel').locator('input[type=checkbox]').first().uncheck();
+    await modal.getByRole('tabpanel').locator('.row input[type=checkbox]').first().uncheck();
 
     // Through to the command, not just the checkbox: the tab is a second host
     // for these rows and a host that rendered them without wiring them would
@@ -1879,7 +1879,7 @@ test.describe('Header', () => {
     // but only the host can ask `App` to reload the grid afterwards.
     await page.goto(show('Header', 'connected'));
     const modal = await openSettings(page, 'Calendars');
-    await modal.getByRole('tabpanel').locator('input[type=checkbox]').first().uncheck();
+    await modal.getByRole('tabpanel').locator('.row input[type=checkbox]').first().uncheck();
 
     await expect
       .poll(() => page.evaluate(() => (window as any).__calendarChanges))

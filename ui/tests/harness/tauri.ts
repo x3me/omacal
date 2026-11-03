@@ -87,13 +87,13 @@ export type Harness = {
   failNextCreate(message: string): void;
   /** Make the next call to `set_calendar_selected` or `set_calendar_sync` reject —
    *  what a CalendarPopover spec uses to drive the failed-toggle path. */
-  failNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed', message: string): void;
+  failNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendars_shown' | 'set_calendar_sync' | 'set_task_completed', message: string): void;
   /** Park the *next* call to this calendar command instead of answering it —
    *  what a CalendarPopover spec uses to prove a second row's toggle doesn't
    *  free up a first row whose own call is still pending. */
-  holdNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed'): void;
+  holdNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendars_shown' | 'set_calendar_sync' | 'set_task_completed'): void;
   /** Answer the parked call for this command, then let its `.then` chain run. */
-  releaseCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed', value: unknown): Promise<void>;
+  releaseCalendarCall(cmd: 'set_calendar_selected' | 'set_calendars_shown' | 'set_calendar_sync' | 'set_task_completed', value: unknown): Promise<void>;
   /** Park the *next* `event_detail`, `refresh_event`, or `respond_to_event`
    *  call for this exact event id instead of answering it — what a
    *  `WeekGrid` spec uses to drive the supersession guard (open one block
@@ -1312,8 +1312,11 @@ export function installTauriStub(scenario: string): Harness {
       // The bulk apply: exactly these shown, every other hidden.
       case 'set_calendars_shown':
         // Mirrors `set_selected_exactly`: only sync-enabled rows move, and a
-        // named id switches on only if it is one.
-        for (const c of groupCalendars) if (c.sync_enabled) c.selected = (args.ids as number[]).includes(c.id);
+        // named id switches on only if it is one. A call told to fail moves
+        // nothing, as the real transaction would not.
+        if (failCalendarOnce?.cmd !== cmd) {
+          for (const c of groupCalendars) if (c.sync_enabled) c.selected = (args.ids as number[]).includes(c.id);
+        }
         return calendarResult(cmd, undefined);
       case 'set_calendar_sync':
         return calendarResult(cmd, CALENDAR_SYNC_REMOVED);
