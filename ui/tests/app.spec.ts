@@ -8495,6 +8495,23 @@ test('fitted visible hours fill the pane, and the rest of the day is a scroll aw
   await expect.poll(colHeight).toBe(70 * 24);
 });
 
+// The hint names the key this platform's users reach for, ⌘0 on a Mac and
+// Ctrl+0 elsewhere, as the shortcut sheet does. The handler takes either.
+for (const [platform, key] of [['Linux x86_64', 'Ctrl+0'], ['MacIntel', '⌘0']] as const) {
+  test(`the fit switch's hint names ${key} on ${platform}`, async ({ page }) => {
+    await page.addInitScript((p) => {
+      Object.defineProperty(Navigator.prototype, 'platform', { get: () => p });
+    }, platform);
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.getByLabel('Fit these hours to the window').check();
+    await expect(modal.getByText(/fits them again/)).toContainText(`and ${key} fits them again`);
+  });
+}
+
   test('a menu bar quick-add request opens the NLP form without submitting', async ({ page }) => {
     await page.goto(app('writable'));
     await page.evaluate(() => window.__harness.emit('quick-add-requested', null));

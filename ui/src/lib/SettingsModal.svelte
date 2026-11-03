@@ -28,6 +28,7 @@
   import type { Palette } from './theme';
   import type { TemperatureUnit } from './temperature';
   import type { WeekStartDay } from './weekstart';
+  import { MOD_LABEL } from './shortcuts';
 
   async function changeVisibleHours(start: number, end: number) {
     try { settings = await setSetting('visibleHours', { start, end }); onsettingschange?.(settings); }
@@ -1351,7 +1352,7 @@
           Fit these hours to the window
         </label>
         {#if settings?.visibleHoursFit}
-          <p class="hint">Day and Week size these hours to fill the window, and the rest of the day is a scroll away. Zooming works as usual until the window is closed, and Ctrl+0 fits them again. The menu-bar day view shows these hours only.</p>
+          <p class="hint">Day and Week size these hours to fill the window, and the rest of the day is a scroll away. Zooming works as usual until the window is closed, and {MOD_LABEL === '⌘' ? '⌘0' : 'Ctrl+0'} fits them again. The menu-bar day view shows these hours only.</p>
         {:else}
           <p class="hint">Hours shown in Day, Week, and the menu-bar day view. Events outside this range remain in the agenda and search.</p>
         {/if}
