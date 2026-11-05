@@ -107,47 +107,24 @@ pub async fn connect_caldav(
     .await
     .map_err(|e| crate::errors::user_facing(&anyhow::Error::from(e)))?;
 
-    // The machine's zone is the fallback for collections that publish none —
-    // an all-day date has to resolve against something, and the zone the
-    // user is sitting in is the only defensible guess.
-    let fallback_tz = jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string();
-
-    for cal in &calendars {
-        // Like the Google upsert: the provider's fields update, the user's
-        // (`selected`, `sync_enabled`) are never touched on reconnect.
-        sqlx::query(
-            "INSERT INTO calendars
-                (account_id, google_id, summary, color_hex, timezone, access_role,
-                 is_primary, supports_events, supports_tasks)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
-             ON CONFLICT (account_id, google_id) DO UPDATE SET
-                summary = excluded.summary,
-                color_hex = excluded.color_hex,
-                timezone = excluded.timezone,
-                access_role = excluded.access_role,
-                supports_events = excluded.supports_events,
-                supports_tasks = excluded.supports_tasks",
-        )
-        .bind(account_id)
-        .bind(&cal.url)
-        .bind(&cal.display_name)
-        .bind(&cal.color)
-        .bind(cal.timezone.as_deref().unwrap_or(&fallback_tz))
-        .bind(if cal.read_only { "reader" } else { "owner" })
-        .bind(cal.supports_events as i64)
-        .bind(cal.supports_tasks as i64)
-        .execute(pool)
+    omacal_sync::caldav::upsert_collections(pool, account_id, &calendars, &fallback_tz())
         .await
-        .map_err(|e| crate::errors::user_facing(&anyhow::Error::from(e)))?;
-    }
+        .map_err(|e| crate::errors::user_facing(&e))?;
 
     // A reconnect clears the account's dead-credential mark, same as the
     // Google path.
     state.reauth.lock().expect("reauth mark poisoned").remove(&email);
     Ok(email)
+}
+
+/// The zone for collections that publish none — an all-day date has to
+/// resolve against something, and the zone the user is sitting in is the
+/// only defensible guess.
+fn fallback_tz() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .unwrap_or("UTC")
+        .to_string()
 }
 
 /// Maps a CalDAV error to something the connect form can show.
@@ -206,6 +183,11 @@ pub(crate) async fn client_for_calendar(
 /// Syncs every enabled calendar of one CalDAV account. Returns rows written;
 /// an `Unauthorized` anywhere marks the whole account dead (one password
 /// covers every collection).
+///
+/// The calendar list is refreshed first, so a collection made on another
+/// device is synced in the same pass that finds it — see
+/// `omacal_sync::caldav::refresh_collections` for what it may and may not
+/// delete.
 pub(crate) async fn sync_account(
     pool: &SqlitePool,
     account_id: i64,
@@ -213,6 +195,8 @@ pub(crate) async fn sync_account(
     window_start_ms: i64,
     window_end_ms: i64,
 ) -> Result<u64, CalDavError> {
+    omacal_sync::caldav::refresh_collections(pool, account_id, client, &fallback_tz()).await?;
+
     let cals: Vec<(i64, String, i64, i64)> = sqlx::query_as(
         "SELECT id, google_id, supports_events, supports_tasks FROM calendars
          WHERE account_id = ?1 AND sync_enabled = 1 ORDER BY id",
@@ -333,5 +317,73 @@ mod tests {
             base_url_for("caldav", Some(" https://dav.example.com/ ")).unwrap(),
             "https://dav.example.com/"
         );
+    }
+
+    /// The wiring: a sync finds a list made since the account was connected
+    /// and fetches its tasks in the same pass, rather than only on the sync
+    /// after. The listing's own rules are `omacal_sync::caldav`'s tests.
+    #[tokio::test]
+    async fn a_sync_picks_up_a_task_list_made_after_the_account_was_connected() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/</d:href><d:propstat><d:prop>
+                <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/principals/p/</d:href><d:propstat><d:prop>
+                <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}>
+                <d:response><d:href>/cals/p/bernard/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                <d:displayname>Bernard</d:displayname>
+                <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/bernard/")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/bernard/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("REPORT")).and(path("/cals/p/bernard/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/bernard/t.ics</d:href>
+                <d:propstat><d:prop><d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:t-1&#13;
+SUMMARY:Take the bins out&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+        sync_account(&pool, 1, &client, 0, 1).await.unwrap();
+
+        let lists: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT summary, supports_events, supports_tasks FROM calendars")
+                .fetch_all(&pool).await.unwrap();
+        assert_eq!(lists, vec![("Bernard".to_string(), 0, 1)]);
+        let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(tasks, vec!["Take the bins out".to_string()], "fetched in the same pass");
     }
 }
