@@ -17,7 +17,7 @@
 //! Tasks (VTODO) sync in the same pass under the same ctag: one collection,
 //! one answer to "anything changed?".
 
-use omacal_caldav::{CalDavClient, CalDavError, CalEvent, IcsTime};
+use omacal_caldav::{CalDavClient, CalDavError, CalEvent, DiscoveredCalendar, IcsTime};
 use omacal_store::StoredEvent;
 use sqlx::SqlitePool;
 
@@ -406,6 +406,157 @@ pub async fn sync_caldav_calendar(
     Ok(outcome)
 }
 
+/// Records the collections a discovery listed for one account.
+///
+/// Like the Google upsert: the provider's fields update, the user's
+/// (`selected`, `sync_enabled`, the label and colour overrides) are never in
+/// the statement, so neither a reconnect nor a sync can undo a hide, a
+/// removal or a rename. A collection new to the account gets the schema's
+/// defaults: shown, synced.
+///
+/// `fallback_tz` is for a new collection that publishes no zone — an all-day
+/// date has to resolve against something, and the zone the user is sitting
+/// in is the only defensible guess. A known row that publishes none keeps the
+/// zone it has: this runs on every sync now, and re-guessing would move a
+/// traveller's all-day dates to wherever the laptop was last opened.
+pub async fn upsert_collections(
+    pool: &SqlitePool,
+    account_id: i64,
+    calendars: &[DiscoveredCalendar],
+    fallback_tz: &str,
+) -> anyhow::Result<()> {
+    for cal in calendars {
+        sqlx::query(
+            "INSERT INTO calendars
+                (account_id, google_id, summary, color_hex, timezone, access_role,
+                 is_primary, supports_events, supports_tasks)
+             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ?9), ?6, 0, ?7, ?8)
+             ON CONFLICT (account_id, google_id) DO UPDATE SET
+                summary = excluded.summary,
+                color_hex = excluded.color_hex,
+                timezone = COALESCE(?5, calendars.timezone),
+                access_role = excluded.access_role,
+                supports_events = excluded.supports_events,
+                supports_tasks = excluded.supports_tasks",
+        )
+        .bind(account_id)
+        .bind(&cal.url)
+        .bind(&cal.display_name)
+        .bind(&cal.color)
+        .bind(cal.timezone.as_deref())
+        .bind(if cal.read_only { "reader" } else { "owner" })
+        .bind(cal.supports_events as i64)
+        .bind(cal.supports_tasks as i64)
+        .bind(fallback_tz)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// An error as the log may carry it: the status or the kind, never the
+/// message, which for a failed request is reqwest's and names the URL — and a
+/// Fastmail collection URL holds the account's address.
+fn log_kind(e: &CalDavError) -> String {
+    match e {
+        CalDavError::Http(status) => status.as_u16().to_string(),
+        CalDavError::Unauthorized => "unauthorized".into(),
+        CalDavError::PreconditionFailed => "precondition failed".into(),
+        CalDavError::Other(_) => "request failed".into(),
+    }
+}
+
+/// What one [`refresh_collections`] changed, for the log.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionsRefresh {
+    /// Collections the listing named that the account had no row for.
+    pub added: usize,
+    /// Rows deleted because their collection is gone from the server.
+    pub removed: usize,
+}
+
+/// Brings one account's calendar list up to date with the server: a
+/// collection made on another device since the account was connected gets a
+/// row, and one deleted there loses its row.
+///
+/// Discovery used to run once, when the account was connected, so a task
+/// list made later on the phone never reached OmaCal at all, and a deleted
+/// one stayed listed, its ctag probe answering 404 on every sync.
+///
+/// **Nothing is deleted on the listing's word alone.** A failed discovery
+/// changes nothing. An empty listing changes nothing either: connecting
+/// refuses an account with no calendars, so "none" is a broken answer rather
+/// than a user who deleted everything. And a row the listing left out is
+/// deleted only once its own collection answers 404 or 410 — a listing cut
+/// short by a proxy, or a collection that still answers but no longer sits
+/// in the home set, keeps its row and its events.
+///
+/// Errors only with `Unauthorized`, so the caller can mark the account for
+/// reconnecting. Anything else is logged and the sync goes on with the rows
+/// it has: a calendar list a few minutes stale is not worth failing the
+/// sync of the calendars that are fine.
+pub async fn refresh_collections(
+    pool: &SqlitePool,
+    account_id: i64,
+    client: &CalDavClient,
+    fallback_tz: &str,
+) -> Result<CollectionsRefresh, CalDavError> {
+    let listed = match client.discover().await {
+        Ok(l) => l,
+        Err(e) if e.needs_reauth() => return Err(e),
+        Err(e) => {
+            tracing::warn!(account_id, error = %log_kind(&e), "collection discovery failed; calendar list unchanged");
+            return Ok(CollectionsRefresh::default());
+        }
+    };
+    if listed.is_empty() {
+        tracing::warn!(account_id, "discovery listed no collections; calendar list unchanged");
+        return Ok(CollectionsRefresh::default());
+    }
+
+    let stored: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, google_id FROM calendars WHERE account_id = ?1 ORDER BY id")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await
+            .map_err(anyhow::Error::from)?;
+
+    let mut out = CollectionsRefresh {
+        added: listed.iter().filter(|c| !stored.iter().any(|(_, url)| *url == c.url)).count(),
+        ..Default::default()
+    };
+    upsert_collections(pool, account_id, &listed, fallback_tz).await?;
+
+    for (calendar_id, url) in stored {
+        if listed.iter().any(|c| c.url == url) {
+            continue;
+        }
+        match client.ctag(&url).await {
+            Err(CalDavError::Http(status))
+                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE =>
+            {
+                omacal_store::delete_calendar(pool, calendar_id).await?;
+                out.removed += 1;
+            }
+            // Kept, and on purpose not raised: the listing just succeeded
+            // with these credentials, so a refusal on one collection is not
+            // a dead password.
+            Ok(_) => {
+                tracing::debug!(calendar_id, "collection not listed but still answers; kept");
+            }
+            Err(e) => {
+                tracing::warn!(calendar_id, error = %log_kind(&e), "collection not listed and its probe failed; kept");
+            }
+        }
+    }
+
+    if out != CollectionsRefresh::default() {
+        // Ids and counts only, like the task-list line above.
+        tracing::info!(account_id, added = out.added, removed = out.removed, "calendar list refreshed");
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,5 +721,219 @@ mod tests {
         assert_eq!(out.skipped, 2, "the unreadable resource and the UID-less task are counted");
         let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
         assert_eq!(rows.iter().map(|r| r.task.uid.as_str()).collect::<Vec<_>>(), vec!["t-1"]);
+    }
+
+    /// The collection-refresh tests' server: the discovery walk of
+    /// `omacal-caldav`'s own test, with the home's listing up to each test.
+    mod refresh {
+        use super::super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const PRINCIPAL: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop>
+          <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+
+        const HOME: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response>
+          <d:href>/principals/p/</d:href><d:propstat><d:prop>
+          <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+
+        /// One `<d:response>` for a calendar collection in the home.
+        fn collection(name: &str, display: &str, component: &str) -> String {
+            format!(
+                r#"<d:response><d:href>/cals/p/{name}/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                <d:displayname>{display}</d:displayname>
+                <c:supported-calendar-component-set><c:comp name="{component}"/></c:supported-calendar-component-set>
+                <d:current-user-privilege-set><d:privilege><d:write/></d:privilege></d:current-user-privilege-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#
+            )
+        }
+
+        /// The home's Depth-1 listing: the home itself (not a calendar), then
+        /// `entries`.
+        fn listing(entries: &[String]) -> String {
+            format!(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"
+                     xmlns:cs="http://calendarserver.org/ns/" xmlns:ic="http://apple.com/ns/ical/">
+                <d:response><d:href>/cals/p/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/></d:resourcetype></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>{}</d:multistatus>"#,
+                entries.concat()
+            )
+        }
+
+        /// A server whose principal and home answer, and whose home listing
+        /// answers `home`.
+        async fn server(home: ResponseTemplate) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("PROPFIND")).and(path("/"))
+                .respond_with(ResponseTemplate::new(207).set_body_raw(PRINCIPAL, "application/xml"))
+                .mount(&server).await;
+            Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+                .respond_with(ResponseTemplate::new(207).set_body_raw(HOME, "application/xml"))
+                .mount(&server).await;
+            Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+                .respond_with(home)
+                .mount(&server).await;
+            server
+        }
+
+        /// A probe of one collection, as `ctag` asks it.
+        async fn probe(server: &MockServer, name: &str, answer: ResponseTemplate) {
+            Mock::given(method("PROPFIND")).and(path(format!("/cals/p/{name}/"))).and(header("Depth", "0"))
+                .respond_with(answer)
+                .mount(server).await;
+        }
+
+        /// An account holding `work` with every user choice made: hidden,
+        /// removed from syncing, its label and colour overridden, and the zone
+        /// it was given when connected. Returns the pool and the row's id.
+        async fn connected(server: &MockServer) -> (SqlitePool, i64) {
+            let pool = omacal_store::connect_memory().await.unwrap();
+            sqlx::query(
+                "INSERT INTO accounts (google_sub, email, created_at, provider)
+                 VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
+            )
+            .execute(&pool).await.unwrap();
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role,
+                                        selected, sync_enabled, label_override, color_override)
+                 VALUES (1, ?1, 'Work', 'America/Chicago', 'owner', 0, 0, 'My work', '#123456')
+                 RETURNING id",
+            )
+            .bind(format!("{}/cals/p/work/", server.uri()))
+            .fetch_one(&pool).await.unwrap();
+            (pool, id)
+        }
+
+        async fn add_row(pool: &SqlitePool, server: &MockServer, name: &str) -> i64 {
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (1, ?1, ?2, 'UTC', 'owner') RETURNING id",
+            )
+            .bind(format!("{}/cals/p/{name}/", server.uri()))
+            .bind(name)
+            .fetch_one(pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, updated_at)
+                 VALUES (?1, 'ev', 0, 1, 'UTC', 'UTC', 0)",
+            )
+            .bind(id)
+            .execute(pool).await.unwrap();
+            id
+        }
+
+        async fn ids(pool: &SqlitePool) -> Vec<i64> {
+            sqlx::query_scalar("SELECT id FROM calendars ORDER BY id").fetch_all(pool).await.unwrap()
+        }
+
+        /// A task list made on the phone after the account was connected is
+        /// listed on the next refresh, as a tasks-only list, shown and synced;
+        /// and the row that was already there keeps every choice the user made
+        /// on it, and the zone it already had (the listing publishes none).
+        #[tokio::test]
+        async fn a_collection_made_elsewhere_is_added_and_the_known_one_keeps_its_choices() {
+            let server = server(ResponseTemplate::new(207).set_body_string(listing(&[
+                collection("work", "Work (renamed)", "VEVENT"),
+                collection("bernard", "Bernard", "VTODO"),
+            ])))
+            .await;
+            let (pool, work) = connected(&server).await;
+            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+            let out = refresh_collections(&pool, 1, &client, "Europe/Sofia").await.unwrap();
+            assert_eq!(out, CollectionsRefresh { added: 1, removed: 0 });
+
+            type Row = (String, i64, i64, i64, i64, String);
+            let bernard: Row = sqlx::query_as(
+                "SELECT summary, supports_events, supports_tasks, selected, sync_enabled, timezone
+                 FROM calendars WHERE google_id = ?1",
+            )
+            .bind(format!("{}/cals/p/bernard/", server.uri()))
+            .fetch_one(&pool).await.unwrap();
+            assert_eq!(bernard, ("Bernard".into(), 0, 1, 1, 1, "Europe/Sofia".into()));
+
+            type Kept = (String, i64, i64, Option<String>, Option<String>, String);
+            let kept: Kept = sqlx::query_as(
+                "SELECT summary, selected, sync_enabled, label_override, color_override, timezone
+                 FROM calendars WHERE id = ?1",
+            )
+            .bind(work)
+            .fetch_one(&pool).await.unwrap();
+            assert_eq!(kept, ("Work (renamed)".into(), 0, 0, Some("My work".into()), Some("#123456".into()),
+                              "America/Chicago".into()),
+                       "the server's name updates; hidden, removed, label, colour and zone stay");
+
+            let again = refresh_collections(&pool, 1, &client, "Europe/Sofia").await.unwrap();
+            assert_eq!(again, CollectionsRefresh::default(), "a second refresh finds nothing new");
+            assert_eq!(ids(&pool).await.len(), 2);
+        }
+
+        /// A collection the listing leaves out goes only on its own 404 or
+        /// 410. One that still answers, one whose probe fails, and one whose
+        /// probe is refused all stay with their events — and the refusal does
+        /// not fail the refresh, since the listing just succeeded.
+        #[tokio::test]
+        async fn an_unlisted_collection_goes_only_when_it_answers_not_found() {
+            let server = server(ResponseTemplate::new(207).set_body_string(listing(&[
+                collection("work", "Work", "VEVENT"),
+            ])))
+            .await;
+            let (pool, work) = connected(&server).await;
+            let deleted = add_row(&pool, &server, "deleted").await;
+            let gone = add_row(&pool, &server, "gone").await;
+            let alive = add_row(&pool, &server, "alive").await;
+            let flaky = add_row(&pool, &server, "flaky").await;
+            let refused = add_row(&pool, &server, "refused").await;
+            probe(&server, "deleted", ResponseTemplate::new(404)).await;
+            probe(&server, "gone", ResponseTemplate::new(410)).await;
+            probe(&server, "alive", ResponseTemplate::new(207).set_body_string(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+                <d:response><d:href>/cals/p/alive/</d:href><d:propstat><d:prop><cs:getctag>c</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+            )).await;
+            probe(&server, "flaky", ResponseTemplate::new(502)).await;
+            probe(&server, "refused", ResponseTemplate::new(403)).await;
+            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+            let out = refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+            assert_eq!(out, CollectionsRefresh { added: 0, removed: 2 });
+            assert_eq!(ids(&pool).await, vec![work, alive, flaky, refused]);
+            assert!(!ids(&pool).await.contains(&deleted) && !ids(&pool).await.contains(&gone));
+            let events: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM events ORDER BY calendar_id")
+                .fetch_all(&pool).await.unwrap();
+            assert_eq!(events, vec![alive, flaky, refused], "the kept rows keep their events");
+        }
+
+        /// A listing that fails, or names nothing, changes nothing — not even
+        /// for a collection that would answer 404 — and does not fail the
+        /// sync. A refused password does, so the account can be marked.
+        #[tokio::test]
+        async fn a_failed_or_empty_listing_touches_nothing() {
+            for home in [ResponseTemplate::new(502), ResponseTemplate::new(207).set_body_string(listing(&[]))] {
+                let server = server(home).await;
+                let (pool, work) = connected(&server).await;
+                let deleted = add_row(&pool, &server, "deleted").await;
+                probe(&server, "work", ResponseTemplate::new(404)).await;
+                probe(&server, "deleted", ResponseTemplate::new(404)).await;
+                let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+                let out = refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+                assert_eq!(out, CollectionsRefresh::default());
+                assert_eq!(ids(&pool).await, vec![work, deleted]);
+            }
+
+            let server = server(ResponseTemplate::new(401)).await;
+            let (pool, _) = connected(&server).await;
+            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+            assert!(matches!(
+                refresh_collections(&pool, 1, &client, "UTC").await,
+                Err(CalDavError::Unauthorized)
+            ));
+        }
     }
 }
