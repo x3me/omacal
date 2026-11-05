@@ -85,13 +85,97 @@ fn sync_failed_payload(_e: &anyhow::Error) -> serde_json::Value {
     serde_json::json!({ "message": SYNC_FAILED_MESSAGE })
 }
 
+/// One sync at a time. A second request that arrives while one is running
+/// waits for it and receives that run's own result, rather than starting
+/// another: the ticker and the focus event both fire at launch, a few dozen
+/// milliseconds apart, and each used to download every calendar on its own.
+///
+/// Lives on [`crate::AppState`], beside `history_months`, so a test that
+/// builds its own state does not share a gate with the rest of the process.
+pub struct SyncGate {
+    running: std::sync::Mutex<Option<InFlight>>,
+}
+
+struct InFlight {
+    /// `None` until the run finishes. Waiters subscribe before they look, so
+    /// a result that lands in between is not missed.
+    result: tokio::sync::watch::Sender<Option<std::result::Result<u64, String>>>,
+}
+
+/// Clears the in-flight flag however the run ends: a returned result, a
+/// panic, or a future dropped mid-sync. Without it the flag stays set and
+/// every later sync waits forever.
+struct ClearOnDrop<'a> {
+    gate: &'a SyncGate,
+    result: tokio::sync::watch::Sender<Option<std::result::Result<u64, String>>>,
+    published: bool,
+}
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.result.send(Some(Err("sync stopped before it finished".to_string())));
+        }
+        *self.gate.running.lock().expect("sync gate") = None;
+    }
+}
+
+impl SyncGate {
+    pub(crate) fn new() -> Self {
+        Self { running: std::sync::Mutex::new(None) }
+    }
+
+    /// Runs `work`, unless a sync is already in progress, in which case this
+    /// waits for that one and returns its result. The future is lazy, so a
+    /// caller that waited never polls it.
+    pub(crate) async fn run(
+        &self,
+        work: impl std::future::Future<Output = anyhow::Result<u64>>,
+    ) -> anyhow::Result<u64> {
+        // The mutex guard must not live across an await: it is not `Send`,
+        // and a sync runs on Tauri's thread pool.
+        let start = {
+            let mut slot = self.running.lock().expect("sync gate");
+            if let Some(running) = slot.as_ref() {
+                Err(running.result.subscribe())
+            } else {
+                let (tx, _rx) = tokio::sync::watch::channel(None);
+                *slot = Some(InFlight { result: tx.clone() });
+                Ok(tx)
+            }
+        };
+        let tx = match start {
+            Err(mut rx) => {
+                loop {
+                    if let Some(result) = rx.borrow().clone() {
+                        return result.map_err(anyhow::Error::msg);
+                    }
+                    if rx.changed().await.is_err() {
+                        anyhow::bail!("the sync it waited on stopped");
+                    }
+                }
+            }
+            Ok(tx) => tx,
+        };
+        let mut guard = ClearOnDrop { gate: self, result: tx, published: false };
+        let result = work.await;
+        let published = match &result {
+            Ok(n) => Ok(*n),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = guard.result.send(Some(published));
+        guard.published = true;
+        result
+    }
+}
+
 /// Runs one sync and reports the outcome to the UI. Shared by the ticker and
 /// the focus path so both record the timestamp and, crucially, both *say* when
 /// a sync fails — silence on this path is what let the header read "Synced 4
 /// min ago" all night with the network down.
 async fn sync_and_report(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
-    match crate::sync_all(&state).await {
+    match crate::sync_all(&state, false).await {
         Ok(n) => {
             if let Err(e) = crate::status::record_sync(&state.pool, crate::now_ms()).await {
                 tracing::warn!(%e, "sync succeeded but recording it failed");
@@ -310,5 +394,92 @@ mod tests {
         sqlx::query("INSERT INTO settings (key, value) VALUES ('sync_interval_ms', 'soon')")
             .execute(&pool).await.unwrap();
         assert_eq!(interval_ms(&pool).await, DEFAULT_INTERVAL_MS);
+    }
+
+    /// Launch fires the ticker and a focus within a few dozen milliseconds.
+    /// The second must wait, not download every calendar beside the first,
+    /// and it must hear the result the first one actually produced.
+    #[tokio::test]
+    async fn a_sync_already_running_is_not_started_again() {
+        let gate = std::sync::Arc::new(SyncGate::new());
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let wait_entered = entered.notified();
+        let (g1, r1, e1, rel1) = (gate.clone(), runs.clone(), entered.clone(), release.clone());
+        let first = tokio::spawn(async move {
+            g1.run(async {
+                r1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                e1.notify_waiters();
+                rel1.notified().await;
+                Ok(4)
+            })
+            .await
+        });
+        wait_entered.await;
+
+        let (g2, r2) = (gate.clone(), runs.clone());
+        let second = tokio::spawn(async move {
+            g2.run(async {
+                r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(0)
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        release.notify_waiters();
+        assert_eq!(first.await.unwrap().unwrap(), 4, "the first request is the one that runs");
+        assert_eq!(second.await.unwrap().unwrap(), 4, "the one that waited hears that result");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A failure must reach the waiter. Reporting success of its own is what
+    /// let the header say "Synced just now" after a sync that had failed.
+    #[tokio::test]
+    async fn a_waiter_hears_the_runs_failure() {
+        let gate = std::sync::Arc::new(SyncGate::new());
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (g1, e1, rel1) = (gate.clone(), entered.clone(), release.clone());
+        let first = tokio::spawn(async move {
+            g1.run(async {
+                e1.notify_waiters();
+                rel1.notified().await;
+                Err(anyhow::anyhow!("network down"))
+            })
+            .await
+        });
+        entered.notified().await;
+        let g2 = gate.clone();
+        let second = tokio::spawn(async move { g2.run(async { Ok(1) }).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        release.notify_waiters();
+        let ran = first.await.unwrap().unwrap_err().to_string();
+        let waited = second.await.unwrap().unwrap_err().to_string();
+        assert_eq!(ran, "network down");
+        assert_eq!(waited, ran, "the waiter gets the run's own error");
+    }
+
+    /// A future dropped mid-sync, or a panic, must clear the gate. Otherwise
+    /// every later sync waits on a run that will never finish.
+    #[tokio::test]
+    async fn a_dropped_sync_does_not_hold_the_gate() {
+        let gate = std::sync::Arc::new(SyncGate::new());
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (g, e) = (gate.clone(), entered.clone());
+        let task = tokio::spawn(async move {
+            g.run(async {
+                e.notify_waiters();
+                std::future::pending::<()>().await;
+                Ok(1)
+            })
+            .await
+        });
+        entered.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(gate.run(async { Ok(7) }).await.unwrap(), 7, "a later sync starts");
     }
 }

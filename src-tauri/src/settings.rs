@@ -117,6 +117,17 @@ const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
+const HISTORY_SPAN_KEY: &str = "history_span_months";
+/// How far back sync keeps events, in months. `0` is everything (back to
+/// 1900). Ahead is a year for every one of them. A fresh install reads an
+/// absent row as [`DEFAULT_HISTORY_MONTHS`]; migration 0019 writes
+/// [`SPAN_6_MONTHS`] where a calendar already exists, so an update does not
+/// lengthen a calendar that was syncing six months.
+pub(crate) const HISTORY_SPANS: [i64; 4] = [6, 24, 60, 0];
+pub(crate) const DEFAULT_HISTORY_MONTHS: i64 = 24;
+/// Six months: 180 days, the window sync kept before this setting existed,
+/// and the recent slice a save refetches instead of the whole span.
+pub(crate) const SPAN_6_MONTHS: i64 = 6;
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -529,6 +540,11 @@ pub struct AppSettings {
     /// say what the minimum is in order to refuse a smaller one with a reason,
     /// and a second copy of the number in TypeScript is one that drifts.
     pub min_sync_interval_ms: i64,
+    /// How far back events are kept, in months. One of [`HISTORY_SPANS`]:
+    /// 6, 24 (two years), 60 (five years), or 0 for everything back to 1900.
+    /// Ahead is a year either way. Absent reads as two years; an install
+    /// that already has a calendar keeps six (migration 0019).
+    pub history_span: i64,
     /// Whether Day, Week and Month draw as a list rather than a grid — the
     /// filmstrip toggle (filmstrip spec §4).
     ///
@@ -945,6 +961,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // so a stray value keeps today's behaviour.
         keep_reminders_on_screen: read(pool, KEEP_REMINDERS_KEY).await.as_deref() == Some("1"),
         min_sync_interval_ms: crate::sync_loop::MIN_INTERVAL_MS,
+        history_span: history_months(pool).await,
         // **The grid is what a calendar looks like until somebody says
         // otherwise**, so the absent row reads as off — the opposite polarity
         // to `notifications_enabled` above, and for the opposite reason. A
@@ -1465,6 +1482,74 @@ async fn visible_hours(pool: &SqlitePool) -> (u8, u8) {
     }).unwrap_or((0, 24))
 }
 
+/// The stored span, or [`DEFAULT_HISTORY_MONTHS`] when the row is absent or
+/// not one of [`HISTORY_SPANS`]. A stray value must not widen anyone's sync.
+pub(crate) async fn history_months(pool: &SqlitePool) -> i64 {
+    read(pool, HISTORY_SPAN_KEY)
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|v| HISTORY_SPANS.contains(v))
+        .unwrap_or(DEFAULT_HISTORY_MONTHS)
+}
+
+const DAY_MS: i64 = 24 * 3_600_000;
+/// 1900-01-01T00:00:00Z. Everything reaches back to here and no further;
+/// the forward edge stays a year out and still slides.
+const EVERYTHING_START_MS: i64 = -2_208_988_800_000;
+
+/// The window sync fetches for `months`, and the one the year views hatch
+/// outside of. Six months is 180 days — the window this app already kept —
+/// and a year is 365 days, the same length the window looks ahead. Anything
+/// that is not an offered span reads as the two-year default.
+pub(crate) fn history_window(now_ms: i64, months: i64) -> (i64, i64) {
+    let ahead = now_ms + 365 * DAY_MS;
+    let back_days: i64 = match months {
+        6 => 180,
+        24 => 2 * 365,
+        60 => 5 * 365,
+        0 => return (EVERYTHING_START_MS, ahead),
+        _ => 2 * 365,
+    };
+    (now_ms - back_days * DAY_MS, ahead)
+}
+
+/// Whether a stored window is no wider than the recent six months.
+///
+/// A save can then resync the way it did before a longer span existed, at
+/// the same cost. Compared by width, so a window recorded yesterday is still
+/// six months after both edges have slid a day.
+pub(crate) fn window_within_recent(start_ms: i64, end_ms: i64, now_ms: i64) -> bool {
+    let (near_start, near_end) = history_window(now_ms, SPAN_6_MONTHS);
+    end_ms.saturating_sub(start_ms) <= near_end.saturating_sub(near_start).saturating_add(DAY_MS)
+}
+
+/// What the user is told when a history span is not one of the four.
+pub(crate) const HISTORY_SPAN_UNOFFERED: &str =
+    "Choose 6 months, 2 years, 5 years, or everything.";
+
+/// One-off rows, and exceptions whose occurrence is also outside the window,
+/// that end at or before `window_start_ms`. Series masters stay: their own
+/// dates say nothing about later occurrences, and a shorter span must not
+/// throw a series away. An exception whose original slot is still inside the
+/// window stays too — it is what stops the master expanding a ghost there.
+async fn forget_events_ending_before(
+    conn: &mut sqlx::SqliteConnection,
+    window_start_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM events
+          WHERE recurrence IS NULL
+            AND end_utc <= ?1
+            AND (recurring_event_id IS NULL
+                 OR original_start_utc IS NULL
+                 OR original_start_utc < ?1)",
+    )
+    .bind(window_start_ms)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// Display grouping is opt-in and never changes the stored calendar events.
 pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
     read(pool, COMBINE_IDENTICAL_EVENTS_KEY).await.as_deref() == Some("1")
@@ -1489,6 +1574,9 @@ pub enum Setting {
     /// Refused below the floor. `sync_loop::interval_ms` still clamps on the
     /// way *out*, because a row edited by hand never passed through here.
     SyncIntervalMs(i64),
+    /// One of [`HISTORY_SPANS`]. Anything else is refused, and a row that is
+    /// not one of them reads back as two years.
+    HistorySpan(i64),
     /// The convenience clock beside the real one; `None`/blank turns it off.
     /// Validated against jiff, as the display zone is. **No restart**, unlike
     /// the display zone (which keeps its own command for that reason):
@@ -1687,6 +1775,40 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
                 return Err(refused(INTERVAL_TOO_SHORT));
             }
             write(pool, SYNC_INTERVAL_KEY, &ms.to_string()).await?;
+        }
+        S::HistorySpan(months) => {
+            if !HISTORY_SPANS.contains(months) {
+                return Err(refused(HISTORY_SPAN_UNOFFERED));
+            }
+            let previous = history_months(pool).await;
+            let now = crate::now_ms();
+            let new_start = history_window(now, *months).0;
+            let old_start = history_window(now, previous).0;
+            let stored = months.to_string();
+            let mut tx = pool.begin().await?;
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(HISTORY_SPAN_KEY)
+            .bind(&stored)
+            .execute(&mut *tx)
+            .await?;
+            // Shorter, and only then: the rows that now end before the window
+            // will never be fetched again, so reap will not reach them either.
+            // The recorded start moves forward with them, so choosing a longer
+            // span later is seen as a window that still has to be fetched.
+            if new_start > old_start {
+                forget_events_ending_before(&mut tx, new_start).await?;
+                sqlx::query(
+                    "UPDATE sync_state SET window_start = ?1
+                      WHERE window_start IS NOT NULL AND window_start < ?1",
+                )
+                .bind(new_start)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
         }
         S::SecondTimezone(tz) => {
             let tz = validate_second_timezone(tz.clone()).map_err(SetError::Refused)?;
@@ -1888,6 +2010,16 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
         S::QuitOnClose(on) => state.quit_on_close.store(*on, std::sync::atomic::Ordering::Relaxed),
         S::StartOnLogin(mode) => crate::tray::apply_autostart(app, state.demo, mode.registers()),
         S::InterfaceScalePercent(percent) => apply_interface_scale(app, *percent),
+        S::HistorySpan(months) => {
+            let previous = state.history_months.swap(*months, std::sync::atomic::Ordering::Relaxed);
+            let now = crate::now_ms();
+            // Wider only. Saving the same span, or a shorter one, must not
+            // download the history again — the shorter one already dropped
+            // what fell outside it.
+            if history_window(now, *months).0 < history_window(now, previous).0 {
+                crate::sync_loop::request_now(app);
+            }
+        }
         _ => {}
     }
     if setting.shows_on_menu_surfaces() {
@@ -1926,6 +2058,7 @@ mod tests {
             serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{v}: {e}"))
         };
         assert!(matches!(read(json!({"key": "syncIntervalMs", "value": 120000})), Setting::SyncIntervalMs(120_000)));
+        assert!(matches!(read(json!({"key": "historySpan", "value": 60})), Setting::HistorySpan(60)));
         assert!(matches!(read(json!({"key": "secondTimezone", "value": null})), Setting::SecondTimezone(None)));
         assert!(matches!(read(json!({"key": "defaultCalendarId", "value": 4})), Setting::DefaultCalendarId(Some(4))));
         assert!(matches!(read(json!({"key": "fallbackReminderMinutes", "value": [10]})), Setting::FallbackReminderMinutes(ref m) if m == &[10]));
@@ -2073,6 +2206,7 @@ mod tests {
     async fn absent_settings_read_as_their_defaults() {
         let s = read_settings(&pool().await).await;
         assert_eq!(s.sync_interval_ms, crate::sync_loop::DEFAULT_INTERVAL_MS);
+        assert_eq!(s.history_span, DEFAULT_HISTORY_MONTHS, "a fresh install keeps two years");
         assert!(s.notifications_enabled, "reminders must be on until turned off");
         assert!(s.task_notifications_enabled, "and so must a task's own announcement (#137)");
         assert_eq!(s.min_sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
@@ -2253,6 +2387,190 @@ mod tests {
         assert_eq!(read(&p, AUTOSTART_KEY).await, None);
         assert_eq!(start_on_login(&p).await, StartOnLogin::Off);
         assert!(!read_settings(&p).await.start_on_login_asked);
+    }
+
+    /// The four spans the form offers, and nothing else. A stray row reads as
+    /// two years, the fresh-install default — a value this version did not
+    /// write lands on the default rather than on a wider sync.
+    #[tokio::test]
+    async fn history_span_is_one_of_the_offered_values_and_a_stray_reads_as_two_years() {
+        let p = pool().await;
+        assert_eq!(HISTORY_SPANS, [6, 24, 60, 0]);
+        assert_eq!(read_settings(&p).await.history_span, 24, "absent is two years");
+
+        for months in HISTORY_SPANS {
+            let s = set(&p, Setting::HistorySpan(months)).await.unwrap();
+            assert_eq!(s.history_span, months);
+            assert_eq!(read(&p, HISTORY_SPAN_KEY).await, Some(months.to_string()));
+        }
+
+        let err = set(&p, Setting::HistorySpan(12)).await.unwrap_err();
+        assert_eq!(err, HISTORY_SPAN_UNOFFERED);
+        assert_eq!(read_settings(&p).await.history_span, 0, "a refusal stores nothing");
+
+        write(&p, HISTORY_SPAN_KEY, "999").await.unwrap();
+        assert_eq!(read_settings(&p).await.history_span, 24, "a stray row is the default");
+        write(&p, HISTORY_SPAN_KEY, "forever").await.unwrap();
+        assert_eq!(read_settings(&p).await.history_span, 24);
+    }
+
+    /// Each span's window. Ahead is a year for all of them. Six months stays
+    /// 180 days, which is the window sync already kept; everything starts at
+    /// 1900 and does not slide, while its end still does.
+    #[test]
+    fn each_history_span_has_one_window() {
+        const DAY: i64 = 24 * 3_600_000;
+        let now = 1_786_341_600_000_i64; // Mon 10 Aug 2026 09:00 Europe/Sofia
+        assert_eq!(history_window(now, 6), (now - 180 * DAY, now + 365 * DAY));
+        assert_eq!(history_window(now, 24), (now - 2 * 365 * DAY, now + 365 * DAY));
+        assert_eq!(history_window(now, 60), (now - 5 * 365 * DAY, now + 365 * DAY));
+        let (from, to) = history_window(now, 0);
+        assert_eq!(to, now + 365 * DAY, "ahead stays a year");
+        assert_eq!(omacal_sync::to_rfc3339(from), "1900-01-01T00:00:00Z");
+        assert_eq!(history_window(now, 0).0, history_window(now + 400 * DAY, 0).0, "the start does not slide");
+        assert_ne!(history_window(now, 0).1, history_window(now + 2 * DAY, 0).1, "the end still does");
+        assert_eq!(history_window(now, 999), history_window(now, 24), "a stray span is two years");
+        assert!(history_window(now, 6).0 < now && now < history_window(now, 6).1);
+    }
+
+    /// A window recorded yesterday is still the recent six months: the edges
+    /// slide, the width does not. Two years, and everything, are wider.
+    #[test]
+    fn a_six_month_window_is_not_wider_than_the_recent_one() {
+        const DAY: i64 = 24 * 3_600_000;
+        let now = 1_786_341_600_000_i64;
+        let (start, end) = history_window(now, 6);
+        assert!(window_within_recent(start, end, now));
+        let yesterday = now - DAY;
+        let (start, end) = history_window(yesterday, 6);
+        assert!(window_within_recent(start, end, now), "recorded yesterday, still six months wide");
+        let (start, end) = history_window(now, 24);
+        assert!(!window_within_recent(start, end, now), "two years is wider");
+        let (start, end) = history_window(now, 0);
+        assert!(!window_within_recent(start, end, now), "everything is wider");
+    }
+
+    /// Shortening the span drops one-off rows that end before the new window,
+    /// and leaves series masters and exceptions whose occurrence is still
+    /// inside it. A longer span deletes nothing: those rows are what the next
+    /// fetch is for.
+    #[tokio::test]
+    async fn a_shorter_span_drops_what_now_falls_outside_it() {
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&p).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
+        )
+        .execute(&p).await.unwrap();
+
+        let now = crate::now_ms();
+        let edge = history_window(now, SPAN_6_MONTHS).0;
+        let day = 24 * 3_600_000;
+        let insert = |id: &str, start: i64, end: i64, recurrence: Option<&str>, master: Option<&str>, original: Option<i64>| {
+            let id = id.to_string();
+            let recurrence = recurrence.map(str::to_string);
+            let master = master.map(str::to_string);
+            let p = p.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz,
+                                         updated_at, recurrence, recurring_event_id, original_start_utc)
+                     VALUES (1, ?1, ?2, ?3, 'UTC', 'UTC', 0, ?4, ?5, ?6)",
+                )
+                .bind(&id)
+                .bind(start)
+                .bind(end)
+                .bind(recurrence)
+                .bind(master)
+                .bind(original)
+                .execute(&p)
+                .await
+                .unwrap();
+            }
+        };
+        insert("old", edge - 3 * day, edge - day, None, None, None).await;
+        insert("recent", edge + day, edge + 2 * day, None, None, None).await;
+        insert("series", edge - 10 * day, edge - 9 * day, Some("RRULE:FREQ=DAILY"), None, None).await;
+        // Moved out of the window, but its original slot is still inside:
+        // dropping it would let the master paint a ghost there.
+        insert("kept-exception", edge - 3 * day, edge - day, None, Some("series"), Some(edge + day)).await;
+        insert("old-exception", edge - 4 * day, edge - 2 * day, None, Some("series"), Some(edge - 3 * day)).await;
+        insert("shown-exception", edge + day, edge + 2 * day, None, Some("series"), Some(edge - 5 * day)).await;
+
+        let ancient = history_window(now, 0).0;
+        sqlx::query(
+            "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+             VALUES (1, 'ctag', ?1, ?2)",
+        )
+        .bind(ancient)
+        .bind(now + 365 * day)
+        .execute(&p)
+        .await
+        .unwrap();
+
+        // Wider than the fresh default: nothing to drop.
+        set(&p, Setting::HistorySpan(0)).await.unwrap();
+        let ids = || async {
+            sqlx::query_scalar::<_, String>("SELECT google_id FROM events ORDER BY google_id")
+                .fetch_all(&p)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            ids().await,
+            ["kept-exception", "old", "old-exception", "recent", "series", "shown-exception"],
+            "lengthening the span deletes nothing"
+        );
+
+        set(&p, Setting::HistorySpan(SPAN_6_MONTHS)).await.unwrap();
+        assert_eq!(
+            ids().await,
+            ["kept-exception", "recent", "series", "shown-exception"],
+            "one-offs and exceptions that fall entirely outside go; masters and in-window exceptions stay"
+        );
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        let edge_now = history_window(crate::now_ms(), SPAN_6_MONTHS).0;
+        assert!(recorded >= edge - day && recorded <= edge_now + day, "the recorded start moved forward: {recorded}");
+    }
+
+    /// Migration 0019, replayed against the databases it meets: an install in
+    /// use keeps six months, a fresh one has no row and reads as two years,
+    /// and a span already chosen is left alone.
+    #[tokio::test]
+    async fn migration_0019_keeps_six_months_for_an_install_already_in_use() {
+        const SQL: &str = include_str!(
+            "../../crates/omacal-store/migrations/0019_history_span_for_existing_installs.sql"
+        );
+        async fn replay(p: SqlitePool) -> SqlitePool {
+            sqlx::raw_sql(SQL).execute(&p).await.unwrap();
+            p
+        }
+
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&p).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
+        )
+        .execute(&p).await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(read(&p, HISTORY_SPAN_KEY).await.as_deref(), Some("6"));
+        assert_eq!(history_months(&p).await, SPAN_6_MONTHS, "an existing install stays at six months");
+
+        let p = replay(pool().await).await;
+        assert_eq!(read(&p, HISTORY_SPAN_KEY).await, None, "a fresh database gets no row");
+        assert_eq!(history_months(&p).await, DEFAULT_HISTORY_MONTHS);
+
+        let p = pool().await;
+        write(&p, HISTORY_SPAN_KEY, "60").await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(history_months(&p).await, 60, "a span already chosen stands");
     }
 
     /// The two questions the mode answers, which are deliberately not the

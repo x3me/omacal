@@ -17,9 +17,9 @@
   import { listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
     getSettings, setSetting, setDisplayTimezone, setWeatherLocation, listTimezones,
-    minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, APPEARANCE_OPTIONS,
-    WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings, type Appearance,
-    type StartOnLogin, type WeekViewDays, type WindowFrame,
+    minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, HISTORY_SPAN_OPTIONS,
+    APPEARANCE_OPTIONS, WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings,
+    type Appearance, type HistorySpan, type StartOnLogin, type WeekViewDays, type WindowFrame,
   } from './settings';
   import { formatClock, type TimeFormat } from './timefmt';
   import ThemePicker from './ThemePicker.svelte';
@@ -860,6 +860,17 @@
     }
   }
 
+  async function saveHistorySpan(months: HistorySpan) {
+    note = null;
+    try {
+      settings = await setSetting('historySpan', months);
+      onsettingschange?.(settings);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function saveStartOnLogin(mode: StartOnLogin) {
     note = null;
     try {
@@ -1021,6 +1032,28 @@
       <p class="hint">
         Not less than {floorMinutes} minute{floorMinutes === 1 ? '' : 's'} — Google's quota is
         finite, and a desktop app has no business polling faster.
+      </p>
+
+      <div class="row section-start">
+        <label class="lab" for="history-span">Keep history</label>
+        <div class="inline">
+          <select
+            id="history-span"
+            disabled={!settings}
+            value={settings?.historySpan ?? 24}
+            onchange={(e) => saveHistorySpan(Number((e.currentTarget as HTMLSelectElement).value) as HistorySpan)}
+          >
+            {#each HISTORY_SPAN_OPTIONS as [months, label] (months)}
+              <option value={months}>{label}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+      <p class="hint">
+        How far back events are fetched. A year ahead is kept either way.
+        A longer span downloads more of a calendar when it changes, which
+        takes longer on a large one. Saving an event refetches the recent
+        months and that event, not the whole span.
       </p>
 
       <div class="row section-start">
