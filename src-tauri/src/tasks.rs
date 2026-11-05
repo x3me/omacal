@@ -936,6 +936,7 @@ mod tests {
             quit_on_close: Default::default(),
             open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS),
+            sync_gate: std::sync::Arc::new(crate::sync_loop::SyncGate::new()),
         }
     }
 

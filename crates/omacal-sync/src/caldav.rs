@@ -213,6 +213,7 @@ pub async fn sync_caldav_calendar(
         window_start_ms,
         window_end_ms,
         true,
+        true,
         now_ms,
     )
     .await
@@ -231,6 +232,11 @@ pub async fn sync_caldav_calendar(
 /// every series that occurs in it. A resync sets it false. Its report never
 /// asked about a series that ended earlier, and deleting those masters would
 /// throw away the history a longer span exists to keep.
+///
+/// `record_ctag` is false when a save on a longer span found the calendar
+/// had already changed before the write. The narrow report is still applied,
+/// but the stored ctag stays, so the next sync does the full pass and can
+/// reap a series that report never asked about.
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_caldav_fetch(
     pool: &SqlitePool,
@@ -243,6 +249,7 @@ pub async fn sync_caldav_fetch(
     record_start_ms: i64,
     record_end_ms: i64,
     masters_in_reach: bool,
+    record_ctag: bool,
     now_ms: i64,
 ) -> Result<SyncOutcome, CalDavError> {
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
@@ -273,6 +280,10 @@ pub async fn sync_caldav_fetch(
     // what the window has newly reached, so the window check gets a say
     // before the short-circuit. See `crate::window_needs_refetch`.
     let ctag = client.ctag(collection_url).await?;
+    // A save that raced another change keeps the ctag it already had. This
+    // probe is the one after the write, and storing that would tell the next
+    // sync nothing had changed.
+    let token = if record_ctag { &ctag } else { &stored_ctag };
     // `supports_events` gates the check, because the window write below is
     // inside that branch: a tasks-only collection never records one, so an
     // ungated check would read "no window" for ever and refetch its tasks on
@@ -373,7 +384,7 @@ pub async fn sync_caldav_fetch(
                  window_end = excluded.window_end",
         )
         .bind(calendar_id)
-        .bind(&ctag)
+        .bind(token)
         .bind(record_start_ms)
         .bind(record_end_ms)
         .execute(&mut *tx)
@@ -445,7 +456,7 @@ pub async fn sync_caldav_fetch(
                      window_start = excluded.window_start, window_end = excluded.window_end",
             )
             .bind(calendar_id)
-            .bind(&ctag)
+            .bind(token)
             .bind(record_start_ms)
             .bind(record_end_ms)
             .execute(pool)

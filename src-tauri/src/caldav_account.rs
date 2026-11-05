@@ -240,9 +240,17 @@ pub(crate) async fn sync_account(
             .fetch_optional(pool)
             .await
             .map_err(anyhow::Error::from)?;
-            let (record_start, record_end) = match recorded {
-                Some((Some(start), Some(end))) => (start, end),
-                _ => (window_start_ms, window_end_ms),
+            // A long recorded window must not have this follow-up stamp the
+            // ctag. The save's own resync already stored it when that was
+            // safe; storing it here after a change that landed before the
+            // save would hide that change from the next full sync.
+            let (record_start, record_end, record_ctag) = match recorded {
+                Some((Some(start), Some(end))) => (
+                    start,
+                    end,
+                    crate::settings::window_within_recent(start, end, now),
+                ),
+                _ => (window_start_ms, window_end_ms, true),
             };
             omacal_sync::caldav::sync_caldav_fetch(
                 pool,
@@ -255,6 +263,7 @@ pub(crate) async fn sync_account(
                 record_start,
                 record_end,
                 false,
+                record_ctag,
                 now,
             )
             .await?
@@ -429,5 +438,8 @@ mod tests {
         let kept: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(kept, history, "the recorded span stays the history already fetched");
+        let token: String = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(token, "before-put", "a wider window does not treat the post-write ctag as a full sync");
     }
 }

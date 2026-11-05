@@ -119,11 +119,12 @@ pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events"
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
 const HISTORY_SPAN_KEY: &str = "history_span_months";
 /// How far back sync keeps events, in months. `0` is everything (back to
-/// 1900). Ahead is a year for every one of them. Absent and stray rows read
-/// as [`DEFAULT_HISTORY_MONTHS`]: six months, the window sync already kept,
-/// so nothing changes until someone picks a longer span.
+/// 1900). Ahead is a year for every one of them. A fresh install reads an
+/// absent row as [`DEFAULT_HISTORY_MONTHS`]; migration 0019 writes
+/// [`SPAN_6_MONTHS`] where a calendar already exists, so an update does not
+/// lengthen a calendar that was syncing six months.
 pub(crate) const HISTORY_SPANS: [i64; 4] = [6, 24, 60, 0];
-pub(crate) const DEFAULT_HISTORY_MONTHS: i64 = 6;
+pub(crate) const DEFAULT_HISTORY_MONTHS: i64 = 24;
 /// Six months: 180 days, the window sync kept before this setting existed,
 /// and the recent slice a save refetches instead of the whole span.
 pub(crate) const SPAN_6_MONTHS: i64 = 6;
@@ -541,7 +542,8 @@ pub struct AppSettings {
     pub min_sync_interval_ms: i64,
     /// How far back events are kept, in months. One of [`HISTORY_SPANS`]:
     /// 6, 24 (two years), 60 (five years), or 0 for everything back to 1900.
-    /// Ahead is a year either way. Absent reads as six months.
+    /// Ahead is a year either way. Absent reads as two years; an install
+    /// that already has a calendar keeps six (migration 0019).
     pub history_span: i64,
     /// Whether Day, Week and Month draw as a list rather than a grid — the
     /// filmstrip toggle (filmstrip spec §4).
@@ -1498,7 +1500,7 @@ const EVERYTHING_START_MS: i64 = -2_208_988_800_000;
 /// The window sync fetches for `months`, and the one the year views hatch
 /// outside of. Six months is 180 days — the window this app already kept —
 /// and a year is 365 days, the same length the window looks ahead. Anything
-/// that is not an offered span reads as six months.
+/// that is not an offered span reads as the two-year default.
 pub(crate) fn history_window(now_ms: i64, months: i64) -> (i64, i64) {
     let ahead = now_ms + 365 * DAY_MS;
     let back_days: i64 = match months {
@@ -1506,9 +1508,19 @@ pub(crate) fn history_window(now_ms: i64, months: i64) -> (i64, i64) {
         24 => 2 * 365,
         60 => 5 * 365,
         0 => return (EVERYTHING_START_MS, ahead),
-        _ => 180,
+        _ => 2 * 365,
     };
     (now_ms - back_days * DAY_MS, ahead)
+}
+
+/// Whether a stored window is no wider than the recent six months.
+///
+/// A save can then resync the way it did before a longer span existed, at
+/// the same cost. Compared by width, so a window recorded yesterday is still
+/// six months after both edges have slid a day.
+pub(crate) fn window_within_recent(start_ms: i64, end_ms: i64, now_ms: i64) -> bool {
+    let (near_start, near_end) = history_window(now_ms, SPAN_6_MONTHS);
+    end_ms.saturating_sub(start_ms) <= near_end.saturating_sub(near_start).saturating_add(DAY_MS)
 }
 
 /// What the user is told when a history span is not one of the four.
@@ -1563,7 +1575,7 @@ pub enum Setting {
     /// way *out*, because a row edited by hand never passed through here.
     SyncIntervalMs(i64),
     /// One of [`HISTORY_SPANS`]. Anything else is refused, and a row that is
-    /// not one of them reads back as six months.
+    /// not one of them reads back as two years.
     HistorySpan(i64),
     /// The convenience clock beside the real one; `None`/blank turns it off.
     /// Validated against jiff, as the display zone is. **No restart**, unlike
@@ -2194,7 +2206,7 @@ mod tests {
     async fn absent_settings_read_as_their_defaults() {
         let s = read_settings(&pool().await).await;
         assert_eq!(s.sync_interval_ms, crate::sync_loop::DEFAULT_INTERVAL_MS);
-        assert_eq!(s.history_span, DEFAULT_HISTORY_MONTHS, "a fresh install keeps six months");
+        assert_eq!(s.history_span, DEFAULT_HISTORY_MONTHS, "a fresh install keeps two years");
         assert!(s.notifications_enabled, "reminders must be on until turned off");
         assert!(s.task_notifications_enabled, "and so must a task's own announcement (#137)");
         assert_eq!(s.min_sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
@@ -2378,13 +2390,13 @@ mod tests {
     }
 
     /// The four spans the form offers, and nothing else. A stray row reads as
-    /// six months — a value this version did not write lands on the window
-    /// sync already kept, rather than on a wider one.
+    /// two years, the fresh-install default — a value this version did not
+    /// write lands on the default rather than on a wider sync.
     #[tokio::test]
-    async fn history_span_is_one_of_the_offered_values_and_a_stray_reads_as_six_months() {
+    async fn history_span_is_one_of_the_offered_values_and_a_stray_reads_as_two_years() {
         let p = pool().await;
         assert_eq!(HISTORY_SPANS, [6, 24, 60, 0]);
-        assert_eq!(read_settings(&p).await.history_span, 6, "absent is six months");
+        assert_eq!(read_settings(&p).await.history_span, 24, "absent is two years");
 
         for months in HISTORY_SPANS {
             let s = set(&p, Setting::HistorySpan(months)).await.unwrap();
@@ -2397,9 +2409,9 @@ mod tests {
         assert_eq!(read_settings(&p).await.history_span, 0, "a refusal stores nothing");
 
         write(&p, HISTORY_SPAN_KEY, "999").await.unwrap();
-        assert_eq!(read_settings(&p).await.history_span, 6, "a stray row is the default");
+        assert_eq!(read_settings(&p).await.history_span, 24, "a stray row is the default");
         write(&p, HISTORY_SPAN_KEY, "forever").await.unwrap();
-        assert_eq!(read_settings(&p).await.history_span, 6);
+        assert_eq!(read_settings(&p).await.history_span, 24);
     }
 
     /// Each span's window. Ahead is a year for all of them. Six months stays
@@ -2417,8 +2429,25 @@ mod tests {
         assert_eq!(omacal_sync::to_rfc3339(from), "1900-01-01T00:00:00Z");
         assert_eq!(history_window(now, 0).0, history_window(now + 400 * DAY, 0).0, "the start does not slide");
         assert_ne!(history_window(now, 0).1, history_window(now + 2 * DAY, 0).1, "the end still does");
-        assert_eq!(history_window(now, 999), history_window(now, 6), "a stray span is six months");
+        assert_eq!(history_window(now, 999), history_window(now, 24), "a stray span is two years");
         assert!(history_window(now, 6).0 < now && now < history_window(now, 6).1);
+    }
+
+    /// A window recorded yesterday is still the recent six months: the edges
+    /// slide, the width does not. Two years, and everything, are wider.
+    #[test]
+    fn a_six_month_window_is_not_wider_than_the_recent_one() {
+        const DAY: i64 = 24 * 3_600_000;
+        let now = 1_786_341_600_000_i64;
+        let (start, end) = history_window(now, 6);
+        assert!(window_within_recent(start, end, now));
+        let yesterday = now - DAY;
+        let (start, end) = history_window(yesterday, 6);
+        assert!(window_within_recent(start, end, now), "recorded yesterday, still six months wide");
+        let (start, end) = history_window(now, 24);
+        assert!(!window_within_recent(start, end, now), "two years is wider");
+        let (start, end) = history_window(now, 0);
+        assert!(!window_within_recent(start, end, now), "everything is wider");
     }
 
     /// Shortening the span drops one-off rows that end before the new window,
@@ -2507,6 +2536,41 @@ mod tests {
             .unwrap();
         let edge_now = history_window(crate::now_ms(), SPAN_6_MONTHS).0;
         assert!(recorded >= edge - day && recorded <= edge_now + day, "the recorded start moved forward: {recorded}");
+    }
+
+    /// Migration 0019, replayed against the databases it meets: an install in
+    /// use keeps six months, a fresh one has no row and reads as two years,
+    /// and a span already chosen is left alone.
+    #[tokio::test]
+    async fn migration_0019_keeps_six_months_for_an_install_already_in_use() {
+        const SQL: &str = include_str!(
+            "../../crates/omacal-store/migrations/0019_history_span_for_existing_installs.sql"
+        );
+        async fn replay(p: SqlitePool) -> SqlitePool {
+            sqlx::raw_sql(SQL).execute(&p).await.unwrap();
+            p
+        }
+
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&p).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
+        )
+        .execute(&p).await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(read(&p, HISTORY_SPAN_KEY).await.as_deref(), Some("6"));
+        assert_eq!(history_months(&p).await, SPAN_6_MONTHS, "an existing install stays at six months");
+
+        let p = replay(pool().await).await;
+        assert_eq!(read(&p, HISTORY_SPAN_KEY).await, None, "a fresh database gets no row");
+        assert_eq!(history_months(&p).await, DEFAULT_HISTORY_MONTHS);
+
+        let p = pool().await;
+        write(&p, HISTORY_SPAN_KEY, "60").await.unwrap();
+        let p = replay(p).await;
+        assert_eq!(history_months(&p).await, 60, "a span already chosen stands");
     }
 
     /// The two questions the mode answers, which are deliberately not the

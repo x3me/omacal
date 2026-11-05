@@ -9,9 +9,12 @@
 //! `PreconditionFailed`, never both.
 //!
 //! That resync asks about the recent window, plus the saved event when it
-//! sits further back. A long history must not be downloaded again on every
-//! save, and the series that ended before the recent window must not be
-//! reaped by a report that never asked about them.
+//! sits further back, once the calendar's recorded window is wider than
+//! those six months. A window no wider than that is resynced in full: it
+//! costs the same as before and still sweeps series. On a longer span the
+//! ctag is read before the write. If it still matches, the narrow resync
+//! may store the new one. If it does not, the stored ctag is left so the
+//! next sync does the full pass.
 //!
 //! Scope vocabulary maps onto ICS structure rather than onto Google calls:
 //! - **all** (and any edit of a one-off): rewrite the master component in
@@ -36,7 +39,7 @@
 //! the iTIP REPLY to the organizer is the server's job (RFC 6638), not
 //! omacal's.
 
-use omacal_caldav::{CalDavError, EventWrite, WriteTime};
+use omacal_caldav::{CalDavClient, CalDavError, EventWrite, WriteTime};
 use omacal_store::StoredEvent;
 
 use crate::write::{EventFields, When};
@@ -261,17 +264,68 @@ pub(crate) fn resync_ranges(now_ms: i64, spans: &[(i64, i64)]) -> Vec<(i64, i64)
     ranges
 }
 
-/// Post-write reconciliation: the recent window, and the saved event when it
-/// lies outside that, applied through the read path. The calendar's recorded
-/// span is left as it was, and series masters outside the reports are not
-/// reaped. `removed_uid` is a resource this call just deleted: a narrow
-/// report does not treat every master as in reach, so the uid is dropped
-/// explicitly or an old series would stay.
+/// Whether the resync after this write may store the ctag it then reads.
+///
+/// Called before the write. A recorded window no wider than the recent six
+/// months is resynced in full, so the answer does not matter. A longer one
+/// may store the new ctag only when the one read here still matches the
+/// stored one: nothing else has changed, and the narrow report is the whole
+/// of it. A probe that fails counts as a mismatch, which leaves the stored
+/// ctag for the next full sync.
+async fn may_store_ctag(
+    state: &AppState,
+    client: &CalDavClient,
+    calendar_id: i64,
+    collection_url: &str,
+) -> bool {
+    let recorded: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT window_start, window_end FROM sync_state WHERE calendar_id = ?1",
+    )
+    .bind(calendar_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((Some(start), Some(end))) = recorded else {
+        return true;
+    };
+    if crate::settings::window_within_recent(start, end, crate::now_ms()) {
+        return true;
+    }
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT sync_token FROM sync_state WHERE calendar_id = ?1",
+    )
+    .bind(calendar_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+    let Some(stored) = stored else {
+        return false;
+    };
+    match client.ctag(collection_url).await {
+        Ok(Some(current)) => current == stored,
+        _ => false,
+    }
+}
+
+/// Post-write reconciliation. A recorded window no wider than the recent
+/// six months is fetched in full, masters included, which is what a save
+/// did before a longer span existed. A wider window asks only about the
+/// recent months and the saved event, and leaves series it did not ask
+/// about. `store_ctag` is that pre-write comparison: when it is false the
+/// stored ctag is left, so the next sync does the full pass.
+///
+/// `removed_uid` is a resource this call just deleted. A narrow report does
+/// not treat every master as in reach, so the uid is dropped explicitly or
+/// an old series would stay.
 async fn resync(
     state: &AppState,
     calendar_id: i64,
     spans: &[(i64, i64)],
     removed_uid: Option<&str>,
+    store_ctag: bool,
 ) -> anyhow::Result<()> {
     let (client, collection_url) =
         crate::caldav_account::client_for_calendar(state, calendar_id).await?;
@@ -289,44 +343,53 @@ async fn resync(
     .fetch_optional(&state.pool)
     .await?;
 
-    // Nothing fetched yet: the ordinary sync, which may reap series the
-    // window does not contain. After that, a save only refreshes the recent
-    // window and the event it touched.
-    match recorded {
+    // Nothing fetched yet: the ordinary sync, over whatever span is
+    // configured. A window no wider than the recent six months is the same
+    // full resync a save used to do, so a series deleted elsewhere is swept.
+    // Wider than that, only the recent window and the saved event, and the
+    // new ctag only when nothing else had changed before the write.
+    let full = match recorded {
         Some((Some(start), Some(end))) => {
-            let ranges = resync_ranges(now, spans);
-            omacal_sync::caldav::sync_caldav_fetch(
-                &state.pool,
-                &client,
-                calendar_id,
-                &collection_url,
-                supports_events != 0,
-                supports_tasks != 0,
-                &ranges,
-                start,
-                end,
-                false,
-                now,
-            )
-            .await
-            .map_err(friendly)?;
+            if crate::settings::window_within_recent(start, end, now) {
+                let (ws, we) = crate::settings::history_window(now, crate::settings::SPAN_6_MONTHS);
+                Some((ws, we))
+            } else {
+                let ranges = resync_ranges(now, spans);
+                omacal_sync::caldav::sync_caldav_fetch(
+                    &state.pool,
+                    &client,
+                    calendar_id,
+                    &collection_url,
+                    supports_events != 0,
+                    supports_tasks != 0,
+                    &ranges,
+                    start,
+                    end,
+                    false,
+                    store_ctag,
+                    now,
+                )
+                .await
+                .map_err(friendly)?;
+                None
+            }
         }
-        _ => {
-            let (ws, we) = crate::synced_window(state, now);
-            omacal_sync::caldav::sync_caldav_calendar(
-                &state.pool,
-                &client,
-                calendar_id,
-                &collection_url,
-                supports_events != 0,
-                supports_tasks != 0,
-                ws,
-                we,
-                now,
-            )
-            .await
-            .map_err(friendly)?;
-        }
+        _ => Some(crate::synced_window(state, now)),
+    };
+    if let Some((ws, we)) = full {
+        omacal_sync::caldav::sync_caldav_calendar(
+            &state.pool,
+            &client,
+            calendar_id,
+            &collection_url,
+            supports_events != 0,
+            supports_tasks != 0,
+            ws,
+            we,
+            now,
+        )
+        .await
+        .map_err(friendly)?;
     }
     if let Some(uid) = removed_uid {
         sqlx::query(
@@ -381,11 +444,12 @@ pub(crate) async fn create(
     };
     let ics = omacal_caldav::new_event_ics(&ev, now_ts());
     let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
+    let store_ctag = may_store_ctag(state, &client, calendar_id, &collection_url).await;
     client.put(&href, &ics, None).await.map_err(friendly)?;
 
     created_but(
         async {
-            resync(state, calendar_id, &[(start_ms, end_ms)], None).await?;
+            resync(state, calendar_id, &[(start_ms, end_ms)], None, store_ctag).await?;
             let id = row_id_by_uid(state, calendar_id, &uid).await?;
             crate::events::event_detail_impl(state, id).await
         }
@@ -450,7 +514,8 @@ pub(crate) async fn update(
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
     let master = master_of(state, &viewed).await?;
-    let (client, _) = crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
+    let (client, collection_url) =
+        crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
     let (href, raw) = resource_of(state, master.id).await?;
     let uid = master.google_id.clone();
     let is_series = master.recurrence.is_some();
@@ -534,6 +599,7 @@ pub(crate) async fn update(
             (out, None, format!("{uid}#{occurrence_start_ms}"))
         };
 
+    let store_ctag = may_store_ctag(state, &client, master.calendar_id, &collection_url).await;
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
     if let Some((new_href, ics)) = follow_up {
         client.put(&new_href, &ics, None).await.map_err(friendly)?;
@@ -550,7 +616,7 @@ pub(crate) async fn update(
             if is_series && scope != "all" {
                 spans.push((occurrence_start_ms, occurrence_start_ms.saturating_add(dur)));
             }
-            resync(state, master.calendar_id, &spans, None).await?;
+            resync(state, master.calendar_id, &spans, None, store_ctag).await?;
             let row = row_id_by_uid(state, master.calendar_id, &detail_uid).await;
             // An exception the resync collapsed away (or a row the server
             // renamed) falls back to the master — the popover shows
@@ -602,7 +668,8 @@ pub(crate) async fn respond(
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
     let master = master_of(state, &viewed).await?;
-    let (client, _) = crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
+    let (client, collection_url) =
+        crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
     let (href, raw) = resource_of(state, master.id).await?;
     let uid = master.google_id.clone();
     let is_series = master.recurrence.is_some();
@@ -630,13 +697,14 @@ pub(crate) async fn respond(
         )
     })?;
 
+    let store_ctag = may_store_ctag(state, &client, master.calendar_id, &collection_url).await;
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
     let dur = (viewed.end_utc - viewed.start_utc).max(0);
     let mut spans = vec![(master.start_utc, master.end_utc), (viewed.start_utc, viewed.end_utc)];
     if is_series && scope != "all" {
         spans.push((occurrence_start_ms, occurrence_start_ms.saturating_add(dur)));
     }
-    resync(state, master.calendar_id, &spans, None).await?;
+    resync(state, master.calendar_id, &spans, None, store_ctag).await?;
     let row = match row_id_by_uid(state, master.calendar_id, &detail_uid).await {
         Ok(r) => r,
         Err(_) => row_id_by_uid(state, master.calendar_id, &uid).await?,
@@ -682,7 +750,8 @@ pub(crate) async fn move_to(
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
     let master = master_of(state, &viewed).await?;
-    let (client, _) = crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
+    let (client, source_url) =
+        crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
     // The destination's collection URL, and its read-only refusal: one call
     // does both, so a move onto a calendar that cannot be written to is turned
     // down by the same rule an edit there would be.
@@ -691,6 +760,8 @@ pub(crate) async fn move_to(
     let (href, raw) = resource_of(state, master.id).await?;
     let uid = master.google_id.clone();
     let destination = resource_href(&collection_url, &uid);
+    let source_ctag = may_store_ctag(state, &client, master.calendar_id, &source_url).await;
+    let dest_ctag = may_store_ctag(state, &client, target_calendar_id, &collection_url).await;
 
     // `None` rather than an etag: this is a create in the destination, so
     // `If-None-Match: *` — a UID that somehow already exists there fails
@@ -707,8 +778,8 @@ pub(crate) async fn move_to(
     saved_but(
         async {
             let span = [(master.start_utc, master.end_utc)];
-            resync(state, master.calendar_id, &span, Some(&uid)).await?;
-            resync(state, target_calendar_id, &span, None).await?;
+            resync(state, master.calendar_id, &span, Some(&uid), source_ctag).await?;
+            resync(state, target_calendar_id, &span, None, dest_ctag).await?;
             let row = row_id_by_uid(state, target_calendar_id, &uid).await?;
             crate::events::event_detail_impl(state, row).await
         }
@@ -727,10 +798,12 @@ pub(crate) async fn delete(
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
     let master = master_of(state, &viewed).await?;
-    let (client, _) = crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
+    let (client, collection_url) =
+        crate::caldav_account::client_for_calendar(state, master.calendar_id).await?;
     let (href, raw) = resource_of(state, master.id).await?;
     let uid = master.google_id.clone();
     let is_series = master.recurrence.is_some();
+    let store_ctag = may_store_ctag(state, &client, master.calendar_id, &collection_url).await;
 
     if !is_series || scope == "all" {
         client.delete(&href, master.etag.as_deref()).await.map_err(friendly)?;
@@ -770,7 +843,7 @@ pub(crate) async fn delete(
     } else {
         None
     };
-    saved_but(resync(state, master.calendar_id, &spans, removed).await)
+    saved_but(resync(state, master.calendar_id, &spans, removed, store_ctag).await)
 }
 
 #[cfg(test)]

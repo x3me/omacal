@@ -51,8 +51,8 @@ export const START_ON_LOGIN_OPTIONS: ReadonlyArray<[StartOnLogin, string]> = [
 ];
 
 /** How far back events are kept, in months. `0` is everything. The values
- *  `settings::HISTORY_SPANS` offers; anything else is refused. Six months
- *  until chosen — the window sync already kept. */
+ *  `settings::HISTORY_SPANS` offers; anything else is refused. A fresh
+ *  install is two years. */
 export type HistorySpan = 6 | 24 | 60 | 0;
 
 /** The order the General tab offers them, shortest first. */
@@ -124,7 +124,8 @@ export type AppSettings = {
   keepRemindersOnScreen: boolean;
   minSyncIntervalMs: number;
   /** Months of history to keep. `0` is everything; ahead is a year either way.
-   *  Six months until chosen. */
+   *  Two years until chosen. An install that already had a calendar keeps
+   *  six (migration 0019). */
   historySpan: HistorySpan;
   /** Whether Day, Week and Month draw as a list rather than a grid (filmstrip
    *  spec §4). No settings tab shows it — the control is the `▦`/`☰` beside the

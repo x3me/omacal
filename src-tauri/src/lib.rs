@@ -136,6 +136,9 @@ pub struct AppState {
     /// on the state, so a test that builds its own state does not share one
     /// with the rest of the process.
     pub history_months: std::sync::atomic::AtomicI64,
+    /// One sync at a time. Beside `history_months` so a test that builds its
+    /// own state does not share a process-wide gate with the rest.
+    pub sync_gate: std::sync::Arc<sync_loop::SyncGate>,
 }
 
 /// The notification transport, managed on its own rather than inside
@@ -1077,13 +1080,11 @@ pub(crate) fn sync_bounds(now_ms: i64, history_months: i64, after_write: bool) -
 /// shared by the `sync_now` command and the background loop, each of which
 /// handles the demo gate and `record_sync` itself. `after_write` is the
 /// queue's follow-up after a save: CalDAV must not report the whole history
-/// again. Concurrent callers share one run ([`sync_loop::coalesce`]).
+/// again. Concurrent callers share one run ([`sync_loop::SyncGate`]) and a
+/// caller that waited receives that run's own result, including a failure.
 pub(crate) async fn sync_all(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
-    match sync_loop::coalesce(sync_all_inner(state, after_write)).await {
-        Some(result) => result,
-        // Someone else's sync covered this request. Nothing more to download.
-        None => Ok(0),
-    }
+    let gate = std::sync::Arc::clone(&state.sync_gate);
+    gate.run(sync_all_inner(state, after_write)).await
 }
 
 async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
@@ -1623,6 +1624,7 @@ pub fn run() {
                 quit_on_close: std::sync::atomic::AtomicBool::new(quit_on_close),
                 open_date: std::sync::Mutex::new(open_date),
                 history_months: std::sync::atomic::AtomicI64::new(history_months),
+                sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
             });
             sync_loop::spawn(app.handle().clone());
             // Before the first palette is resolved: off Omarchy, "Follow the
@@ -1959,6 +1961,7 @@ mod tests {
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+            sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
         };
         write("event_detail", serde_json::to_value(events::event_detail_impl(&state, id).await.unwrap()).unwrap());
 
@@ -2157,6 +2160,7 @@ mod tests {
             quit_on_close: Default::default(),
             open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(settings::SPAN_6_MONTHS),
+            sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
         };
         assert_eq!(synced_window(&state, now), (now - 180 * DAY, now + 365 * DAY));
         state.history_months.store(0, std::sync::atomic::Ordering::Relaxed);

@@ -779,8 +779,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   taskNotificationsEnabled: true,
   keepRemindersOnScreen: false,
   minSyncIntervalMs: 60_000,
-  // Six months: the window sync already kept, until someone picks longer.
-  historySpan: 6,
+  // Two years: the fresh-install default. Six months is what an install
+  // already in use keeps, written by the migration rather than read here.
+  historySpan: 24,
   // The backend's own shipped default (fallback spec §3).
   fallbackReminderMinutes: [60, 10],
   defaultCalendarId: null,

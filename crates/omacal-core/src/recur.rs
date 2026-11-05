@@ -112,11 +112,11 @@ const DAY_MS: i64 = 24 * 3_600_000;
 /// expanding it cannot produce an occurrence in the window.
 ///
 /// False — expand as usual — when any line is an `RDATE` (it can add a date
-/// the rule itself has passed), when any rule has no `UNTIL` and no `COUNT`,
-/// or when a bound cannot be read. The bound overestimates on purpose: a
-/// series this skips has no occurrence left, and one it fails to skip only
-/// costs the expansion it would have paid anyway.
-fn rule_ended_before(recurrence: &[String], dtstart_ms: i64, from_ms: i64, duration_ms: i64) -> bool {
+/// the rule itself has passed), when any rule has no `UNTIL`, or when that
+/// `UNTIL` cannot be read. `COUNT` is not a date: a `BYxxx` rule can be far
+/// sparser than one occurrence per period, and guessing its last instant
+/// drops a series that is still running. rrule stops at the count itself.
+fn rule_ended_before(recurrence: &[String], _dtstart_ms: i64, from_ms: i64, duration_ms: i64) -> bool {
     if recurrence.iter().any(|line| {
         let t = line.trim();
         t.len() >= 5 && t[..5].eq_ignore_ascii_case("RDATE")
@@ -131,23 +131,16 @@ fn rule_ended_before(recurrence: &[String], dtstart_ms: i64, from_ms: i64, durat
             continue;
         }
         saw_rule = true;
-        let has_until = upper.contains("UNTIL=");
-        let has_count = upper.contains("COUNT=");
-        if !has_until && !has_count {
-            return false;
-        }
         // Two days of slack: a floating or date-only UNTIL is a local day,
         // and the last zone on earth ends it well after UTC midnight.
+        if !upper.contains("UNTIL=") {
+            return false;
+        }
         let until_ended = match until_ms(&upper) {
             Some(until) => until.saturating_add(2 * DAY_MS) < horizon,
             None => false,
         };
-        let count_ended = match count_end_ms(&upper, dtstart_ms) {
-            Some(end) => end < horizon,
-            None => false,
-        };
-        let ended = (!has_until || until_ended) && (!has_count || count_ended);
-        if !ended {
+        if !until_ended {
             return false;
         }
     }
@@ -174,25 +167,6 @@ fn until_ms(upper: &str) -> Option<i64> {
         (0, 0, 0)
     };
     date.at(hh, mm, ss, 0).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
-}
-
-/// A generous last instant for a `COUNT` rule: `(count + 1)` periods, so a
-/// `BY*` shift cannot hide an occurrence that is still inside the window.
-fn count_end_ms(upper: &str, dtstart_ms: i64) -> Option<i64> {
-    let count = param(upper, "COUNT=")?.parse::<i64>().ok()?;
-    let freq = param(upper, "FREQ=")?;
-    let interval = param(upper, "INTERVAL=").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
-    let period = match freq {
-        "YEARLY" => 366 * DAY_MS,
-        "MONTHLY" => 32 * DAY_MS,
-        "WEEKLY" => 8 * DAY_MS,
-        "DAILY" => 2 * DAY_MS,
-        "HOURLY" => 2 * 3_600_000,
-        "MINUTELY" => 2 * 60_000,
-        "SECONDLY" => 2_000,
-        _ => return None,
-    };
-    Some(dtstart_ms.saturating_add((count + 1).saturating_mul(interval).saturating_mul(period)))
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
@@ -712,6 +686,63 @@ mod tests {
         let during = expand(&count, start, start + 5 * day, 50).unwrap();
         assert!(!during.intervals.is_empty());
         assert_eq!(during.intervals.len(), 5);
+    }
+
+    /// `COUNT` with a `BYxxx` part is sparser than one occurrence per period.
+    /// Guessing the last instant from `FREQ` ends the series early and the
+    /// later occurrences vanish. rrule expands them; it stops at the count.
+    #[test]
+    fn a_sparse_count_rule_still_expands() {
+        fn utc(y: i16, m: i8, d: i8, hh: i8) -> i64 {
+            jiff::civil::date(y, m, d)
+                .at(hh, 0, 0, 0)
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .unwrap()
+                .timestamp()
+                .as_millisecond()
+        }
+
+        // Ten Mondays. A window over Mondays 6–10 is five occurrences; a
+        // one-day-per-count estimate would have ended the series in week 3.
+        let start = MON_0900_SOFIA;
+        let mondays = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;BYDAY=MO;COUNT=10"]),
+        };
+        let from = start + 5 * 7 * DAY;
+        let to = start + 10 * 7 * DAY;
+        let out = expand(&mondays, from, to, 64).unwrap();
+        assert_eq!(out.intervals.len(), 5, "Mondays 6 through 10");
+        assert!(!out.truncated);
+
+        // Monthly on the 31st skips the short months, so the sixth lands in
+        // October, past a one-month-per-count estimate.
+        let start = utc(2026, 1, 31, 9);
+        let month_end = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=MONTHLY;BYMONTHDAY=31;COUNT=6"]),
+        };
+        let out = expand(&month_end, utc(2026, 10, 31, 0), utc(2026, 11, 1, 0), 32).unwrap();
+        assert_eq!(out.intervals.len(), 1, "31 October is the sixth 31st");
+
+        // Yearly on 29 February. The third leap day is eight years on, past
+        // an estimate of one year per count.
+        let start = utc(2024, 2, 29, 9);
+        let leap = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=3"]),
+        };
+        let out = expand(&leap, utc(2032, 2, 29, 0), utc(2032, 3, 1, 0), 16).unwrap();
+        assert_eq!(out.intervals.len(), 1, "29 February 2032 is the third");
     }
 
     /// An RDATE can sit after UNTIL. Skipping on the rule alone would drop it.
