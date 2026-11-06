@@ -813,7 +813,7 @@
   /** The named themes are for a desktop with no theme of its own to
    *  follow: on Omarchy they are one `omarchy-theme-set` away, and a pinned
    *  choice here would fight it. */
-  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn', 'daylight']);
+  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn', 'daylight', 'daylight-dark']);
   const themeOptions = $derived(
     settings?.desktop === 'omarchy'
       ? APPEARANCE_OPTIONS.filter(([id]) => !NAMED_THEMES.has(id))

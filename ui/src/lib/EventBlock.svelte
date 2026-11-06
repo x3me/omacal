@@ -434,9 +434,12 @@
        second line's .62) and the fallbacks of `--event-tint`,
        `--event-spine-width`, `--event-title-weight`, `--event-ink` and
        `--event-sub-opacity`, which `setPalette` sets only for a theme that
-       carries a `ThemeStyle` (Daylight) and removes for every other. */
-    --event-fill: color-mix(in srgb, var(--cal) var(--event-tint, 7%), var(--bg));
-    background: color-mix(in srgb, var(--cal) var(--event-tint, 7%), var(--bg));
+       carries a `ThemeStyle` (the two Daylights) and removes for every other.
+       `--event-tint-space` is the space the tint is mixed in, `srgb` unless a
+       theme says otherwise (Daylight Dark's linear light, which keeps a
+       yellow block gold over near-black instead of olive). */
+    --event-fill: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint, 7%), var(--bg));
+    background: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint, 7%), var(--bg));
     color: color-mix(in srgb, var(--cal) var(--event-ink, 65%), var(--text));
     font: inherit;
   }
@@ -519,8 +522,8 @@
      ones it covers. Every state is already opaque at rest, so this is emphasis
      rather than the occlusion fix itself. Last among the state rules so it
      wins over the per-state backgrounds above at equal specificity. */
-  .ev:hover { --event-fill: color-mix(in srgb, var(--cal) var(--event-tint-hover, 16%), var(--bg));
-              background-color: color-mix(in srgb, var(--cal) var(--event-tint-hover, 16%), var(--bg)); }
+  .ev:hover { --event-fill: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint-hover, 16%), var(--bg));
+              background-color: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint-hover, 16%), var(--bg)); }
   /* A declined block hovers to the stock 16% whatever the theme's tint. Its
      spine is the calendar's colour at 45%, and a theme's deeper hover fill
      (Daylight's 31%) all but matched it: the one coloured edge a declined

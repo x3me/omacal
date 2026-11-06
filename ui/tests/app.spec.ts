@@ -3544,6 +3544,7 @@ test.describe('App', () => {
     await expect(themes.locator('.tname')).toHaveText([
       'Follow the desktop', 'Light', 'Dark',
       'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight',
+      'Daylight Dark',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
@@ -4841,11 +4842,65 @@ test.describe('App', () => {
     expect(await h1.evaluate((e) => e.textContent)).toMatch(/^[A-Za-z]+\s?\d{4}$/);
     await expect(h1.locator('span:not(.year)').first()).not.toHaveCSS('color', 'rgb(211, 47, 58)');
 
+    // Daylight Dark turns the same knobs to its own values, straight over
+    // Daylight's: nothing of the bright one may survive the switch.
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+      accent: '#ef5350', is_dark: true,
+      style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+               today: '#1e2024', heading_size: 24, heading_weight: 700,
+               tint_space: 'srgb-linear', accent_fill: '#d32f3a' },
+    }));
+    await expect.poll(knobs).toEqual(['10%', '19%', '3px', '600', '500', '42%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#1e2024']);
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(239, 83, 80)');
+    // Its two knobs of its own. A timed block's fill is mixed in linear
+    // light, which keeps yellow and orange calendars from going olive over
+    // near-black; and the accent's fills (the active view here) take the
+    // deeper red, so their text is the light ink rather than dark text on
+    // a bright red.
+    const extra = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint-space', '--accent-fill', '--on-accent'].map((n) => s.getPropertyValue(n));
+    });
+    await expect.poll(extra).toEqual(['srgb-linear', '#d32f3a', 'var(--ink-on-dark)']);
+    const probe = (css: string) => page.evaluate((c) => {
+      const el = document.createElement('span');
+      el.style.color = c;
+      document.body.append(el);
+      const got = getComputedStyle(el).color;
+      el.remove();
+      return got;
+    }, css);
+    // Compared as sRGB channels: the event-transparency rule re-mixes the
+    // fill in sRGB, so the block reports `color(srgb …)` whichever space the
+    // tint was mixed in, while the probe reports the space it was given.
+    const srgb = (css: string) => {
+      const m = /^color\((srgb(?:-linear)?) ([\d.e-]+) ([\d.e-]+) ([\d.e-]+)/.exec(css);
+      if (!m) return css.match(/[\d.]+/g)!.slice(0, 3).map((v) => Number(v) / 255);
+      const ch = m.slice(2, 5).map(Number);
+      return m[1] === 'srgb' ? ch : ch.map((v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055));
+    };
+    const block = page.locator('.ev').first();
+    const cal = await block.evaluate((el) => getComputedStyle(el).getPropertyValue('--cal').trim());
+    const fill = srgb(await block.evaluate((el) => getComputedStyle(el).backgroundColor));
+    const linear = srgb(await probe(`color-mix(in srgb-linear, ${cal} 10%, #16171a)`));
+    const plain = srgb(await probe(`color-mix(in srgb, ${cal} 10%, #16171a)`));
+    fill.forEach((v, i) => expect(v).toBeCloseTo(linear[i], 2));
+    expect(Math.max(...fill.map((v, i) => Math.abs(v - plain[i])))).toBeGreaterThan(0.02);
+    const view = page.locator('.vswitch button.active');
+    await expect(view).toHaveCSS('background-color', 'rgb(211, 47, 58)');
+    await expect(view).toHaveCSS('color', await probe('var(--ink-on-dark)'));
+
     await page.evaluate(() => window.__harness.emit('theme-changed', {
       bg: '#fdfdfb', surface: '#ffffff', text: '#1a1a1a',
       muted: '#6b6b70', accent: '#c04a2b', is_dark: false,
     }));
     await expect.poll(knobs).toEqual([...Array(10).fill(''), 'rgba(0,0,0,.025)']);
+    // And neither of Daylight Dark's own survives: the mix is sRGB again and
+    // the accent fills with the accent.
+    await expect.poll(extra).toEqual(['', '#c04a2b', 'var(--ink-on-dark)']);
+    await expect(view).toHaveCSS('background-color', 'rgb(192, 74, 43)');
   });
 });
 
@@ -7227,6 +7282,11 @@ test.describe('the tasks sidebar', () => {
                   accent: '#d32f3a', is_dark: false,
                   style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
                            today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
       latte: { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false },
       // A dark theme with the same red accent: the accent must not matter.
       redDark: { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#ff5555', is_dark: true },

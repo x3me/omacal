@@ -67,8 +67,8 @@
            border: 0; border-radius: 6px; padding: 5px 10px; }
   button:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); }
   button:disabled { opacity: .5; cursor: default; }
-  .primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-  .primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+  .primary { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
+  .primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-fill) 88%, var(--text)); }
   .hint { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
   .note { margin: 8px 0 0; color: var(--error); }
 </style>

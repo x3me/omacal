@@ -641,7 +641,7 @@
   button:disabled { opacity: .5; cursor: default; }
   .nav button { width: 22px; padding: 3px 0; font-size: 14px; }
   .today { border: 1px solid color-mix(in srgb, var(--text) 12%, transparent); background: none; }
-  .primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .primary { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
   .demo { font-size: 11.5px; }
 
   /* Spec §2, amended in the field. Eight pixels, no label. Healthy is a
@@ -666,7 +666,7 @@
      a view you can be in. Pressed takes the same accent fill the active view
      slot does, because that is what "on" already looks like in this header. */
   .filmstrip { font-size: 13px; line-height: 1; padding: 4px 8px; }
-  .filmstrip[aria-pressed='true'] { background: var(--accent); color: var(--on-accent); }
+  .filmstrip[aria-pressed='true'] { background: var(--accent-fill); color: var(--on-accent); }
 
   .menuwrap { position: relative; }
   .burger { font-size: 14px; line-height: 1; padding: 3px 8px; }

@@ -1093,7 +1093,7 @@
   .eact button { appearance: none; -webkit-appearance: none; font: inherit; font-size: 11.5px;
                  padding: 4px 11px; border-radius: 6px; cursor: pointer;
                  border: 1px solid var(--hairline); background: none; color: var(--text); }
-  .eact .go { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .eact .go { background: var(--accent-fill); color: var(--on-accent); border-color: transparent; }
   .eact button:disabled, .quick button:disabled, .add input:disabled { opacity: .5; cursor: default; }
 
   .empty { color: var(--muted); padding: 10px 6px; line-height: 1.5; }

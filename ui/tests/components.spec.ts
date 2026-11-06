@@ -890,6 +890,11 @@ test.describe('EventBlock hover occludes what it covers', () => {
                   accent: '#d32f3a', is_dark: false,
                   style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
                            today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
     };
     const ev = page.locator('.ev');
     for (const [name, palette] of Object.entries(themes)) {

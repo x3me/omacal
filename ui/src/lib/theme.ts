@@ -4,8 +4,8 @@ import { foregroundFor } from './ink';
 export type Palette = {
   bg: string; surface: string; text: string;
   muted: string; accent: string; is_dark: boolean;
-  /** Present only on a theme whose look is more than colours (Daylight);
-   *  absent means the stock look. Mirrors `theme::ThemeStyle`. */
+  /** Present only on a theme whose look is more than colours (Daylight and
+   *  Daylight Dark); absent means the stock look. Mirrors `theme::ThemeStyle`. */
   style?: ThemeStyle;
 };
 
@@ -30,6 +30,14 @@ export type ThemeStyle = {
   /** Size (px) and weight of the header's month-and-year title. */
   heading_size: number;
   heading_weight: number;
+  /** The `color-mix` space the fill's tint is mixed in; absent is `srgb`.
+   *  Daylight Dark's `srgb-linear` keeps yellow and orange blocks from
+   *  going olive over near-black. */
+  tint_space?: string;
+  /** The fill under `--on-accent` where it is not `accent`: Daylight Dark's
+   *  accent is a red bright enough to read as text on its card, too bright
+   *  to carry white text, so its buttons fill with a deeper one. */
+  accent_fill?: string;
 };
 
 /** Pushes a resolved palette onto :root so all styling flows from CSS vars.
@@ -49,14 +57,22 @@ export function setPalette(p: Palette): void {
   r.setProperty('--text', p.text);
   r.setProperty('--muted', p.muted);
   r.setProperty('--accent', p.accent);
-  // The ink for text ON an accent fill — the active view chip, the Connect
-  // button, the today badge. It used to be `var(--bg)`, which worked only as
-  // long as the background happened to contrast with the accent; a light
-  // theme with a light accent (Rose Pine Dawn's rose) drew light-on-light.
-  // `foregroundFor` is the same luminance rule the Big Year pills already
-  // live by, so an accent from colors.toml — which can be anything the theme
-  // author liked — always gets a legible ink chosen against the fill itself.
-  r.setProperty('--on-accent', foregroundFor(p.accent));
+  // What the accent *fills* — the active view chip, the Connect button, the
+  // today badge, a checked box — wherever text or a tick in `--on-accent`
+  // sits on it. The accent itself unless a theme says otherwise: Daylight
+  // Dark's `#ef5350` has to read as text on a near-black card, and a red that
+  // bright cannot also carry white text at 4.5:1, so its fills take
+  // Daylight's deeper `#d32f3a` and keep white on top.
+  const accentFill = p.style?.accent_fill ?? p.accent;
+  r.setProperty('--accent-fill', accentFill);
+  // The ink for text ON an accent fill. It used to be `var(--bg)`, which
+  // worked only as long as the background happened to contrast with the
+  // accent; a light theme with a light accent (Rose Pine Dawn's rose) drew
+  // light-on-light. `foregroundFor` is the same luminance rule the Big Year
+  // pills already live by, so an accent from colors.toml — which can be
+  // anything the theme author liked — always gets a legible ink chosen
+  // against the fill itself.
+  r.setProperty('--on-accent', foregroundFor(accentFill));
   r.setProperty('--hairline', p.is_dark ? 'rgba(255,255,255,.055)' : 'rgba(0,0,0,.07)');
   r.setProperty('--hour-rule', p.is_dark ? 'rgba(255,255,255,.035)' : 'rgba(0,0,0,.05)');
   r.setProperty('--today-tint', p.style?.today ?? (p.is_dark ? 'rgba(255,255,255,.028)' : 'rgba(0,0,0,.025)'));
@@ -171,6 +187,7 @@ export function setPalette(p: Palette): void {
 function setThemeStyle(r: CSSStyleDeclaration, s: ThemeStyle | undefined): void {
   const vars: Record<string, string | undefined> = {
     '--event-tint': s && `${s.tint}%`,
+    '--event-tint-space': s?.tint_space,
     '--event-tint-hover': s && `${s.tint + 9}%`,
     '--event-spine-width': s && `${s.spine}px`,
     '--event-title-weight': s && String(s.title_weight),

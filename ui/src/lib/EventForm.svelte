@@ -1301,8 +1301,8 @@
                        background: color-mix(in srgb, var(--text) 3%, transparent);
                        font: 600 11px/1 inherit; cursor: pointer; }
   .weekdayrow button:hover { color: var(--text); border-color: var(--muted); }
-  .weekdayrow button.active { color: var(--on-accent); border-color: var(--accent);
-                              background: var(--accent); }
+  .weekdayrow button.active { color: var(--on-accent); border-color: var(--accent-fill);
+                              background: var(--accent-fill); }
 
   .repeatendfield { display: flex; flex-direction: column; gap: 4px; }
   .repeatendrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
@@ -1394,5 +1394,5 @@
   .actions button { font: inherit; font-size: 11.5px; cursor: pointer;
                     border-radius: 6px; padding: 5px 12px; border: 1px solid var(--hairline); }
   .ghost { background: none; color: var(--muted); }
-  .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
 </style>

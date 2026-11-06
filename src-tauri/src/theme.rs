@@ -12,7 +12,7 @@ pub struct Palette {
     pub accent: String,
     pub is_dark: bool,
     /// How events, the today column and the header title are drawn, for the
-    /// one theme whose look is more than colours (Daylight). `None` for
+    /// themes whose look is more than colours (the two Daylights). `None` for
     /// everything else — every other built-in and every Omarchy-derived
     /// palette — and then absent from the wire entirely, which `setPalette`
     /// reads as "the stock look".
@@ -44,6 +44,23 @@ pub struct ThemeStyle {
     /// Size in px and weight of the header's month-and-year title.
     pub heading_size: u8,
     pub heading_weight: u16,
+    /// The colour space `tint` is mixed in, as CSS `color-mix` spells it;
+    /// `None` is the stylesheets' `srgb`. A dark page wants `srgb-linear`: a
+    /// yellow or an orange mixed toward near-black in sRGB loses its chroma
+    /// and drifts toward green, so the blocks read olive and brown, while the
+    /// same mix in linear light keeps them gold and amber. The percentage
+    /// means less there, which is why Daylight Dark's `tint` is a third of
+    /// what it was in sRGB for a fill of about the same lightness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tint_space: Option<String>,
+    /// The fill behind text and ticks drawn in `--on-accent` (primary buttons,
+    /// the active view, today's badge, a checked box), where it is not
+    /// `accent` itself. `accent` has to clear 4.5:1 *as text* on the card, and
+    /// on a dark card a red that does is too bright to carry white at 4.5:1,
+    /// so its buttons got dark text. A deeper red here keeps the buttons'
+    /// text light. `None` fills with `accent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent_fill: Option<String>,
 }
 
 impl Palette {
@@ -132,6 +149,21 @@ impl Palette {
     ///   large month-and-year heading whose year is the accent: what makes a
     ///   block read at a glance on white, where the stock 7% wash is close to
     ///   invisible.
+    /// - Daylight Dark is the same look with the lights off, and the second
+    ///   palette with a [`ThemeStyle`]: neutral near-blacks rather than the
+    ///   blue-tinted greys of Tokyo Night, and the same red lifted to
+    ///   `#ef5350` so it still clears 4.5:1 on the card (4.6:1; `#d32f3a`
+    ///   measures 3.2:1 there). A red that bright cannot also carry white
+    ///   text at 4.5:1, so the buttons and badges keep Daylight's `#d32f3a`
+    ///   as their fill (`accent_fill`) and its white text on top (4.7:1). The
+    ///   other knobs differ from Daylight's in three ways: the tint is mixed
+    ///   in linear light (`tint_space`), because over near-black an sRGB mix
+    ///   turns yellow and orange calendars olive and brown, and 10% there is
+    ///   a fill about as light as 30% in sRGB; an ink of 42, which on a pale
+    ///   ink means a *lighter* shade of the calendar's colour where
+    ///   Daylight's is a darker one (the same `color-mix`, toward `text`);
+    ///   and a today column a step lighter than the page rather than a grey
+    ///   on white.
     ///
     /// Every text colour clears 4.5:1 on `bg` and on `surface`
     /// (`every_named_palette_is_legible` measures all of it).
@@ -149,8 +181,17 @@ impl Palette {
                 style: Some(ThemeStyle {
                     tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
                     today: "#f2f2f4".into(), heading_size: 24, heading_weight: 700,
+                    tint_space: None, accent_fill: None,
                 }),
                 ..p("#ffffff", "#f4f6f9", "#14161a", "#5a6270", "#d32f3a", false)
+            },
+            Appearance::DaylightDark => Self {
+                style: Some(ThemeStyle {
+                    tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                    today: "#1e2024".into(), heading_size: 24, heading_weight: 700,
+                    tint_space: Some("srgb-linear".into()), accent_fill: Some("#d32f3a".into()),
+                }),
+                ..p("#16171a", "#1f2125", "#eceef1", "#9aa1ab", "#ef5350", true)
             },
             Appearance::Auto | Appearance::Light | Appearance::Dark => return None,
         })
@@ -205,7 +246,7 @@ pub fn system_scheme() -> SystemScheme {
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
 ///
-/// The five named themes are the same kind of choice — see
+/// The six named themes are the same kind of choice — see
 /// [`Palette::named`] — spelled as Omarchy spells its themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -222,6 +263,8 @@ pub enum Appearance {
     #[serde(rename = "rose-pine-dawn")]
     RosePineDawn,
     Daylight,
+    #[serde(rename = "daylight-dark")]
+    DaylightDark,
 }
 
 impl Appearance {
@@ -237,6 +280,7 @@ impl Appearance {
             Appearance::CatppuccinLatte => "catppuccin-latte",
             Appearance::RosePineDawn => "rose-pine-dawn",
             Appearance::Daylight => "daylight",
+            Appearance::DaylightDark => "daylight-dark",
         }
     }
 
@@ -246,7 +290,7 @@ impl Appearance {
         [
             Appearance::Auto, Appearance::Light, Appearance::Dark, Appearance::TokyoNight,
             Appearance::CatppuccinMocha, Appearance::CatppuccinLatte, Appearance::RosePineDawn,
-            Appearance::Daylight,
+            Appearance::Daylight, Appearance::DaylightDark,
         ]
         .into_iter()
         .find(|a| a.as_str() == stored)
@@ -852,9 +896,10 @@ light_foreground = "#adb5c4"
         assert_eq!(SystemScheme::from_portal(7), SystemScheme::NoPreference);
     }
 
-    const NAMED: [Appearance; 5] = [
+    const NAMED: [Appearance; 6] = [
         Appearance::TokyoNight, Appearance::CatppuccinMocha,
         Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::Daylight,
+        Appearance::DaylightDark,
     ];
 
     /// WCAG contrast of two `#rrggbb` colours.
@@ -893,27 +938,115 @@ light_foreground = "#adb5c4"
     /// second line (the same ink at `sub`% opacity) still readable at 3:1.
     /// Pale colours (banana, amber, cyan) are what set `ink`; a darker
     /// theme-wide tint or a lighter ink fails here, not on someone's screen.
+    ///
+    /// Daylight Dark is held to the same bar by the same arithmetic, where it
+    /// runs the other way: the ink is near-white, so `ink` lightens, and a
+    /// stronger tint is what eats the margin. Its fill is mixed in linear
+    /// light (`tint_fill`), where 9 points of hover is a bigger step than in
+    /// sRGB; its worst is the hovered fill (19%) under banana, 4.58:1, then
+    /// cyan, 4.65:1.
     #[test]
     fn daylight_event_text_is_legible_on_every_calendar_colour() {
-        let p = Palette::named(Appearance::Daylight).unwrap();
+        for theme in [Appearance::Daylight, Appearance::DaylightDark] {
+            daylight_text_holds_up(theme);
+        }
+    }
+
+    fn daylight_text_holds_up(theme: Appearance) {
+        let p = Palette::named(theme).unwrap();
         let s = p.style.as_ref().unwrap();
         let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
         let mix = |a: [f64; 3], b: [f64; 3], pct: f64| [0, 1, 2].map(|i| (a[i] * pct + b[i] * (100.0 - pct)) / 100.0);
         let css = |c: [f64; 3]| format!("#{:02x}{:02x}{:02x}", c[0].round() as u8, c[1].round() as u8, c[2].round() as u8);
-        // The app's ten, Google's eleven, and the demo seed's four.
+        // The app's ten, Google's eleven, and the demo seed's four, plus the
+        // two the demo seed's calendars wear today.
         let colours = [
             "#5b8def", "#2aa198", "#5aa84f", "#8a9a3b", "#e2a03f", "#e07b39", "#e2564a", "#e06c9f", "#9a7bd0", "#7b8a9a",
             "#7986cb", "#33b679", "#8e24aa", "#e67c73", "#f6bf26", "#f4511e", "#039be5", "#616161", "#3f51b5", "#0b8043", "#d50000",
-            "#2dd4bf", "#f472b6", "#c084fc", "#b58900",
+            "#2dd4bf", "#f472b6", "#c084fc", "#b58900", "#4cc38a", "#c678dd",
         ];
         for c in colours {
             let text = mix(hex(c), hex(&p.text), f64::from(s.ink));
             for tint in [s.tint, s.tint + 9] {
-                let fill = mix(hex(c), hex(&p.bg), f64::from(tint));
+                let fill = tint_fill(s, hex(c), hex(&p.bg), f64::from(tint));
                 let title = contrast(&css(text), &css(fill));
                 let sub = contrast(&css(mix(text, fill, f64::from(s.sub))), &css(fill));
-                assert!(title >= 4.5, "{c} title at {tint}%: {title:.2}");
-                assert!(sub >= 3.0, "{c} second line at {tint}%: {sub:.2}");
+                assert!(title >= 4.5, "{theme:?} {c} title at {tint}%: {title:.2}");
+                assert!(sub >= 3.0, "{theme:?} {c} second line at {tint}%: {sub:.2}");
+            }
+        }
+    }
+
+    /// A block's fill as the stylesheet mixes it: `color-mix(in <tint_space>,
+    /// cal <pct>%, bg)`, channels 0-255. Any space this does not know fails
+    /// loudly rather than being measured as sRGB.
+    fn tint_fill(s: &ThemeStyle, cal: [f64; 3], bg: [f64; 3], pct: f64) -> [f64; 3] {
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let enc = |v: f64| 255.0 * if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        match s.tint_space.as_deref() {
+            None | Some("srgb") => [0, 1, 2].map(|i| (cal[i] * pct + bg[i] * (100.0 - pct)) / 100.0),
+            Some("srgb-linear") => [0, 1, 2].map(|i| enc((lin(cal[i]) * pct + lin(bg[i]) * (100.0 - pct)) / 100.0)),
+            Some(other) => panic!("tint_space {other:?} is not measured here"),
+        }
+    }
+
+    /// OKLab hue angle in degrees of an sRGB colour, channels 0-255.
+    fn oklab_hue(c: [f64; 3]) -> f64 {
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let [r, g, b] = c.map(lin);
+        let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+        let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+        let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+        let a = 1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s;
+        let bb = 0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s;
+        bb.atan2(a).to_degrees().rem_euclid(360.0)
+    }
+
+    /// Over near-black, an sRGB mix pulls a yellow or amber calendar's hue
+    /// toward green as it darkens it, and the block reads olive (banana's
+    /// fill sat 3 degrees greener than banana, Solarized yellow's 5.5). Daylight
+    /// Dark mixes in linear light, where the hue holds or leans warm. Measured
+    /// in OKLab for the warm calendar colours, at rest and hovered.
+    #[test]
+    fn daylight_dark_keeps_warm_calendars_warm() {
+        let p = Palette::named(Appearance::DaylightDark).unwrap();
+        let s = p.style.as_ref().unwrap();
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let round = |c: [f64; 3]| c.map(f64::round);
+        for c in ["#e2a03f", "#e07b39", "#f6bf26", "#f4511e", "#b58900", "#e2564a"] {
+            let hue = oklab_hue(hex(c));
+            for tint in [s.tint, s.tint + 9] {
+                let fill = oklab_hue(round(tint_fill(s, hex(c), hex(&p.bg), f64::from(tint))));
+                assert!(fill <= hue + 1.0, "{c} at {tint}%: fill hue {fill:.1} drifts green of {hue:.1}");
+            }
+        }
+    }
+
+    /// Text drawn in `--on-accent` sits on `accent_fill`, or on `accent` when
+    /// a palette has none, and `setPalette` picks that ink by the fill's
+    /// luminance (`foregroundFor`: near-white below .179, near-black above).
+    /// It has to clear 4.5:1 for every built-in palette. Both Daylights take
+    /// the light ink, as one red with white text on its buttons: Daylight
+    /// Dark's `#ef5350` accent alone would have handed them dark text.
+    #[test]
+    fn the_accent_fill_carries_its_ink() {
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let css = |c: [f64; 3]| format!("#{:02x}{:02x}{:02x}", c[0].round() as u8, c[1].round() as u8, c[2].round() as u8);
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let palettes = NAMED.into_iter().map(|t| (format!("{t:?}"), Palette::named(t).unwrap()))
+            .chain([("Light".into(), Palette::fallback_light()), ("Dark".into(), Palette::fallback_dark())]);
+        for (name, p) in palettes {
+            let fill_hex = p.style.as_ref().and_then(|s| s.accent_fill.clone()).unwrap_or(p.accent.clone());
+            let fill = hex(&fill_hex);
+            let lum = 0.2126 * lin(fill[0]) + 0.7152 * lin(fill[1]) + 0.0722 * lin(fill[2]);
+            // `--ink-on-dark` is white at .96, `--ink-on-light` black at .88.
+            let light = lum < 0.179;
+            let (ink, alpha) = if light { (255.0, 0.96) } else { (0.0, 0.88) };
+            let ink = css(fill.map(|v| ink * alpha + v * (1.0 - alpha)));
+            let ratio = contrast(&ink, &fill_hex);
+            assert!(ratio >= 4.5, "{name}: on-accent ink on {fill_hex}: {ratio:.2}");
+            if name.starts_with("Daylight") {
+                assert!(light, "{name}: {fill_hex} takes dark text");
             }
         }
     }
@@ -931,14 +1064,15 @@ light_foreground = "#adb5c4"
         assert_eq!(Appearance::parse("solarized"), None);
     }
 
-    /// Only Daylight turns the style knobs, and everyone else sends nothing —
-    /// not `null` — so the UI's "absent means stock" holds for every built-in
-    /// palette and for anything resolved from an Omarchy theme file.
+    /// Only the two Daylights turn the style knobs, and everyone else sends
+    /// nothing — not `null` — so the UI's "absent means stock" holds for every
+    /// built-in palette and for anything resolved from an Omarchy theme file.
     #[test]
     fn only_daylight_carries_a_style() {
         for theme in NAMED {
             let wire = serde_json::to_value(Palette::named(theme).unwrap()).unwrap();
-            assert_eq!(wire.get("style").is_some(), theme == Appearance::Daylight, "{theme:?}");
+            let daylight = matches!(theme, Appearance::Daylight | Appearance::DaylightDark);
+            assert_eq!(wire.get("style").is_some(), daylight, "{theme:?}");
         }
         for p in [Palette::fallback_dark(), Palette::fallback_light()] {
             assert!(serde_json::to_value(p).unwrap().get("style").is_none());
@@ -949,6 +1083,12 @@ light_foreground = "#adb5c4"
         assert_eq!(wire["style"], serde_json::json!({
             "tint": 22, "spine": 3, "title_weight": 600, "ink": 48, "sub": 85,
             "today": "#f2f2f4", "heading_size": 24, "heading_weight": 700,
+        }));
+        let wire = serde_json::to_value(Palette::named(Appearance::DaylightDark).unwrap()).unwrap();
+        assert_eq!(wire["style"], serde_json::json!({
+            "tint": 10, "spine": 3, "title_weight": 600, "ink": 42, "sub": 85,
+            "today": "#1e2024", "heading_size": 24, "heading_weight": 700,
+            "tint_space": "srgb-linear", "accent_fill": "#d32f3a",
         }));
     }
 
