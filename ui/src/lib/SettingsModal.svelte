@@ -822,12 +822,47 @@
   /** Each card's colours, fetched when the pane opens: the backend resolves
    *  them, and "Follow the desktop" is whatever the desktop is right now. */
   let themePreviews = $state<ReadonlyMap<Appearance, Palette>>(new Map());
-  $effect(() => {
-    if (tab !== 'Appearance') return;
+  function loadPreviews() {
     appearancePreviews()
       .then((list) => { themePreviews = new Map(list.map((p) => [p.appearance, p.palette])); })
       .catch(() => { /* cards draw in the app's own colours without it */ });
+  }
+  $effect(() => {
+    if (tab !== 'Appearance') return;
+    loadPreviews();
   });
+
+  /** The themes each side of "Follow the desktop" may wear: every pinned
+   *  theme, sorted onto the side its palette is by the backend's own
+   *  `is_dark` in the previews, so a theme added there joins the right list
+   *  with nothing to remember here. Until the previews arrive a side offers
+   *  only its current choice, so the select never shows a value it lacks. */
+  const autoThemes = $derived.by(() => {
+    const side = (dark: boolean, current: Appearance) => {
+      const fits = APPEARANCE_OPTIONS.filter(([id]) => id !== 'auto' && themePreviews.get(id)?.is_dark === dark);
+      return fits.length ? fits : APPEARANCE_OPTIONS.filter(([id]) => id === current);
+    };
+    return {
+      light: side(false, settings?.autoLightTheme ?? 'light'),
+      dark: side(true, settings?.autoDarkTheme ?? 'dark'),
+    };
+  });
+
+  /** `saveAppearance`'s shape. A refusal (a stale form offering a theme of
+   *  the other side) puts the select back on the stored choice by hand: the
+   *  stored value has not changed, so nothing would re-render it. */
+  async function saveAutoTheme(dark: boolean, select: HTMLSelectElement) {
+    note = null;
+    try {
+      settings = await setSetting(dark ? 'autoDarkTheme' : 'autoLightTheme', select.value as Appearance);
+      onsettingschange?.(settings);
+      // The "Follow the desktop" card is drawn in what it resolves to now.
+      loadPreviews();
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      if (settings) select.value = dark ? settings.autoDarkTheme : settings.autoLightTheme;
+    }
+  }
 
   async function saveAppearance(appearance: Appearance) {
     note = null;
@@ -1212,9 +1247,30 @@
           onchange={saveAppearance}
         />
       </div>
+      <!-- Only while following the desktop, and never on Omarchy, where what
+           the desktop wears is its own theme rather than a light or a dark. -->
+      {#if settings?.appearance === 'auto' && settings.desktop !== 'omarchy'}
+        {#each [false, true] as dark (dark)}
+          {@const id = dark ? 'auto-dark-theme' : 'auto-light-theme'}
+          <div class="row">
+            <label class="lab" for={id}>{dark ? 'In dark mode' : 'In light mode'}</label>
+            <div class="inline">
+              <select
+                {id}
+                value={dark ? settings.autoDarkTheme : settings.autoLightTheme}
+                onchange={(e) => saveAutoTheme(dark, e.currentTarget as HTMLSelectElement)}
+              >
+                {#each dark ? autoThemes.dark : autoThemes.light as [theme, label] (theme)}
+                  <option value={theme}>{label}</option>
+                {/each}
+              </select>
+            </div>
+          </div>
+        {/each}
+      {/if}
       <p class="hint">
         {#if settings?.desktop === 'omarchy'}Following the desktop wears your Omarchy theme and follows it as you switch.
-        {:else}Following the desktop wears its light or dark setting, and follows it when that changes.{/if}
+        {:else}Following the desktop wears your light or dark theme as the system is set, and switches when that changes.{/if}
         Any other choice replaces the whole palette, including the accent, without a restart.
       </p>
 

@@ -179,17 +179,18 @@ async fn get_status(
 /// Every appearance the settings pane offers, with the palette it would
 /// paint — for the theme picker's previews, so a card is drawn in exactly the
 /// colours choosing it gives. `Auto` is previewed as it resolves right now:
-/// the Omarchy theme, or the system's light or dark.
+/// the Omarchy theme, or the theme chosen for the system's light or dark.
 #[tauri::command]
-fn appearance_previews() -> Vec<AppearancePreview> {
+async fn appearance_previews(state: tauri::State<'_, AppState>) -> Result<Vec<AppearancePreview>, String> {
     use theme::Appearance as A;
-    [A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn]
+    let auto = settings::auto_pair(&state.pool).await;
+    Ok([A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn]
         .into_iter()
         .map(|appearance| AppearancePreview {
             appearance,
-            palette: theme::resolve(theme::omarchy_theme_dir().as_deref(), appearance),
+            palette: theme::resolve(theme::omarchy_theme_dir().as_deref(), appearance, auto),
         })
-        .collect()
+        .collect())
 }
 
 #[derive(serde::Serialize)]
@@ -207,6 +208,7 @@ async fn get_palette(state: tauri::State<'_, AppState>) -> Result<theme::Palette
     Ok(theme::resolve(
         theme::omarchy_theme_dir().as_deref(),
         settings::appearance(&state.pool).await,
+        settings::auto_pair(&state.pool).await,
     ))
 }
 
@@ -1596,6 +1598,9 @@ pub fn run() {
                     tauri::async_runtime::block_on(settings::appearance(
                         &app.state::<AppState>().pool,
                     )),
+                    tauri::async_runtime::block_on(settings::auto_pair(
+                        &app.state::<AppState>().pool,
+                    )),
                 )
                 .is_dark,
             );
@@ -1926,7 +1931,8 @@ mod tests {
                 .split(',')
                 .map(|name| {
                     let dir = std::path::Path::new(&root).join(name);
-                    let palette = theme::resolve(Some(&dir), theme::Appearance::Auto);
+                    // A theme directory decides `Auto` whatever the pair says.
+                    let palette = theme::resolve(Some(&dir), theme::Appearance::Auto, theme::AutoPair::default());
                     (name.to_string(), serde_json::to_value(palette).unwrap())
                 })
                 .collect();

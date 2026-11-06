@@ -27,12 +27,15 @@ pub fn changed(app: &AppHandle, scheme: SystemScheme) {
     if theme::omarchy_theme_dir().is_some() {
         return;
     }
-    let appearance =
-        tauri::async_runtime::block_on(crate::settings::appearance(&app.state::<crate::AppState>().pool));
+    let pool = &app.state::<crate::AppState>().pool;
+    let appearance = tauri::async_runtime::block_on(crate::settings::appearance(pool));
     if appearance.is_pinned() {
         return;
     }
-    let palette = theme::resolve(None, appearance);
+    // The pair is re-read on every flip, not captured at launch: it can be
+    // changed in Settings while the app runs, and the next flip must wear it.
+    let auto = tauri::async_runtime::block_on(crate::settings::auto_pair(pool));
+    let palette = theme::resolve(None, appearance, auto);
     tracing::info!(?scheme, "system appearance changed, repainting");
     let dark = palette.is_dark;
     let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
