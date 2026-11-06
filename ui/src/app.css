@@ -189,3 +189,9 @@ textarea,
    standard one, the pseudo-element is what WebKit honoured first. */
 .quiet-scroll { scrollbar-width: none; }
 .quiet-scroll::-webkit-scrollbar { display: none; }
+
+/* Words a screen reader needs where the eye gets a mark instead, such as a
+   free event's hollow spine on a surface whose accessible name is its own
+   text: in the accessibility tree, out of the layout and the paint. */
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+      border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

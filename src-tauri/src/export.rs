@@ -82,6 +82,11 @@ pub(crate) fn ics_for(
         alarms: Vec::new(),
         sequence: 0,
         conference: event.conference_uri.clone(),
+        // Carried, unlike reminders: whether the meeting blocks time and who
+        // may see it are facts about the event, not about this user's client.
+        // Busy and default write nothing, which is what they mean.
+        transp: crate::caldav_write::transp_of_stored(&event.transparency),
+        class: crate::caldav_write::class_of_stored(&event.visibility),
     };
     Ok(omacal_caldav::new_event_ics(&ev, now))
 }
@@ -221,6 +226,7 @@ mod tests {
             sequence: 0,
             organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Default::default(),
             calendar_default_reminders: Default::default(),

@@ -45,6 +45,11 @@ export function editChange(
   // organiser included (`valueFromDetail`), which is what the backend counts.
   if (f.guests) patch.attendees = f.guests.length;
   if (f.conference === 'none') patch.conference = null;
+  // The wire carries Show as and visibility only when they changed
+  // (`showAsAndVisibility`), so their presence is the change to draw: the
+  // outline or the lock appears while the save is still on its way.
+  if (f.transparency) patch.transparency = f.transparency;
+  if (f.visibility) patch.visibility = f.visibility;
 
   return {
     kind: 'edit', id: req.id, occurrenceStartMs: req.occurrenceStartMs, scope: result.scope, when, patch,
@@ -97,6 +102,8 @@ export function createChange(
       start_ms: w.startMs, end_ms: w.endMs, is_all_day: w.allDay,
       response: 'accepted', attendees: f.guests?.length ?? 0,
       recurring: f.repeat !== undefined, conference: null, all_guests_declined: false,
+      // A create sends only what differs from busy and default.
+      transparency: f.transparency ?? 'opaque', visibility: f.visibility ?? 'default',
       pending: true,
     },
   };

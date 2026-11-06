@@ -235,6 +235,13 @@ export type EventFormValue = {
    *  because the save panel is mounted from it, not from the detail. */
   isOrganizer: boolean;
   guestsCanModify: boolean;
+  /** "Show as". The form's words for Google's `opaque`/`transparent`. Sent
+   *  only when it differs from `initial`, so a save that never touched it
+   *  cannot flatten a free event to busy. */
+  showAs: 'busy' | 'free';
+  /** Visibility. `confidential` arrives from the server and is shown, but
+   *  cannot be chosen; leaving it alone sends nothing, which keeps it. */
+  visibility: 'default' | 'public' | 'private' | 'confidential';
 };
 
 export type VideoCall = {
@@ -770,6 +777,10 @@ export function blankValueAt(
     isRecurring: false,
     isOrganizer: true,
     guestsCanModify: false,
+    // Busy and default, which is what every server assumes for an event that
+    // says nothing, and what a new event was before the form could say more.
+    showAs: 'busy',
+    visibility: 'default',
   };
 }
 
@@ -1026,6 +1037,11 @@ export function valueFromDetail(
     isRecurring: detail.is_recurring,
     isOrganizer: detail.is_organizer,
     guestsCanModify: detail.guests_can_modify,
+    showAs: detail.transparency === 'transparent' ? 'free' : 'busy',
+    // Anything the four known values do not cover reads as Default, the same
+    // fallback the Rust side applies when it stores the row.
+    visibility: (['public', 'private', 'confidential'] as const)
+      .find((v) => v === detail.visibility) ?? 'default',
   };
 }
 
@@ -1040,10 +1056,10 @@ export function valueFromDetail(
  * paste is one event, not a second series — the reminder rows stay empty so
  * the target calendar's own defaults apply, and `isEdit`/`isRecurring`,
  * organizer and self are a create's. What crosses over is what the user
- * copied *for*: title, place, notes, the guest list (everyone on it except
- * yourself — see the filter below; the original organizer stays when it is
- * somebody else, because pasting a meeting is how you re-invite the same
- * room), whether it is all-day, and its shape in time — the clocks and
+ * copied *for*: title, place, notes, Show as and visibility, the guest
+ * list (everyone on it except yourself — see the filter below; the original
+ * organizer stays when it is somebody else, because pasting a meeting is how
+ * you re-invite the same room), whether it is all-day, and its shape in time — the clocks and
  * the day-span, moved onto `blank`'s day by the same `shiftedEndDate` a
  * date edit in the form uses.
  *
@@ -1059,6 +1075,13 @@ export function pastedValue(copied: EventFormValue, blank: EventFormValue): Even
     title: copied.title,
     location: copied.location,
     description: copied.description,
+    // How the event shows to others crosses over too. Left at the blank
+    // form's Busy and Default, a copy of a private event would publish its
+    // details on a shared calendar. Confidential is not something the form
+    // can set, so it lands as private: the nearest it can be, and never more
+    // open than the source.
+    showAs: copied.showAs,
+    visibility: copied.visibility === 'confidential' ? 'private' : copied.visibility,
     // Everyone except yourself. The creator of the pasted event is its
     // organizer, and an organizer sent as a guest row is an *invitation to
     // yourself*: Google files you as an unanswered attendee on your own
@@ -1446,6 +1469,65 @@ export function toEventInput(
             ],
           },
         }),
+    ...showAsAndVisibility(value, initial),
+  };
+}
+
+/**
+ * Whether an edit changes "Show as" or visibility **and nothing else**, which
+ * is the one save the form sends without asking about guests: whether the
+ * event blocks the user's time, or who can see its details, is not news to
+ * anyone invited to it, and a choice between telling them and not would be a
+ * question with one sensible answer.
+ *
+ * Asked of the payload rather than field by field: the value with those two
+ * put back must build exactly the payload `initial` itself builds, which is
+ * what a save of an untouched form sends. A field added to `toEventInput`
+ * later is covered without a line here. The calendar travels beside the
+ * payload, not in it, so it is compared on its own.
+ *
+ * So is the scope, which travels beside it the same way. "This and
+ * following" splits the series: the occurrences from this one on become a
+ * new event (`split_series`), created with the guest list, and a new event
+ * is news to everyone on it whatever field prompted the split. "This event"
+ * and "All events" change what the guests already have, so they still skip.
+ */
+export function onlyShowAsChanged(
+  value: EventFormValue, initial: EventFormValue, zone: string, scope: Scope,
+): boolean {
+  if (!value.isEdit) return false;
+  if (scope === 'following') return false;
+  if (value.showAs === initial.showAs && value.visibility === initial.visibility) return false;
+  if (value.calendarId !== initial.calendarId) return false;
+  const rest = { ...value, showAs: initial.showAs, visibility: initial.visibility };
+  return JSON.stringify(toEventInput(rest, initial, zone))
+    === JSON.stringify(toEventInput(initial, initial, zone));
+}
+
+/**
+ * "Show as" and visibility for the wire, by the rule the rest of
+ * `toEventInput` runs on: an edit sends each only when it differs from
+ * `initial`, so a save that never touched them (or a drag, which builds its
+ * input from this same value) leaves the server's values alone. A create
+ * sends each only when it is not what a server assumes for an event that
+ * says nothing, busy and default. `confidential` is never sent: the form
+ * cannot choose it, and an event that has it keeps it by sending nothing.
+ */
+function showAsAndVisibility(
+  value: EventFormValue,
+  initial: EventFormValue,
+): Pick<EventInput, 'transparency' | 'visibility'> {
+  const showAsChanged = value.isEdit ? value.showAs !== initial.showAs : value.showAs !== 'busy';
+  const visibilityChanged = value.isEdit
+    ? value.visibility !== initial.visibility
+    : value.visibility !== 'default';
+  return {
+    ...(showAsChanged
+      ? { transparency: value.showAs === 'free' ? 'transparent' : 'opaque' }
+      : {}),
+    ...(visibilityChanged && value.visibility !== 'confidential'
+      ? { visibility: value.visibility }
+      : {}),
   };
 }
 

@@ -296,6 +296,16 @@ pub(crate) async fn create(
         sequence: 0,
         attendees: attendees_for(&fields.guests),
         conference: None,
+        // Only what differs from a server's own assumption, the rule Google's
+        // create keeps: no `TRANSP:OPAQUE` or empty claim nobody made.
+        transp: fields
+            .transparency
+            .filter(|t| *t != crate::write::Transparency::Opaque)
+            .map(crate::write::Transparency::transp),
+        class: fields
+            .visibility
+            .filter(|v| *v != crate::write::Visibility::Default)
+            .map(crate::write::Visibility::class),
     };
     let ics = omacal_caldav::new_event_ics(&ev, now_ts());
     let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
@@ -335,6 +345,23 @@ fn saved_but<T>(r: anyhow::Result<T>) -> anyhow::Result<T> {
         tracing::error!(%e, "changed on the CalDAV server, but the local half failed");
         anyhow::anyhow!(crate::events::SAVED_NOT_STORED)
     })
+}
+
+/// A stored "Show as" as the `TRANSP` a fresh resource should carry. Busy is
+/// `None`, since an absent `TRANSP` already means `OPAQUE`.
+pub(crate) fn transp_of_stored(transparency: &str) -> Option<omacal_caldav::Transp> {
+    (transparency == "transparent").then_some(omacal_caldav::Transp::Transparent)
+}
+
+/// A stored visibility as the `CLASS` a fresh resource should carry. Default
+/// is `None`: no line, which is what an event that never chose looks like.
+pub(crate) fn class_of_stored(visibility: &str) -> Option<omacal_caldav::Class> {
+    match visibility {
+        "public" => Some(omacal_caldav::Class::Public),
+        "private" => Some(omacal_caldav::Class::Private),
+        "confidential" => Some(omacal_caldav::Class::Confidential),
+        _ => None,
+    }
 }
 
 /// The attendee list a write owns, out of the guest list the form sends.
@@ -392,6 +419,9 @@ pub(crate) async fn update(
                 sequence: master.sequence + 1,
                 attendees: attendees_for(&fields.guests),
                 conference: None,
+                // `None` keeps the resource's own lines; see `rewrite_master`.
+                transp: fields.transparency.map(crate::write::Transparency::transp),
+                class: fields.visibility.map(crate::write::Visibility::class),
             };
             let out = omacal_caldav::rewrite_master(&raw, &uid, &ev, now, moved)
                 .ok_or_else(|| anyhow::anyhow!("could not rewrite the event's resource"))?;
@@ -425,6 +455,17 @@ pub(crate) async fn update(
                 sequence: 0,
                 attendees: attendees_for(&fields.guests),
                 conference: None,
+                // A brand-new resource has no lines of its own to keep, so an
+                // untouched field falls back to the master's: the rest of a
+                // free series stays free after the split.
+                transp: fields
+                    .transparency
+                    .map(crate::write::Transparency::transp)
+                    .or_else(|| transp_of_stored(&master.transparency)),
+                class: fields
+                    .visibility
+                    .map(crate::write::Visibility::class)
+                    .or_else(|| class_of_stored(&master.visibility)),
             };
             let ics = omacal_caldav::new_event_ics(&ev, now);
             let collection = href.rsplit_once('/').map(|(c, _)| c).unwrap_or("");
@@ -446,6 +487,10 @@ pub(crate) async fn update(
                 sequence: 0,
                 attendees: attendees_for(&fields.guests),
                 conference: None,
+                // `None` carries the exception's own lines, or the master's
+                // for a new exception; see `upsert_exception`.
+                transp: fields.transparency.map(crate::write::Transparency::transp),
+                class: fields.visibility.map(crate::write::Visibility::class),
             };
             let out = omacal_caldav::upsert_exception(&raw, &ev, now)
                 .ok_or_else(|| anyhow::anyhow!("could not write the occurrence's exception"))?;
@@ -732,6 +777,7 @@ mod tests {
             sequence: 3,
             organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: omacal_store::Reminders {
                 use_default: false,
@@ -775,6 +821,20 @@ mod tests {
         let cleared = crate::write::RemindersInput { use_default: true, overrides: vec![] };
         assert!(alarms_for(&Some(cleared), Some(&m)).is_empty());
         assert!(alarms_for(&None, None).is_empty(), "a create starts silent");
+    }
+
+    /// What a fresh resource (an export, the tail of a split) says about a
+    /// stored "Show as" and visibility: free and every chosen class as lines,
+    /// confidential included since a split must not quietly drop it, and busy
+    /// and default as no line at all, which is what they mean.
+    #[test]
+    fn a_fresh_resource_carries_free_and_a_class_but_writes_nothing_for_the_defaults() {
+        assert_eq!(transp_of_stored("transparent"), Some(omacal_caldav::Transp::Transparent));
+        assert_eq!(transp_of_stored("opaque"), None);
+        assert_eq!(class_of_stored("public"), Some(omacal_caldav::Class::Public));
+        assert_eq!(class_of_stored("private"), Some(omacal_caldav::Class::Private));
+        assert_eq!(class_of_stored("confidential"), Some(omacal_caldav::Class::Confidential));
+        assert_eq!(class_of_stored("default"), None);
     }
 
     #[test]

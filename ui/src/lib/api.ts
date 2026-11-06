@@ -27,6 +27,13 @@ export type UiEvent = {
    *  "no" is not this — that is `response`, and it already strikes the
    *  block through. */
   all_guests_declined: boolean;
+  /** "Show as", in the store's vocabulary. A free (`transparent`) event
+   *  draws its colour bar as an outline instead of a solid stripe, the way
+   *  Fantastical marks time you are still available in. */
+  transparency: 'opaque' | 'transparent';
+  /** Private and confidential both put a lock in the block's corner; the
+   *  views never tell those two apart. */
+  visibility: 'default' | 'public' | 'private' | 'confidential';
   /** All underlying occurrences when several calendars share this display. */
   copies?: EventCopy[];
   /** Drawn where a change the user just made puts it, while that change is

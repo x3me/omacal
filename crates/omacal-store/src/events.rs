@@ -55,6 +55,14 @@ pub struct StoredEvent {
     /// ordinary case, and it is what decides whether a guest's move or save
     /// reaches anybody but themselves (see `EventDetail::guests_can_modify`).
     pub guests_can_modify: bool,
+    /// "Show as": `opaque` (busy, the default) or `transparent` (free). Google's
+    /// own vocabulary; CalDAV's `TRANSP` maps onto the same two values at the
+    /// sync boundary, so nothing past it knows which server an event came from.
+    pub transparency: String,
+    /// `default` | `public` | `private` | `confidential`. Google's vocabulary
+    /// again; an event with no CalDAV `CLASS` line is `default`.
+    /// `confidential` is read and kept but never set by this app.
+    pub visibility: String,
     pub attendees: Vec<Attendee>,
     /// What this event asks for: the calendar's defaults, or its own overrides.
     pub reminders: Reminders,
@@ -121,6 +129,7 @@ const SELECT_COLS: &str = "e.id, e.calendar_id, e.google_id, e.summary, e.locati
      e.status, e.self_response, e.conference_uri,
      COALESCE(c.color_override, c.color_hex) AS color_hex, c.timezone,
      e.description, e.etag, e.sequence, e.organizer_email, e.guests_can_modify,
+     e.transparency, e.visibility,
      e.attendees_json, e.reminders_json, c.default_reminders_json";
 
 fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> StoredEvent {
@@ -148,6 +157,8 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> StoredEvent {
         sequence: row.get("sequence"),
         organizer_email: row.get("organizer_email"),
         guests_can_modify: row.get::<i64, _>("guests_can_modify") != 0,
+        transparency: row.get("transparency"),
+        visibility: row.get("visibility"),
         // A malformed or absent JSON column must not fail the whole window
         // query — most personal events have no guests at all, so `NULL` here
         // is the common path, not an edge case.
@@ -186,7 +197,7 @@ pub async fn upsert_event<'e, E>(exec: E, ev: &StoredEvent) -> anyhow::Result<i6
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    // 23 columns, 23 placeholders, 23 binds, all in the same order. Keep them
+    // 25 columns, 25 placeholders, 25 binds, all in the same order. Keep them
     // that way: a mismatch here writes a value into the wrong column silently.
     let attendees_json = serde_json::to_string(&ev.attendees)?;
     let reminders_json = serde_json::to_string(&ev.reminders)?;
@@ -195,8 +206,8 @@ where
              start_tz, end_tz, is_all_day, recurrence, recurring_event_id,
              original_start_utc, status, self_response, conference_uri, updated_at,
              description, etag, sequence, organizer_email, attendees_json, reminders_json,
-             guests_can_modify)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+             guests_can_modify, transparency, visibility)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
          ON CONFLICT (calendar_id, google_id) DO UPDATE SET
              summary = excluded.summary, location = excluded.location,
              start_utc = excluded.start_utc, end_utc = excluded.end_utc,
@@ -210,7 +221,9 @@ where
              sequence = excluded.sequence, organizer_email = excluded.organizer_email,
              attendees_json = excluded.attendees_json,
              reminders_json = excluded.reminders_json,
-             guests_can_modify = excluded.guests_can_modify
+             guests_can_modify = excluded.guests_can_modify,
+             transparency = excluded.transparency,
+             visibility = excluded.visibility
          RETURNING id",
     )
     .bind(ev.calendar_id)          // ?1  calendar_id
@@ -236,6 +249,8 @@ where
     .bind(attendees_json)          // ?21 attendees_json
     .bind(reminders_json)          // ?22 reminders_json
     .bind(ev.guests_can_modify as i64) // ?23 guests_can_modify
+    .bind(&ev.transparency)        // ?24 transparency
+    .bind(&ev.visibility)          // ?25 visibility
     .fetch_one(exec)
     .await?
     .get("id");
@@ -753,6 +768,7 @@ mod tests {
             color_hex: None, calendar_timezone: "Europe/Sofia".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Reminders::default(), calendar_default_reminders: Vec::new(),
         }
@@ -1150,6 +1166,7 @@ mod tests {
             calendar_timezone: "Europe/Sofia".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Reminders::default(), calendar_default_reminders: Vec::new(),
         };
@@ -1369,6 +1386,23 @@ mod tests {
         assert_eq!(sync_enabled, 1, "a fresh calendar syncs by default");
     }
 
+    /// A sync that re-delivers an event rewrites its "Show as" and visibility
+    /// in place: the upsert's conflict branch is the only path a stored row
+    /// ever learns them by, which is what 0019's dropped cursors rely on to
+    /// backfill rows stored before it.
+    #[tokio::test]
+    async fn a_redelivered_event_updates_its_show_as_and_visibility() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        let mut e = ev(cal, "g1", 0, 60_000);
+        let id = upsert_event(&pool, &e).await.unwrap();
+        e.transparency = "transparent".into();
+        e.visibility = "private".into();
+        assert_eq!(upsert_event(&pool, &e).await.unwrap(), id, "the same row, not a second one");
+        let (got, _, _) = event_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!((got.transparency.as_str(), got.visibility.as_str()), ("transparent", "private"));
+    }
+
     #[tokio::test]
     async fn attendees_round_trip_through_the_store() {
         let pool = crate::connect_memory().await.unwrap();
@@ -1398,6 +1432,8 @@ mod tests {
             sequence: 3,
             organizer_email: Some("ana@x.com".into()),
             guests_can_modify: true,
+            transparency: "transparent".into(),
+            visibility: "private".into(),
             reminders: Reminders::default(),
             calendar_default_reminders: Vec::new(),
             attendees: vec![
@@ -1419,6 +1455,8 @@ mod tests {
         assert_eq!(got.sequence, 3);
         assert_eq!(got.organizer_email.as_deref(), Some("ana@x.com"));
         assert!(got.guests_can_modify, "guestsCanModify lost in the round trip");
+        assert_eq!(got.transparency, "transparent", "Show as lost in the round trip");
+        assert_eq!(got.visibility, "private", "visibility lost in the round trip");
         assert_eq!(got.attendees.len(), 2, "attendees lost in the round trip");
         assert_eq!(got.attendees[1].email, "me@x.com");
         assert!(got.attendees[1].is_self, "the self flag must survive");
@@ -1681,16 +1719,22 @@ mod tests {
                          VALUES (?1, 'old-cursor', 0, 0)")
                 .bind(cal).execute(&pool).await.unwrap();
         }
-        let mut ev = ev(google_cal, "old-series", 0, 60_000);
-        ev.conference_uri = None;
-        let id = upsert_event(&pool, &ev).await.unwrap();
+        // Raw SQL on both sides rather than `upsert_event` and `event_by_id`:
+        // those speak the finished schema, and a column added by any later
+        // migration does not exist yet in a database stopped at 14.
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz,
+                 updated_at)
+             VALUES (?1, 'old-series', 0, 60000, 'UTC', 'UTC', 0) RETURNING id")
+            .bind(google_cal).fetch_one(&pool).await.unwrap();
         apply_migration(&pool, 15).await;
 
         let remaining: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM sync_state")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(remaining, vec![dav_cal]);
-        assert!(event_by_id(&pool, id).await.unwrap().is_some(),
-            "cached events must remain available until the refetch succeeds");
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = ?1")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(kept, 1, "cached events must remain available until the refetch succeeds");
     }
 
     /// 0003's backfill: an event stored before it landed is missing the guest
@@ -1756,6 +1800,45 @@ mod tests {
                 .await
                 .expect("0004 must add default_reminders_json to calendars");
         assert!(defaults.is_none(), "an existing calendar has no defaults until it is re-fetched");
+    }
+
+    /// 0019 adds "Show as" and "Visibility" with the values a server assumes
+    /// when it says nothing, and drops every cursor so the next sync rewrites
+    /// each row with what the server actually holds. An event already stored
+    /// must read as busy and default meanwhile, not fail the window query.
+    #[tokio::test]
+    async fn the_show_as_migration_defaults_existing_rows_and_drops_every_sync_cursor() {
+        let pool = pool_migrated_below(19, 18).await;
+
+        let cal = seed(&pool).await;
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (?1, 'tok-from-before-the-upgrade', 0, 0)")
+            .bind(cal).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz,
+                         end_tz, is_all_day, status, updated_at)
+                     VALUES (?1, 'old', 1000, 2000, 'UTC', 'UTC', 0, 'confirmed', 0)")
+            .bind(cal).execute(&pool).await.unwrap();
+
+        assert!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(transparency) FROM events")
+                .fetch_one(&pool)
+                .await
+                .is_err(),
+            "fixture check: transparency must not exist before 0019 runs"
+        );
+
+        apply_migration(&pool, 19).await;
+
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_state")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0, "a surviving cursor means old rows never learn their real values");
+
+        let (t, v): (String, String) =
+            sqlx::query_as("SELECT transparency, visibility FROM events WHERE google_id = 'old'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((t.as_str(), v.as_str()), ("opaque", "default"));
     }
 
     #[tokio::test]

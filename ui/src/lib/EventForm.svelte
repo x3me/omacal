@@ -21,7 +21,7 @@
   import { zoneName } from './zonename.svelte';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
-    isCalendarAddress, mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest,
+    isCalendarAddress, mailableGuests, normalizedWeeklyDays, onlyShowAsChanged, previewSpan, removableGuest,
     removeGuest, renamedGuest, ruleInWords,
     dateOf, timeOf,
     repeatEndProblem, shiftedEndDate, toEventInput, toggledGuestOptional, toggledWeeklyDay, timeProblem,
@@ -555,7 +555,12 @@
     // Nobody to tell means nothing to choose between, so a save with no guests
     // goes straight out — with `'none'`, so that `all` appears only where
     // somebody chose it. Same rule as the drag path's.
-    if (guests === 0 || provider !== 'google') {
+    //
+    // A change to "Show as" or visibility alone goes straight out too, and
+    // for the same reason from the other side: there is somebody to tell, but
+    // nothing they need to hear (`onlyShowAsChanged`) — unless the scope makes
+    // it a new event, which it says when.
+    if (guests === 0 || provider !== 'google' || onlyShowAsChanged(value, initial, zoneName(), scope)) {
       onsave({ ...result, notify: 'none' });
       return;
     }
@@ -919,6 +924,33 @@
       </div>
     </div>
 
+    <!-- How the event shows to others: whether it blocks time on a free/busy
+         lookup, and who may see its details. Saved only when changed, by the
+         same rule as every other field (`toEventInput`). Confidential is a
+         visibility other apps can set and this one cannot, so it is offered
+         disabled, the Repeat select's Custom pattern below: visible, kept on
+         save, and left behind only by choosing something else. -->
+    <div class="card showas">
+      <label class="field">
+        <span class="lab">Show as</span>
+        <select aria-label="Show as" bind:value={value.showAs}>
+          <option value="busy">Busy</option>
+          <option value="free">Free</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="lab">Visibility</span>
+        <select aria-label="Visibility" bind:value={value.visibility}>
+          {#if initial.visibility === 'confidential'}
+            <option value="confidential" disabled>Confidential</option>
+          {/if}
+          <option value="default">Default</option>
+          <option value="public">Public</option>
+          <option value="private">Private</option>
+        </select>
+      </label>
+    </div>
+
     <label class="field card">
       <span class="lab">Description</span>
       <!-- A textarea, and never anything rendered. Descriptions arrive from
@@ -1234,7 +1266,7 @@
   form { display: flex; flex-direction: column; gap: 8px; }
 
   /* The reference's grouped blocks: each card is one question the form asks
-     — when, where, notify, what, how often, who. Wrappers and paint only;
+     — when, where, notify, how it shows, what, how often, who. Wrappers and paint only;
      every control inside keeps its name and its rules. */
   .card { display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
           border-radius: 8px;
@@ -1248,6 +1280,9 @@
                            box-shadow: inset 0 -1.5px 0 var(--accent); }
 
   .field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  /* Two short selects, side by side: each holds a word or two, and a row
+     apiece would make the card taller than the question it asks. */
+  .card.showas { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .lab { font-size: 9.5px; color: var(--muted); letter-spacing: .05em; }
 
   .reminders { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
