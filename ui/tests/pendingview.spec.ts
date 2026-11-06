@@ -13,7 +13,7 @@ const MON = Date.UTC(2024, 0, 29);
 const ev = (id: number, start: number, end: number, extra: Partial<UiEvent> = {}): UiEvent => ({
   id, title: `e${id}`, location: null, start_ms: start, end_ms: end, color: '#5b8def',
   response: 'accepted', is_all_day: false, attendees: 0, recurring: false, conference: null,
-  all_guests_declined: false, ...extra,
+  all_guests_declined: false, transparency: 'opaque', visibility: 'default', ...extra,
 });
 const lane = (idx: number, lane: number, start_col: number, end_col: number): Lane =>
   ({ idx, lane, start_col, end_col, cont_left: false, cont_right: false });
@@ -436,6 +436,16 @@ test.describe('the details card of a pending edit', () => {
     expect(out.attendees.map((a) => [a.email, a.response_status, a.optional, a.is_self])).toEqual([
       ['me@x.com', 'accepted', false, true], ['dan@x.com', 'declined', true, false], ['zoe@x.com', 'needsAction', false, false],
     ]);
+  });
+
+  test('shows the Show as and visibility the save sends, and the stored ones when it sends none', () => {
+    const when = { allDay: false, startMs: MON + 9 * H, endMs: MON + 10 * H };
+    const stored = { ...detail(), transparency: 'opaque', visibility: 'default' } as EventDetail;
+    const changed = edit(1, MON + 9 * H, when, { transparency: 'transparent', visibility: 'private' });
+    const out = overlayDetail(stored, [changed], MON + 9 * H);
+    expect([out.transparency, out.visibility]).toEqual(['transparent', 'private']);
+    const untouched = overlayDetail(stored, [edit(1, MON + 9 * H, when, { title: 'X' })], MON + 9 * H);
+    expect([untouched.transparency, untouched.visibility]).toEqual(['opaque', 'default']);
   });
 
   test('a meeting made all-day carries the dates its card reads', () => {

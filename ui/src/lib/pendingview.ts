@@ -15,6 +15,7 @@ import { layOutDay } from './daylayout';
 export type EditPatch = {
   title?: string; location?: string | null; color?: string;
   calendar_id?: number; attendees?: number; conference?: null;
+  transparency?: UiEvent['transparency']; visibility?: UiEvent['visibility'];
 };
 
 /** One change still on its way to Google. A move or an edit says where the
@@ -352,6 +353,8 @@ export function overlayDetail(detail: EventDetail, changes: readonly PendingChan
       ...(c.patch.location !== undefined ? { location: c.patch.location } : {}),
       ...(c.patch.calendar_id !== undefined ? { calendar_id: c.patch.calendar_id } : {}),
       ...(c.patch.conference === null ? { conference_uri: null } : {}),
+      ...(c.patch.transparency !== undefined ? { transparency: c.patch.transparency } : {}),
+      ...(c.patch.visibility !== undefined ? { visibility: c.patch.visibility } : {}),
       ...(c.detail.description !== undefined ? { description: c.detail.description } : {}),
       ...(c.detail.guests ? { attendees: rebuildGuests(out.attendees, c.detail.guests) } : {}),
       is_all_day: c.when.allDay,

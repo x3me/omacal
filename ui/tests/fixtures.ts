@@ -91,6 +91,10 @@ const ev = (o: Partial<UiEvent> & { title: string; start_ms: number; end_ms: num
   // Nobody has declined: the quiet default again, and the one every fixture
   // that predates the mark describes.
   all_guests_declined: false,
+  // Busy and default visibility: what every event was before Show as and
+  // visibility were read, so every older fixture draws exactly as it did.
+  transparency: 'opaque',
+  visibility: 'default',
   ...o,
 });
 
@@ -513,6 +517,9 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   // passed by fixture if the default went the other way.
   is_organizer: true,
   guests_can_modify: false,
+  // Busy and default: what a server reports for an event that says nothing.
+  transparency: 'opaque',
+  visibility: 'default',
   // A Google event, which is what every fixture here was written against. A
   // CalDAV spec sets `mails_guests: false` on purpose.
   mails_guests: true,
@@ -3336,6 +3343,30 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       })),
       calendars: FORM_CALENDARS,
     },
+    // `with-guests`' room, stored free and private: the form must open on
+    // those values rather than on the create defaults, and a save that never
+    // touches them must send neither (the event would otherwise go busy and
+    // default on every title change).
+    'free-private': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 40, title: 'Focus block', can_edit: true,
+        transparency: 'transparent', visibility: 'private',
+        organizer_email: 'me@x.com',
+        attendees: [
+          attendee({ email: 'me@x.com', is_self: true }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+        ],
+      })),
+      calendars: FORM_CALENDARS,
+    },
+    // A visibility the form can show but not choose. No guests, so a save
+    // goes straight out and the payload is all there is to read.
+    confidential: {
+      anchor: ANCHOR,
+      initial: editing(detail({ id: 41, title: 'Review', can_edit: true, visibility: 'confidential' })),
+      calendars: FORM_CALENDARS,
+    },
     // A description that is live markup if anything ever renders it, and that
     // must survive the round trip through the form byte for byte — sanitising
     // it on the way *in* would silently rewrite what its author typed and then
@@ -3355,6 +3386,22 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       initial: editing(detail({
         id: 13, title: 'Standup', is_recurring: true,
         recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly', can_edit: true,
+      })),
+      calendars: FORM_CALENDARS,
+    },
+    // `recurring-edit` with people on it, on Google: what the notify rule for
+    // a Show as change has to weigh against the scope. "This and following"
+    // splits the series, and the new tail goes out to every guest.
+    'recurring-with-guests': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 18, title: 'Standup', is_recurring: true,
+        recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly', can_edit: true,
+        organizer_email: 'me@x.com',
+        attendees: [
+          attendee({ email: 'me@x.com', is_self: true }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+        ],
       })),
       calendars: FORM_CALENDARS,
     },

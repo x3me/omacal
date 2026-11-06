@@ -66,6 +66,20 @@ test('removing the call is drawn; adding a Meet link is not', () => {
   expect('conference' in (map(result({ conference: 'googleMeet' })) as any).patch).toBe(false);
 });
 
+test('a changed Show as or visibility is drawn at once; an untouched one leaves the payload\'s', () => {
+  const both = (map(result({ transparency: 'transparent', visibility: 'private' })) as any).patch;
+  expect([both.transparency, both.visibility]).toEqual(['transparent', 'private']);
+  const none = (map(result()) as any).patch;
+  expect('transparency' in none || 'visibility' in none).toBe(false);
+});
+
+test('a new free, private event is drawn free and private; a plain one busy and default', () => {
+  const free = make(result({ transparency: 'transparent', visibility: 'private' })).event;
+  expect([free.transparency, free.visibility]).toEqual(['transparent', 'private']);
+  const plain = make(result()).event;
+  expect([plain.transparency, plain.visibility]).toEqual(['opaque', 'default']);
+});
+
 const make = (r: EventFormResult, cals: { id: number; color_hex: string | null }[] = calendars) =>
   createChange(r, cals, dayMs, -1) as any;
 
@@ -75,7 +89,8 @@ test('a new timed event is drawn at its own times, in its calendar\'s colour, as
   expect(c.event).toEqual({
     id: -1, calendar_id: 2, color: '#222222', title: 'Lunch', location: 'Cafe',
     start_ms: T, end_ms: T + H, is_all_day: false, response: 'accepted', attendees: 0,
-    recurring: false, conference: null, all_guests_declined: false, pending: true,
+    recurring: false, conference: null, all_guests_declined: false,
+    transparency: 'opaque', visibility: 'default', pending: true,
   });
 });
 
