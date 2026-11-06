@@ -140,10 +140,14 @@
   // like they were doing nothing to the title (reported 2026-09-03). Formatted
   // through the same locale call as the month titles, so a locale that
   // writes its years with a suffix keeps it here too.
-  const title = $derived(
+  // Held as the locale's own pieces rather than one string, so the year can
+  // take its own colour (`--title-year`, set by a theme that wants one). The
+  // `<h1>` renders them as spans that add no text of their own, so it still
+  // reads exactly what `toLocaleDateString` would give.
+  const titleParts = $derived(
     view === 'year' || view === 'bigyear'
-      ? new Date(yearShown, 0, 1).toLocaleDateString(undefined, { year: 'numeric' })
-      : new Date(titleMs).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+      ? new Intl.DateTimeFormat(undefined, { year: 'numeric' }).formatToParts(new Date(yearShown, 0, 1))
+      : new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).formatToParts(new Date(titleMs))
   );
 
   // Every month's title in this locale, for the slot the title sits in to
@@ -321,7 +325,7 @@
       <div class="sizers" aria-hidden="true">
         {#each TITLE_SIZERS as sizer}<span>{sizer}</span>{/each}
       </div>
-      <h1 data-tauri-drag-region>{title}</h1>
+      <h1 data-tauri-drag-region>{#each titleParts as part}<span class:year={part.type === 'year'}>{part.value}</span>{/each}</h1>
     </div>
     <div class="nav">
       <button onclick={onPrev} aria-label="Previous {unit}">‹</button>
@@ -615,13 +619,19 @@
      padding would be a dead gap. */
   header.overlay { padding-left: 60px; }
   .left, .right { display: flex; align-items: center; gap: 8px; }
-  h1 { font-size: 20px; font-weight: 600; letter-spacing: -.025em; margin: 0; white-space: nowrap; }
+  h1 { font-size: var(--heading-size, 20px); font-weight: var(--heading-weight, 600); letter-spacing: -.025em; margin: 0; white-space: nowrap; }
+  h1 .year { color: var(--title-year, inherit); }
+  /* The parts are only there to colour the year. Tauri's drag script honours
+     a bare `data-tauri-drag-region` only on the element pressed itself, so a
+     press on a span would not move the window, nor a double-click maximise
+     it: the spans let the press through to the `<h1>`. */
+  h1 span { pointer-events: none; }
   /* The slot — see the markup. Tabular digits so the year never nudges it
      either; every sizer shares the h1's face so the widest of them is the
      widest title this locale can show. */
   .title { display: grid; font-variant-numeric: tabular-nums; }
   .title > * { grid-area: 1 / 1; }
-  .sizers { visibility: hidden; display: grid; font-size: 20px; font-weight: 600;
+  .sizers { visibility: hidden; display: grid; font-size: var(--heading-size, 20px); font-weight: var(--heading-weight, 600);
             letter-spacing: -.025em; white-space: nowrap; }
   .sizers > span { grid-area: 1 / 1; }
   .nav { display: flex; gap: 1px; }

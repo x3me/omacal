@@ -183,7 +183,7 @@ async fn get_status(
 #[tauri::command]
 fn appearance_previews() -> Vec<AppearancePreview> {
     use theme::Appearance as A;
-    [A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn]
+    [A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn, A::Daylight]
         .into_iter()
         .map(|appearance| AppearancePreview {
             appearance,

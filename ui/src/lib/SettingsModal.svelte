@@ -810,10 +810,10 @@
    *  backend's answer replaces `settings`. The repaint is not this function's
    *  business — the backend emits `theme-changed` and `App`'s existing
    *  listener applies it, the same path an Omarchy theme switch takes. */
-  /** The four named themes are for a desktop with no theme of its own to
+  /** The named themes are for a desktop with no theme of its own to
    *  follow: on Omarchy they are one `omarchy-theme-set` away, and a pinned
    *  choice here would fight it. */
-  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn']);
+  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn', 'daylight']);
   const themeOptions = $derived(
     settings?.desktop === 'omarchy'
       ? APPEARANCE_OPTIONS.filter(([id]) => !NAMED_THEMES.has(id))

@@ -3543,7 +3543,7 @@ test.describe('App', () => {
     const themes = modal.getByRole('radiogroup', { name: 'Theme' });
     await expect(themes.locator('.tname')).toHaveText([
       'Follow the desktop', 'Light', 'Dark',
-      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn',
+      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
@@ -4807,6 +4807,46 @@ test.describe('App', () => {
       .poll(() => page.evaluate(() => document.documentElement.style.colorScheme))
       .toBe('light');
   });
+
+  test('a theme with a style sets the knobs, and the next theme removes them', async ({ page }) => {
+    // Daylight is the one palette that carries `style`; everything else
+    // must leave the stylesheets on their own fallbacks, which is what keeps
+    // the other themes pixel-identical. Removal is the half that can rot: a
+    // `setPalette` that only ever wrote would leave Daylight's bolder blocks
+    // on every theme chosen after it. Today's column is the exception that
+    // proves the rule: it is not a knob of its own but replaces
+    // `--today-tint`, so it goes back to that variable's stock value.
+    await page.goto(app());
+    const knobs = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint', '--event-tint-hover', '--event-spine-width',
+              '--event-title-weight', '--event-chip-weight', '--event-ink',
+              '--event-sub-opacity', '--heading-size', '--heading-weight',
+              '--title-year', '--today-tint'].map((n) => s.getPropertyValue(n));
+    });
+    expect((await knobs())[10]).not.toBe('');
+    expect((await knobs()).slice(0, 10)).toEqual(Array(10).fill(''));
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+      accent: '#d32f3a', is_dark: false,
+      style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+               today: '#f2f2f4', heading_size: 24, heading_weight: 700 },
+    }));
+    await expect.poll(knobs).toEqual(['22%', '31%', '3px', '600', '500', '48%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#f2f2f4']);
+    // The title keeps its text whole and only the year turns the accent.
+    const h1 = page.locator('header h1');
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(211, 47, 58)');
+    expect(await h1.evaluate((e) => e.textContent)).toMatch(/^[A-Za-z]+\s?\d{4}$/);
+    await expect(h1.locator('span:not(.year)').first()).not.toHaveCSS('color', 'rgb(211, 47, 58)');
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#fdfdfb', surface: '#ffffff', text: '#1a1a1a',
+      muted: '#6b6b70', accent: '#c04a2b', is_dark: false,
+    }));
+    await expect.poll(knobs).toEqual([...Array(10).fill(''), 'rgba(0,0,0,.025)']);
+  });
 });
 
 // The grid, the popover and the form must name the SAME day for an all-day
@@ -5321,6 +5361,18 @@ test.describe('App: one band, not two', () => {
     const controls = handles.filter((h) => CLICKABLE.includes(h.tag));
     expect(controls, 'a header control was turned into a drag handle and stopped clicking')
       .toEqual([]);
+
+    // A press on the title's own text lands on the handle itself, not on a
+    // part inside it: Tauri's script honours a bare attribute only on the
+    // element pressed, and the title is drawn as parts so the year can take
+    // a colour.
+    // Every part is probed, not the box's centre, which can fall on a space.
+    const missed = await page.locator('header h1').evaluate((h1) =>
+      [...h1.querySelectorAll('span')].filter((s) => {
+        const b = s.getBoundingClientRect();
+        return document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) !== h1;
+      }).map((s) => s.textContent));
+    expect(missed, 'a press on these parts of the title lands on something that is not the drag handle').toEqual([]);
   });
 
   /**

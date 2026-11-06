@@ -11,6 +11,39 @@ pub struct Palette {
     pub muted: String,
     pub accent: String,
     pub is_dark: bool,
+    /// How events, the today column and the header title are drawn, for the
+    /// one theme whose look is more than colours (Daylight). `None` for
+    /// everything else — every other built-in and every Omarchy-derived
+    /// palette — and then absent from the wire entirely, which `setPalette`
+    /// reads as "the stock look".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<ThemeStyle>,
+}
+
+/// The knobs a theme may turn beyond its five colours. Each event default is
+/// the literal the stylesheets carried before this existed (7% / 2px / 600,
+/// ink 65% / 60%, secondary line 62%), and the today tint and title fall back
+/// to what `Header` and `setPalette` always drew, so a palette with no
+/// `ThemeStyle` renders exactly as it always did. Mirrors `ThemeStyle` in
+/// `theme.ts`, which turns them into CSS custom properties.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThemeStyle {
+    /// How much of the calendar's colour a timed block's fill takes, percent.
+    pub tint: u8,
+    /// Width of the calendar-colour edge down a block's left side, px.
+    pub spine: u8,
+    /// CSS `font-weight` of a block's title.
+    pub title_weight: u16,
+    /// How much of the calendar's colour an event's text keeps, percent; the
+    /// rest is the theme's ink. Lower is darker.
+    pub ink: u8,
+    /// Opacity of a block's second line (time, location), percent.
+    pub sub: u8,
+    /// Fill of today's column — a neutral, not a wash of the ink.
+    pub today: String,
+    /// Size in px and weight of the header's month-and-year title.
+    pub heading_size: u8,
+    pub heading_weight: u16,
 }
 
 impl Palette {
@@ -24,6 +57,7 @@ impl Palette {
             muted: "#8a8a90".into(),
             accent: "#5b8def".into(),
             is_dark: true,
+            style: None,
         }
     }
 
@@ -56,6 +90,7 @@ impl Palette {
             muted: "#63636b".into(),
             accent: "#3566d6".into(),
             is_dark: false,
+            style: None,
         }
     }
 
@@ -88,19 +123,35 @@ impl Palette {
     ///   shift would put them (1.05:1, not 1.07:1): at the shifted shade,
     ///   Latte's mauve and Dawn's muted grey fell just under 4.5:1 on a card,
     ///   and neither palette has a darker colour to trade them for.
+    /// - Daylight is ours, not a theme file's: the Fantastical-style bright
+    ///   look (white page, cool grey card, near-black ink, one crisp red). The
+    ///   red is Fantastical's `#e0383e` pulled a shade darker, because that
+    ///   one measures 4.0:1 on the card (this one 4.6:1). It is also the only palette that sets
+    ///   a [`ThemeStyle`] — a stronger tint, a 3px edge, a bolder title in a
+    ///   darker shade of the calendar's colour, a grey today column and a
+    ///   large month-and-year heading whose year is the accent: what makes a
+    ///   block read at a glance on white, where the stock 7% wash is close to
+    ///   invisible.
     ///
     /// Every text colour clears 4.5:1 on `bg` and on `surface`
     /// (`every_named_palette_is_legible` measures all of it).
     pub fn named(theme: Appearance) -> Option<Self> {
         let p = |bg: &str, surface: &str, text: &str, muted: &str, accent: &str, is_dark| Self {
             bg: bg.into(), surface: surface.into(), text: text.into(),
-            muted: muted.into(), accent: accent.into(), is_dark,
+            muted: muted.into(), accent: accent.into(), is_dark, style: None,
         };
         Some(match theme {
             Appearance::TokyoNight => p("#1a1b26", "#21222d", "#c0caf5", "#a9b1d6", "#7aa2f7", true),
             Appearance::CatppuccinMocha => p("#1e1e2e", "#252535", "#cdd6f4", "#a6adc8", "#cba6f7", true),
             Appearance::CatppuccinLatte => p("#eff1f5", "#e9ebef", "#4c4f69", "#5c5f77", "#8839ef", false),
             Appearance::RosePineDawn => p("#faf4ed", "#f5efe8", "#575279", "#6e6a86", "#286983", false),
+            Appearance::Daylight => Self {
+                style: Some(ThemeStyle {
+                    tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                    today: "#f2f2f4".into(), heading_size: 24, heading_weight: 700,
+                }),
+                ..p("#ffffff", "#f4f6f9", "#14161a", "#5a6270", "#d32f3a", false)
+            },
             Appearance::Auto | Appearance::Light | Appearance::Dark => return None,
         })
     }
@@ -154,7 +205,7 @@ pub fn system_scheme() -> SystemScheme {
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
 ///
-/// The four named themes are the same kind of choice — see
+/// The five named themes are the same kind of choice — see
 /// [`Palette::named`] — spelled as Omarchy spells its themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +221,7 @@ pub enum Appearance {
     CatppuccinLatte,
     #[serde(rename = "rose-pine-dawn")]
     RosePineDawn,
+    Daylight,
 }
 
 impl Appearance {
@@ -184,6 +236,7 @@ impl Appearance {
             Appearance::CatppuccinMocha => "catppuccin-mocha",
             Appearance::CatppuccinLatte => "catppuccin-latte",
             Appearance::RosePineDawn => "rose-pine-dawn",
+            Appearance::Daylight => "daylight",
         }
     }
 
@@ -193,6 +246,7 @@ impl Appearance {
         [
             Appearance::Auto, Appearance::Light, Appearance::Dark, Appearance::TokyoNight,
             Appearance::CatppuccinMocha, Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+            Appearance::Daylight,
         ]
         .into_iter()
         .find(|a| a.as_str() == stored)
@@ -302,6 +356,7 @@ pub fn parse_colors(toml_src: &str) -> Option<Palette> {
         muted,
         accent,
         is_dark,
+        style: None,
     })
 }
 
@@ -447,6 +502,7 @@ pub fn parse_alacritty(toml_src: &str) -> Option<Palette> {
         muted,
         accent,
         is_dark,
+        style: None,
     })
 }
 
@@ -796,9 +852,9 @@ light_foreground = "#adb5c4"
         assert_eq!(SystemScheme::from_portal(7), SystemScheme::NoPreference);
     }
 
-    const NAMED: [Appearance; 4] = [
+    const NAMED: [Appearance; 5] = [
         Appearance::TokyoNight, Appearance::CatppuccinMocha,
-        Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+        Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::Daylight,
     ];
 
     /// WCAG contrast of two `#rrggbb` colours.
@@ -829,6 +885,39 @@ light_foreground = "#adb5c4"
         }
     }
 
+    /// Daylight's event text is the calendar's colour mixed toward the ink and
+    /// laid on the calendar's colour mixed toward the page — the same two
+    /// `color-mix`es the stylesheets write — and it has to clear 4.5:1 for
+    /// every colour a calendar can have, at rest and hovered (the fill is
+    /// `hover` points deeper, 9 as `setThemeStyle` derives it), with the
+    /// second line (the same ink at `sub`% opacity) still readable at 3:1.
+    /// Pale colours (banana, amber, cyan) are what set `ink`; a darker
+    /// theme-wide tint or a lighter ink fails here, not on someone's screen.
+    #[test]
+    fn daylight_event_text_is_legible_on_every_calendar_colour() {
+        let p = Palette::named(Appearance::Daylight).unwrap();
+        let s = p.style.as_ref().unwrap();
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let mix = |a: [f64; 3], b: [f64; 3], pct: f64| [0, 1, 2].map(|i| (a[i] * pct + b[i] * (100.0 - pct)) / 100.0);
+        let css = |c: [f64; 3]| format!("#{:02x}{:02x}{:02x}", c[0].round() as u8, c[1].round() as u8, c[2].round() as u8);
+        // The app's ten, Google's eleven, and the demo seed's four.
+        let colours = [
+            "#5b8def", "#2aa198", "#5aa84f", "#8a9a3b", "#e2a03f", "#e07b39", "#e2564a", "#e06c9f", "#9a7bd0", "#7b8a9a",
+            "#7986cb", "#33b679", "#8e24aa", "#e67c73", "#f6bf26", "#f4511e", "#039be5", "#616161", "#3f51b5", "#0b8043", "#d50000",
+            "#2dd4bf", "#f472b6", "#c084fc", "#b58900",
+        ];
+        for c in colours {
+            let text = mix(hex(c), hex(&p.text), f64::from(s.ink));
+            for tint in [s.tint, s.tint + 9] {
+                let fill = mix(hex(c), hex(&p.bg), f64::from(tint));
+                let title = contrast(&css(text), &css(fill));
+                let sub = contrast(&css(mix(text, fill, f64::from(s.sub))), &css(fill));
+                assert!(title >= 4.5, "{c} title at {tint}%: {title:.2}");
+                assert!(sub >= 3.0, "{c} second line at {tint}%: {sub:.2}");
+            }
+        }
+    }
+
     /// Stored as Omarchy spells the theme, sent as the same string, and read
     /// back through one table — so the settings row, the wire and the parse
     /// cannot drift apart.
@@ -840,6 +929,27 @@ light_foreground = "#adb5c4"
             assert!(theme == Appearance::Auto || theme.is_pinned());
         }
         assert_eq!(Appearance::parse("solarized"), None);
+    }
+
+    /// Only Daylight turns the style knobs, and everyone else sends nothing —
+    /// not `null` — so the UI's "absent means stock" holds for every built-in
+    /// palette and for anything resolved from an Omarchy theme file.
+    #[test]
+    fn only_daylight_carries_a_style() {
+        for theme in NAMED {
+            let wire = serde_json::to_value(Palette::named(theme).unwrap()).unwrap();
+            assert_eq!(wire.get("style").is_some(), theme == Appearance::Daylight, "{theme:?}");
+        }
+        for p in [Palette::fallback_dark(), Palette::fallback_light()] {
+            assert!(serde_json::to_value(p).unwrap().get("style").is_none());
+        }
+        let omarchy = parse_colors("mode = \"light\"\nbackground = \"#ffffff\"\nforeground = \"#111111\"").unwrap();
+        assert!(omarchy.style.is_none());
+        let wire = serde_json::to_value(Palette::named(Appearance::Daylight).unwrap()).unwrap();
+        assert_eq!(wire["style"], serde_json::json!({
+            "tint": 22, "spine": 3, "title_weight": 600, "ink": 48, "sub": 85,
+            "today": "#f2f2f4", "heading_size": 24, "heading_weight": 700,
+        }));
     }
 
     /// Pre-Omarchy-4 and custom themes may have no `light_foreground`. Preserve

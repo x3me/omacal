@@ -352,7 +352,7 @@
   .copy-color { flex: 1; min-width: 0;
     --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
     background: var(--event-fill);
-    box-shadow: inset 2px 0 var(--cal), 0 -1px 0 var(--bg), 0 1px 0 var(--bg); }
+    box-shadow: inset var(--event-spine-width, 2px) 0 var(--cal), 0 -1px 0 var(--bg), 0 1px 0 var(--bg); }
   .copy-backdrop { position: absolute; left: 3px; right: 3px; z-index: 25;
     border: 0; padding: 0; border-radius: var(--event-card-radius, 6px);
     cursor: pointer; background: transparent; }
@@ -420,17 +420,24 @@
        otherwise a whole-hour boundary also exposes `.rule`, making hourly
        gaps look heavier than half-hour gaps. */
     --spine: var(--cal);
-    box-shadow: inset 2px 0 0 0 var(--spine),
+    box-shadow: inset var(--event-spine-width, 2px) 0 0 0 var(--spine),
                 0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg);
     background-clip: padding-box;
     /* Composited over --bg, not `transparent`. Blocks overlap constantly, and a
        translucent fill lets the one behind read through — its title, and its
        rounded corners poking past this one's. Against the column background the
        result is indistinguishable from a 7% wash, because the column background
-       IS --bg. */
-    --event-fill: color-mix(in srgb, var(--cal) 7%, var(--bg));
-    background: color-mix(in srgb, var(--cal) 7%, var(--bg));
-    color: color-mix(in srgb, var(--cal) 65%, var(--text));
+       IS --bg.
+
+       The 7%, the 2px spine above and the title's 600 below are the stock
+       look (as are the 65% of the calendar's colour in the text and the
+       second line's .62) and the fallbacks of `--event-tint`,
+       `--event-spine-width`, `--event-title-weight`, `--event-ink` and
+       `--event-sub-opacity`, which `setPalette` sets only for a theme that
+       carries a `ThemeStyle` (Daylight) and removes for every other. */
+    --event-fill: color-mix(in srgb, var(--cal) var(--event-tint, 7%), var(--bg));
+    background: color-mix(in srgb, var(--cal) var(--event-tint, 7%), var(--bg));
+    color: color-mix(in srgb, var(--cal) var(--event-ink, 65%), var(--text));
     font: inherit;
   }
   /* Hover lifts the block to full width so a squeezed 3-way pile stays
@@ -444,7 +451,7 @@
      one; this rule had been losing the same fight invisibly until a dense
      iCloud week made it obvious. */
   .ev.hovered { left: 3px !important; width: calc(100% - 6px) !important; z-index: 20 !important;
-              box-shadow: inset 2px 0 0 0 var(--spine),
+              box-shadow: inset var(--event-spine-width, 2px) 0 0 0 var(--spine),
                           0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg),
                           0 4px 14px rgba(0, 0, 0, .5); }
   /* Keep every saved event below the creation preview, regardless of its
@@ -457,10 +464,10 @@
      on a 14" screen, and Google's own week view sits at ~12px. The density
      ladder holds with room to spare — a 45-minute block is 52px at the
      grid's 70px/hour and two lines at these sizes need 33. */
-  .ev b { display: block; font-size: 11.5px; font-weight: 600; line-height: 1.3;
+  .ev b { display: block; font-size: 11.5px; font-weight: var(--event-title-weight, 600); line-height: 1.3;
           letter-spacing: -.01em; white-space: nowrap; overflow: hidden;
           text-overflow: ellipsis; }
-  .ev em { font-style: normal; display: block; font-size: 10.5px; opacity: .62;
+  .ev em { font-style: normal; display: block; font-size: 10.5px; opacity: var(--event-sub-opacity, .62);
            line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .rs { position: absolute; top: 1px; right: 4px; font-size: 9px;
@@ -512,8 +519,15 @@
      ones it covers. Every state is already opaque at rest, so this is emphasis
      rather than the occlusion fix itself. Last among the state rules so it
      wins over the per-state backgrounds above at equal specificity. */
-  .ev:hover { --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
-              background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
+  .ev:hover { --event-fill: color-mix(in srgb, var(--cal) var(--event-tint-hover, 16%), var(--bg));
+              background-color: color-mix(in srgb, var(--cal) var(--event-tint-hover, 16%), var(--bg)); }
+  /* A declined block hovers to the stock 16% whatever the theme's tint. Its
+     spine is the calendar's colour at 45%, and a theme's deeper hover fill
+     (Daylight's 31%) all but matched it: the one coloured edge a declined
+     block keeps vanished under the pointer. The muted, struck-through title
+     was also chosen against a faint fill, not a strong one. */
+  .ev.declined:hover { --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
+                       background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
 
   /* The preference fades the fill colour, never the element: opacity here
      would also fade the title, RSVP mark, outline and colour spine. Hover
