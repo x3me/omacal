@@ -98,7 +98,7 @@
     background: var(--accent); transform: translateX(-50%);
   }
 
-  .yday.today { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .yday.today { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
   .yday.today.dotted::after { background: var(--bg); }
 
   /* Distinct from a plain empty day on the *cell* itself, not just the
@@ -113,7 +113,7 @@
   .yday.unsynced.today {
     background-image: repeating-linear-gradient(
       45deg, var(--hour-rule), var(--hour-rule) 1px, transparent 1px, transparent 4px
-    ), linear-gradient(var(--accent), var(--accent));
+    ), linear-gradient(var(--accent-fill), var(--accent-fill));
     color: var(--on-accent);
   }
 </style>

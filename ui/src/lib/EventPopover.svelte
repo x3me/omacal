@@ -864,7 +864,7 @@
                  background: color-mix(in srgb, var(--text) 6%, transparent);
                  color: var(--text); border: 1px solid var(--hairline);
                  border-radius: 6px; padding: 5px 0; }
-  .rsvp button.chosen { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .rsvp button.chosen { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
   .rsvp button:disabled { opacity: .6; cursor: default; }
 
   /* Quieter than the RSVP row above it, and separated from it by a hairline:

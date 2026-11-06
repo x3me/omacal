@@ -210,5 +210,5 @@
   .days button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
   .days button.outside { color: var(--muted); opacity: .55; }
   .days button.cursor { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .days button.on { background: var(--accent); color: var(--on-accent, #fff); }
+  .days button.on { background: var(--accent-fill); color: var(--on-accent, #fff); }
 </style>

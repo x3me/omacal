@@ -61,10 +61,10 @@ textarea::placeholder {
    colour scheme says, and Playwright's WebKit ignores the property. So the
    box is a bordered square off the same tokens every other control uses,
    and the tick is the `::before` clipped to a check — `--on-accent` on
-   `--accent`, the pair the active view chip already uses, so a theme whose
-   accent is pale still gets a legible tick. App-wide for the resets' reason
-   above: settings, the calendar list and the event form should all draw
-   the same box. */
+   `--accent-fill`, the pair the active view chip already uses, so a theme
+   whose accent is pale still gets a legible tick. App-wide for the resets'
+   reason above: settings, the calendar list and the event form should all
+   draw the same box. */
 input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
@@ -89,8 +89,8 @@ input[type='checkbox']::before {
   transform: scale(0);
 }
 input[type='checkbox']:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 input[type='checkbox']:checked::before {
   transform: scale(1);
@@ -99,8 +99,8 @@ input[type='checkbox']:checked::before {
    all / Show all). The ticked box's fill, a dash for the tick. Left to the
    reset above it would look exactly like an empty box. */
 input[type='checkbox']:indeterminate {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 input[type='checkbox']:indeterminate::before {
   height: 2px;
@@ -119,7 +119,7 @@ input[type='checkbox']:disabled {
 /* Radios, the same way and for the same reason — the engine's circle was
    the one white control left after the checkboxes were drawn (2026-09-02).
    The box is the checkbox's, rounded; the mark is a dot of `--on-accent`
-   on an `--accent` fill rather than a ring, so a checked radio and a
+   on `--accent-fill` rather than a ring, so a checked radio and a
    checked checkbox read as the same state in the same colours. */
 input[type='radio'] {
   appearance: none;
@@ -145,8 +145,8 @@ input[type='radio']::before {
   transform: scale(0);
 }
 input[type='radio']:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 input[type='radio']:checked::before {
   transform: scale(1);

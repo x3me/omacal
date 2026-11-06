@@ -1011,6 +1011,8 @@ export function installTauriStub(scenario: string): Harness {
           ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
           ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
           ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
+          ['daylight', { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270', accent: '#d32f3a', is_dark: false, style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85, today: '#f2f2f4', heading_size: 24, heading_weight: 700 } }],
+          ['daylight-dark', { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab', accent: '#ef5350', is_dark: true, style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85, today: '#1e2024', heading_size: 24, heading_weight: 700, tint_space: 'srgb-linear', accent_fill: '#d32f3a' } }],
         ].map(([appearance, palette]) => ({ appearance, palette }));
       // Recorded in `calls` like everything else; the real one opens a
       // browser, which a test can only assert was *asked for*.

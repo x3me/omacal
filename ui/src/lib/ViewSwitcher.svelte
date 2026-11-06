@@ -38,6 +38,6 @@
   }
   .vswitch button:first-child { border-radius: 6px 0 0 6px; }
   .vswitch button:last-child { border-radius: 0 6px 6px 0; }
-  .vswitch button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .vswitch button.active { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
   .vswitch button:disabled { opacity: .5; cursor: default; }
 </style>

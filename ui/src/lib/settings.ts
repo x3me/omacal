@@ -64,12 +64,15 @@ export const START_ON_LOGIN_OPTIONS: ReadonlyArray<[StartOnLogin, string]> = [
  *  built-in palettes, chosen explicitly. */
 export type Appearance =
   | 'auto' | 'light' | 'dark'
-  | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn';
+  | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn' | 'daylight'
+  | 'daylight-dark';
 
 /** The rows, in the order the select offers them, and the labels the spec
  *  drives them by. Here rather than in the markup so the component and its
- *  test read one list. The four named themes are Omarchy's own most used,
- *  for a desktop with no Omarchy theme to follow (`theme::Palette::named`). */
+ *  test read one list. The named themes are for a desktop with no Omarchy
+ *  theme to follow (`theme::Palette::named`): four of Omarchy's own most used,
+ *  and Daylight, omacal's own bright one, with Daylight Dark, the same look
+ *  on a near-black page. */
 export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
   ['auto', 'Follow the desktop'],
   ['light', 'Light'],
@@ -78,6 +81,8 @@ export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
   ['catppuccin-mocha', 'Catppuccin Mocha'],
   ['catppuccin-latte', 'Catppuccin Latte'],
   ['rose-pine-dawn', 'Rosé Pine Dawn'],
+  ['daylight', 'Daylight'],
+  ['daylight-dark', 'Daylight Dark'],
 ];
 
 /** Whether the window draws a title bar. `'auto'` is no frame where a tiling
