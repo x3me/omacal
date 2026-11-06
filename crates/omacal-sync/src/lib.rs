@@ -4,7 +4,7 @@ mod reap;
 pub mod webcal_feed;
 pub use convert::{
     from_google_attendee, from_google_reminder, from_google_reminders, is_tombstone,
-    to_cancelled_exception, to_stored,
+    to_cancelled_exception, to_stored, transparency_of, visibility_of,
 };
 
 use omacal_google::{ApiError, CalendarClient, EventsRequest};
@@ -373,6 +373,7 @@ mod tests {
             color_hex: None, calendar_timezone: "Europe/Sofia".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }

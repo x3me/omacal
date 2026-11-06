@@ -86,6 +86,12 @@ pub struct EventDetail {
     /// Google's `guestsCanModify`: the organizer let guests change the event
     /// for everyone. Meaningful only when `is_organizer` is false.
     pub guests_can_modify: bool,
+    /// "Show as": `opaque` (busy) or `transparent` (free), the store's own
+    /// strings, whichever provider the event came from.
+    pub transparency: String,
+    /// `default` | `public` | `private` | `confidential`. The form offers the
+    /// first three and shows the fourth only when it is already the value.
+    pub visibility: String,
     /// Whether this event's provider emails the people on it when a write
     /// asks it to. Google does, because Google is the mail server; CalDAV
     /// has nothing of the kind in the protocol OmaCal speaks, so a notify
@@ -305,6 +311,8 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         can_edit: can_edit(state.demo, &access_role),
         is_organizer,
         guests_can_modify: event.guests_can_modify,
+        transparency: event.transparency,
+        visibility: event.visibility,
         mails_guests,
         attendees: event.attendees,
         reminders: event.reminders,
@@ -579,11 +587,16 @@ pub(crate) fn resolve_instance_id(
 /// Google now has; and `self_response`, derived the same way sync derives it
 /// — Google does not return it as a field of its own — so the week grid's
 /// block styling updates immediately instead of waiting for the next sync.
+/// `transparency` and `visibility` too: a PATCH response is the whole event,
+/// so when an edit that changed them falls back to this, the dialog reopens
+/// showing what Google now holds rather than what the row last said.
 pub(crate) fn merge_patched(row: &mut omacal_store::StoredEvent, patched: &omacal_google::model::Event) {
     row.etag = patched.etag.clone();
     row.sequence = patched.sequence;
     row.attendees = patched.attendees.iter().map(omacal_sync::from_google_attendee).collect();
     row.self_response = row.attendees.iter().find(|a| a.is_self).map(|a| a.response_status.clone());
+    row.transparency = omacal_sync::transparency_of(patched);
+    row.visibility = omacal_sync::visibility_of(patched);
 }
 
 /// `occurrence_start_ms` is the `start_ms` of the block the user actually
@@ -1098,6 +1111,15 @@ async fn create_via_client(
     if let Some(conference) = &f.conference {
         body["conferenceData"] = crate::write::conference_json(conference);
     }
+    // "Show as" and visibility only when they are not what Google assumes for
+    // an absent key. Sending `opaque` or `default` would produce the same event
+    // and say more than the user did.
+    if let Some(t) = f.transparency.filter(|t| *t != crate::write::Transparency::Opaque) {
+        body["transparency"] = t.as_str().into();
+    }
+    if let Some(v) = f.visibility.filter(|v| *v != crate::write::Visibility::Default) {
+        body["visibility"] = v.as_str().into();
+    }
 
     // **The guest list, through the edit path's own builder.**
     //
@@ -1296,6 +1318,9 @@ pub(crate) fn edit_patch_body(
         // own settings, not against a before-side this struct would carry.
         reminders: None,
         conference: None,
+        // Compared below against the row's own strings, the same way.
+        transparency: None,
+        visibility: None,
     };
 
     let anchor = if is_recurring(&ev.recurrence, &ev.recurring_event_id) {
@@ -1370,6 +1395,23 @@ pub(crate) fn edit_patch_body(
     // CalendarClient for every modifying request.
     if let Some(conference) = &after.conference {
         body["conferenceData"] = crate::write::conference_json(conference);
+    }
+
+    // **"Show as" and visibility, and only when they actually changed**, by
+    // the reminders rule above: both are plain strings on the row in Google's
+    // own vocabulary, so equality is exact. Choosing Default on an event that
+    // was private sends `"default"` explicitly, since an absent key would
+    // leave it private. A confidential event the dialog cannot express comes
+    // back as `None` and is never touched.
+    if let Some(t) = after.transparency {
+        if t.as_str() != ev.transparency {
+            body["transparency"] = serde_json::json!(t.as_str());
+        }
+    }
+    if let Some(v) = after.visibility {
+        if v.as_str() != ev.visibility {
+            body["visibility"] = serde_json::json!(v.as_str());
+        }
     }
 
     body
@@ -2345,6 +2387,28 @@ async fn split_series(
     // key creates an event with no attendees, which is what they asked for.
     if !attendees.is_empty() {
         body["attendees"] = serde_json::json!(attendees);
+    }
+
+    // "Show as" and visibility: the form's choice when it made one, and the
+    // series' own otherwise. This body is an INSERT like `conferenceData`
+    // above, so an untouched field left out would quietly turn the rest of a
+    // free or private series busy and default. Copied from the wire master
+    // rather than `master_row`, so a value this app cannot set (confidential)
+    // travels as Google spelled it. Busy and default stay absent, the create
+    // path's rule.
+    let transparency = after
+        .transparency
+        .map(|t| t.as_str().to_string())
+        .or_else(|| master.transparency.clone());
+    if let Some(t) = transparency.filter(|t| t != "opaque") {
+        body["transparency"] = t.into();
+    }
+    let visibility = after
+        .visibility
+        .map(|v| v.as_str().to_string())
+        .or_else(|| master.visibility.clone());
+    if let Some(v) = visibility.filter(|v| v != "default") {
+        body["visibility"] = v.into();
     }
 
     // **The caller's choice, not a constant.** Both writes below carried
@@ -3408,6 +3472,7 @@ mod tests {
             hangout_link: None, conference_data: None, attendees: vec![], sequence: 0,
             organizer: Default::default(),
             guests_can_modify: false,
+            transparency: None, visibility: None,
             reminders: Default::default(),
         }
     }
@@ -3469,6 +3534,7 @@ mod tests {
             description: None,
             etag: Some("\"old\"".into()), sequence: 1, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees,
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
@@ -3496,11 +3562,13 @@ mod tests {
             sequence: 5,
             organizer: Default::default(),
             guests_can_modify: false,
+            transparency: Some("transparent".into()), visibility: Some("private".into()),
             reminders: Default::default(),
         };
         merge_patched(&mut row, &patched);
         assert_eq!(row.etag.as_deref(), Some("\"new\""));
         assert_eq!(row.sequence, 5);
+        assert_eq!((row.transparency.as_str(), row.visibility.as_str()), ("transparent", "private"));
         assert_eq!(row.attendees.len(), 1);
         assert_eq!(
             row.self_response.as_deref(), Some("declined"),
@@ -4280,7 +4348,7 @@ mod tests {
             "is_all_day", "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
             "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit", "is_organizer", "guests_can_modify",
-            "mails_guests", "attendees", "reminders", "calendar_default_reminders",
+            "transparency", "visibility", "mails_guests", "attendees", "reminders", "calendar_default_reminders",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "the UI reads these by name off `invoke`'s result");
@@ -4497,6 +4565,8 @@ mod tests {
                 }],
             }),
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -4624,6 +4694,60 @@ mod tests {
         create_via_client(&pool, cal, "cal@x.com", "UTC", fields, "none", &client)
             .await
             .unwrap();
+    }
+
+    /// A create sends "Show as" and visibility only when they are not what
+    /// Google assumes for an absent key. `body_json` matches the whole
+    /// document, so the busy/default case asserts the keys are absent.
+    #[tokio::test]
+    async fn creating_sends_show_as_and_visibility_only_when_not_the_default() {
+        use crate::write::{Transparency, Visibility};
+        for (t, v, extra) in [
+            (Transparency::Opaque, Visibility::Default, serde_json::json!({})),
+            (Transparency::Transparent, Visibility::Private,
+             serde_json::json!({ "transparency": "transparent", "visibility": "private" })),
+        ] {
+            let fields = crate::write::EventFields {
+                transparency: Some(t),
+                visibility: Some(v),
+                ..sample_fields()
+            };
+            let (start, end) = crate::write::when_json(&fields.when, &fields.tz);
+            let mut expected_body = serde_json::json!({
+                "start": start,
+                "end":   end,
+                "summary": "Lunch",
+                "recurrence": ["RRULE:FREQ=WEEKLY"],
+                "reminders": { "useDefault": false,
+                               "overrides": [{ "method": "popup", "minutes": 10 }] },
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                expected_body[k] = val.clone();
+            }
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .and(wiremock::matchers::body_json(expected_body))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "g-new", "status": "confirmed", "etag": "\"e1\"",
+                    "summary": "Lunch", "transparency": "transparent",
+                    "start": {"dateTime": "2026-08-10T12:00:00+03:00"},
+                    "end":   {"dateTime": "2026-08-10T13:00:00+03:00"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let pool = omacal_store::connect_memory().await.unwrap();
+            let cal = seed_calendar(&pool, "owner").await;
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let id = create_via_client(&pool, cal, "cal@x.com", "UTC", fields, "none", &client)
+                .await
+                .unwrap();
+            let (row, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+            assert_eq!(row.transparency, "transparent", "the stored row is Google's answer");
+        }
     }
 
     /// An **empty** list sends no `attendees` key at all.
@@ -5044,6 +5168,8 @@ mod tests {
             // Likewise untouched, for the same reason.
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -5882,6 +6008,47 @@ mod tests {
         let body =
             edit_patch_body(&ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", &untouched);
         assert_eq!(body, serde_json::json!({}));
+    }
+
+    /// "Show as" and visibility reach the PATCH only when they differ from
+    /// the row, and each alone: changing one sends that one key and nothing
+    /// else. Echoing the stored values back, or not sending them at all (a
+    /// drag), sends nothing. Choosing Default on a private event sends
+    /// `"default"` explicitly, since an absent key would leave it private.
+    #[test]
+    fn show_as_and_visibility_are_patched_only_when_they_change() {
+        use crate::write::{Transparency, Visibility};
+        let mut ev = stored(three());
+        ev.summary = Some("Lunch".into());
+        ev.start_utc = OCCURRENCE;
+        ev.end_utc = OCCURRENCE + HOUR;
+        ev.transparency = "opaque".into();
+        ev.visibility = "private".into();
+        let patch = |after: &crate::write::EventFields| {
+            edit_patch_body(&ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", after)
+        };
+
+        let untouched = form("Lunch", OCCURRENCE, OCCURRENCE + HOUR);
+        assert_eq!(patch(&untouched), serde_json::json!({}));
+
+        let echoed = crate::write::EventFields {
+            transparency: Some(Transparency::Opaque),
+            visibility: Some(Visibility::Private),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&echoed), serde_json::json!({}), "unchanged values reached the wire");
+
+        let free = crate::write::EventFields {
+            transparency: Some(Transparency::Transparent),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&free), serde_json::json!({ "transparency": "transparent" }));
+
+        let back_to_default = crate::write::EventFields {
+            visibility: Some(Visibility::Default),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&back_to_default), serde_json::json!({ "visibility": "default" }));
     }
 
     /// Reminders the user did not touch send **no `reminders` at all** —
@@ -7714,6 +7881,70 @@ mod tests {
         let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
         let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
         assert_eq!(body["conferenceData"], conference);
+    }
+
+    /// "Show as" and visibility the form did not touch travel to the tail
+    /// from the master, as Google spelled them (confidential included, which
+    /// the form cannot set); a value the form did set wins.
+    #[tokio::test]
+    async fn the_new_series_carries_the_masters_show_as_and_visibility() {
+        for (form_t, want_t) in [
+            (None, "transparent"),
+            (Some(crate::write::Transparency::Opaque), "absent"),
+        ] {
+            let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+            ev.transparency = "transparent".into();
+            ev.visibility = "confidential".into();
+            let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+            let mut master = wire_master(&["RRULE:FREQ=WEEKLY"]);
+            master["transparency"] = serde_json::json!("transparent");
+            master["visibility"] = serde_json::json!("confidential");
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(master))
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                    UNTIL_BEFORE_OCCURRENCE,
+                ])))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let after = crate::write::EventFields {
+                transparency: form_t,
+                ..form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR)
+            };
+            update_via_client(
+                &pool, "following", OCCURRENCE, ev, "cal@x.com", "UTC", after, "all", &client,
+            )
+            .await
+            .unwrap();
+
+            let sent = requests(&server).await;
+            let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+            let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+            assert_eq!(body["visibility"], "confidential", "untouched visibility is the master's");
+            match want_t {
+                "absent" => assert!(body.get("transparency").is_none(), "{body}"),
+                t => assert_eq!(body["transparency"], t),
+            }
+        }
     }
 
     /// The truncation carries the ending and nothing else.

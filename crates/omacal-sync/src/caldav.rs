@@ -132,6 +132,24 @@ pub fn caldav_to_stored(
         sequence: ev.sequence,
         organizer_email: ev.organizer_email.clone(),
         guests_can_modify: false,
+        // CalDAV's words mapped onto Google's, the store's one vocabulary. An
+        // absent `TRANSP` is `OPAQUE` by the RFC; an absent `CLASS` is
+        // Google's `default` (the RFC would say `PUBLIC`, but the user never
+        // chose that, and writing it back on the next save would be a change
+        // nobody made). An extension `CLASS` value nobody here understands
+        // reads as `default` too.
+        transparency: match ev.transp.as_deref() {
+            Some("TRANSPARENT") => "transparent",
+            _ => "opaque",
+        }
+        .to_string(),
+        visibility: match ev.class.as_deref() {
+            Some("PUBLIC") => "public",
+            Some("PRIVATE") => "private",
+            Some("CONFIDENTIAL") => "confidential",
+            _ => "default",
+        }
+        .to_string(),
         attendees: ev
             .attendees
             .iter()
@@ -431,6 +449,31 @@ mod tests {
             conference_uri: None,
             last_modified_ms: None,
             attendees: Vec::new(),
+            transp: None,
+            class: None,
+        }
+    }
+
+    /// `TRANSP` and `CLASS` land in the store's vocabulary, and their absence
+    /// reads as busy and default, the same answer a Google event omitting both
+    /// keys gives.
+    #[test]
+    fn transp_and_class_map_onto_show_as_and_visibility() {
+        let mut ev = sample("u1");
+        let s = caldav_to_stored(&ev, 7, "Europe/Sofia", None, "").unwrap();
+        assert_eq!((s.transparency.as_str(), s.visibility.as_str()), ("opaque", "default"));
+
+        for (transp, class, want_t, want_v) in [
+            ("TRANSPARENT", "PRIVATE", "transparent", "private"),
+            ("OPAQUE", "PUBLIC", "opaque", "public"),
+            ("OPAQUE", "CONFIDENTIAL", "opaque", "confidential"),
+            ("X-WHATEVER", "X-TEAM-ONLY", "opaque", "default"),
+        ] {
+            ev.transp = Some(transp.into());
+            ev.class = Some(class.into());
+            let s = caldav_to_stored(&ev, 7, "Europe/Sofia", None, "").unwrap();
+            assert_eq!((s.transparency.as_str(), s.visibility.as_str()), (want_t, want_v),
+                       "TRANSP:{transp} CLASS:{class}");
         }
     }
 

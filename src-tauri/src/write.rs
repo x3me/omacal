@@ -70,6 +70,69 @@ pub(crate) struct EventFields {
     /// touched. Manual Zoom URLs are represented in `location`; Google Meet is
     /// the structured provider this Google connection can create itself.
     pub conference: Option<ConferenceAction>,
+    /// "Show as", or `None` for "not touched". Unlike `guests` this is a plain
+    /// field on both providers, but the rule is the same one: a path that
+    /// does not offer it (a drag, quick add, the CLI) must not write it, or
+    /// it would flatten a free event to busy on every move.
+    pub transparency: Option<Transparency>,
+    /// Visibility, or `None` for "not touched". `confidential` cannot be
+    /// chosen, so an event that has it keeps it by sending `None`.
+    pub visibility: Option<Visibility>,
+}
+
+/// "Show as". Google's `transparency` values, lowercased as the UI sends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Transparency {
+    Opaque,
+    Transparent,
+}
+
+impl Transparency {
+    /// The value Google and the store both spell it as.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Transparency::Opaque => "opaque",
+            Transparency::Transparent => "transparent",
+        }
+    }
+
+    pub(crate) fn transp(self) -> omacal_caldav::Transp {
+        match self {
+            Transparency::Opaque => omacal_caldav::Transp::Opaque,
+            Transparency::Transparent => omacal_caldav::Transp::Transparent,
+        }
+    }
+}
+
+/// The visibilities the dialog can set. Google also has `confidential`, which
+/// is read and preserved but never written by this app, so it has no variant
+/// here and a payload naming it fails at the command boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Visibility {
+    Default,
+    Public,
+    Private,
+}
+
+impl Visibility {
+    /// The value Google and the store both spell it as.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Default => "default",
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+        }
+    }
+
+    pub(crate) fn class(self) -> omacal_caldav::Class {
+        match self {
+            Visibility::Default => omacal_caldav::Class::Default,
+            Visibility::Public => omacal_caldav::Class::Public,
+            Visibility::Private => omacal_caldav::Class::Private,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -477,6 +540,14 @@ pub(crate) struct EventInput {
     /// `"googleMeet"` or `"none"` — matching the UI union exactly.
     #[serde(default)]
     pub conference: Option<ConferenceInput>,
+    /// Absent when the user did not touch "Show as" — see
+    /// [`EventFields::transparency`]. `#[serde(default)]` for the same two
+    /// reasons as `guests`: older payloads, and callers with no such control.
+    #[serde(default)]
+    pub transparency: Option<Transparency>,
+    /// Absent when the user did not touch visibility.
+    #[serde(default)]
+    pub visibility: Option<Visibility>,
 }
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -604,6 +675,8 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
             },
             ConferenceInput::None => ConferenceAction::Remove,
         }),
+        transparency: input.transparency,
+        visibility: input.visibility,
     })
 }
 
@@ -988,6 +1061,8 @@ mod tests {
             guests: None,
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -1318,6 +1393,8 @@ mod tests {
             guests: None,
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 

@@ -150,6 +150,14 @@ pub struct Event {
     /// nothing and discarded. Defaulted because a tombstone omits it.
     #[serde(default)]
     pub reminders: Reminders,
+    /// "Show as": `opaque` (busy) or `transparent` (free). Google omits the
+    /// key for an opaque event, so `None` means busy, not unknown.
+    #[serde(default)]
+    pub transparency: Option<String>,
+    /// `default` | `public` | `private` | `confidential`. Omitted for
+    /// `default`, the same way `transparency` is omitted for busy.
+    #[serde(default)]
+    pub visibility: Option<String>,
 }
 
 #[cfg(test)]
@@ -225,6 +233,21 @@ mod tests {
         let ev = parse_event(event_json(Some(serde_json::json!({"useDefault": true}))));
         assert!(ev.reminders.use_default);
         assert!(ev.reminders.overrides.is_empty());
+    }
+
+    #[test]
+    fn show_as_and_visibility_parse_when_present_and_are_none_when_omitted() {
+        let mut v = event_json(None);
+        v["transparency"] = serde_json::json!("transparent");
+        v["visibility"] = serde_json::json!("private");
+        let ev = parse_event(v);
+        assert_eq!(ev.transparency.as_deref(), Some("transparent"));
+        assert_eq!(ev.visibility.as_deref(), Some("private"));
+
+        // Google leaves both keys out for a busy, default-visibility event.
+        let ev = parse_event(event_json(None));
+        assert_eq!(ev.transparency, None);
+        assert_eq!(ev.visibility, None);
     }
 
     /// A cancelled-event tombstone carries almost nothing — no start, no end,
