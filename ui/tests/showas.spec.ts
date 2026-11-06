@@ -204,6 +204,35 @@ test.describe('month view', () => {
   });
 });
 
+test.describe('free is spoken where the name is the text', () => {
+  // The week block says ", free" in its own label. The other surfaces are
+  // named by their content, so a hidden word carries it there, the way the
+  // lock's "Private" does; and it must stay out of the layout.
+  const spoken = async (page: Page, sel: string, free: string, busy: string) => {
+    const f = page.locator(sel, { hasText: free });
+    await expect(f).toHaveAccessibleName(/, free/);
+    expect((await f.locator('.vh').boundingBox())!.width).toBeLessThanOrEqual(1);
+    await expect(page.locator(sel, { hasText: busy })).not.toHaveAccessibleName(/, free/);
+  };
+
+  test('all-day chips', async ({ page }) => {
+    await page.goto(show('WeekGrid', 'show-as'));
+    await spoken(page, '.chip', 'Offsite - free', 'Conference');
+  });
+
+  test('month bars and timed rows', async ({ page }) => {
+    await page.goto(show('MonthGrid', 'show-as'));
+    await spoken(page, '.bar', 'Offsite - free', 'Conference');
+    await spoken(page, '.timed', 'Focus - free', 'Busy review');
+    await expect(page.locator('.timed', { hasText: 'Walk - free private' })).toHaveAccessibleName(/, free/);
+  });
+
+  test('list rows', async ({ page }) => {
+    await page.goto(show('Filmstrip', 'show-as'));
+    await spoken(page, '.srow', 'Focus - free', 'Busy review');
+  });
+});
+
 test.describe('list view', () => {
   test('free rows draw the outline and private rows carry the lock', async ({ page }) => {
     await page.goto(show('Filmstrip', 'show-as'));

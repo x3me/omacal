@@ -206,6 +206,9 @@
                   {ev.is_all_day ? 'All day' : `${hhmm(ev.start_ms)}–${hhmm(ev.end_ms)}`}
                 </em>
                 <b>{ev.title}</b>
+                <!-- Spoken, since the outline is only seen; the lock below
+                     says "Private" the same way (`LockGlyph`). -->
+                {#if isFree(ev)}<span class="vh">, free</span>{/if}
                 <CalendarColors colors={ev.copies?.map(copy => copy.color)} />
                 {#if locationLabel(ev.location)}
                   <!-- Right beside the title, not across the row: the second

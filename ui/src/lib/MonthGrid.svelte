@@ -152,7 +152,7 @@
             onpointerdown={(e) => rightDown(ev, e)}
             onpointerup={(e) => rightUp(ev, e)}
             oncontextmenu={(e) => e.preventDefault()}
-          >{lane.cont_left ? '‹ ' : ''}{ev.title}{#if isPrivate(ev)}<span class="lock"><LockGlyph size={9} /></span>{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
+          >{lane.cont_left ? '‹ ' : ''}{ev.title}{#if isFree(ev)}<span class="vh">, free</span>{/if}{#if isPrivate(ev)}<span class="lock"><LockGlyph size={9} /></span>{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
         {/each}
         {#if row.bar_overflow.length}
           <!-- A span, not a button: unlike a cell's own overflow, these
@@ -203,7 +203,7 @@
                 onpointerdown={(e) => rightDown(ev, e)}
                 onpointerup={(e) => rightUp(ev, e)}
                 oncontextmenu={(e) => e.preventDefault()}
-              ><i class="dot" style="background:{isFree(ev) ? 'none' : ev.color}"></i>{#if isPrivate(ev)}<span class="title">{ev.title}</span><span class="lock"><LockGlyph size={9} /></span>{:else}{ev.title}{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
+              ><i class="dot" style="background:{isFree(ev) ? 'none' : ev.color}"></i>{#if isPrivate(ev)}<span class="title">{ev.title}</span><span class="lock"><LockGlyph size={9} /></span>{:else}{ev.title}{/if}{#if isFree(ev)}<span class="vh">, free</span>{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
             {/each}
             {#if cell.timed.length > MONTH_GRID_TIMED_LIMIT}
               <button class="more" onclick={() => pickDay(cell.start_ms)}>

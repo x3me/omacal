@@ -93,7 +93,7 @@
           title={isUnsaved(ev) ? `${ev.title} · Saving…` : ev.title}
           onclick={(e) => open(ev, e)}
         >
-          {lane.cont_left ? '‹ ' : ''}{ev.title}
+          {lane.cont_left ? '‹ ' : ''}{ev.title}{#if isFree(ev)}<span class="vh">, free</span>{/if}
           {#if isPrivate(ev)}<span class="lock"><LockGlyph /></span>{/if}
           <CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} />
         </button>
