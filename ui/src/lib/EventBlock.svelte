@@ -1,5 +1,7 @@
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import type { ColorSegment } from './combined';
   import { clockFormat } from './clock.svelte';
   import { RESIZE_EDGE_PX, beganDrag, hasResizeEdges } from './drag';
@@ -205,6 +207,8 @@
   data-combined-count={event.copies?.length || undefined}
   style:color={event.copies?.length ? "var(--text)" : undefined}
   class:nobodycoming={event.all_guests_declined}
+  class:free={isFree(event)}
+  class:private={isPrivate(event)}
   class:dragging={preview !== null}
   class:keyboard={keyboardSelected}
   class:create-mode={createMode}
@@ -227,7 +231,7 @@
     left:calc({left}% + 3px); width:calc({width}% - 6px);
     --cal:{event.color}; z-index:{placed.column + 1};
   "
-  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
+  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{isFree(event) ? ', free' : ''}{isPrivate(event) ? ', private' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
   onclick={open}
   onpointerup={(e) => {
     if (e.button !== 2 || !rightPress) return;
@@ -263,6 +267,9 @@
        Outlook both use for it (2026-08-10, by request). An unanswered invite
        carries no letter: its dashed ring is the whole of "nothing yet". -->
   {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
+  <!-- Fantastical's mark for a private event, in the same corner. Hidden
+       from readers because the button's label already ends ", private". -->
+  {#if isPrivate(event)}<span class="lock" aria-hidden="true"><LockGlyph /></span>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
   <!-- Words, not a mark. A strike through the title and a ✕ in the corner
@@ -420,7 +427,10 @@
        otherwise a whole-hour boundary also exposes `.rule`, making hourly
        gaps look heavier than half-hour gaps. */
     --spine: var(--cal);
-    box-shadow: inset 2px 0 0 0 var(--spine),
+    /* The spine's own width, a variable so a free event can thin it to the
+       outline's outer stroke without restating either shadow below. */
+    --spine-width: 2px;
+    box-shadow: inset var(--spine-width) 0 0 0 var(--spine),
                 0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg);
     background-clip: padding-box;
     /* Composited over --bg, not `transparent`. Blocks overlap constantly, and a
@@ -444,13 +454,13 @@
      one; this rule had been losing the same fight invisibly until a dense
      iCloud week made it obvious. */
   .ev.hovered { left: 3px !important; width: calc(100% - 6px) !important; z-index: 20 !important;
-              box-shadow: inset 2px 0 0 0 var(--spine),
+              box-shadow: inset var(--spine-width) 0 0 0 var(--spine),
                           0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg),
                           0 4px 14px rgba(0, 0, 0, .5); }
   /* Keep every saved event below the creation preview, regardless of its
      overlap column or keyboard selection. Alt must also override edge grips. */
   .ev.obscured { z-index: 1 !important; }
-  .ev.obscured b, .ev.obscured em, .ev.obscured .rs { visibility: hidden; }
+  .ev.obscured b, .ev.obscured em, .ev.obscured .rs, .ev.obscured .lock { visibility: hidden; }
   .ev.create-mode { cursor: crosshair; z-index: 1 !important; }
 
   /* 11.5/10.5, up from 10/9 (2026-08-14): at 10px the grid read as decoration
@@ -465,6 +475,30 @@
 
   .rs { position: absolute; top: 1px; right: 4px; font-size: 9px;
         font-style: normal; font-weight: 700; opacity: .8; }
+
+  /* Free (Show as: free): the spine drawn as an outline, Fantastical's mark
+     for time you are still available in. The inset shadow above thins to a
+     1px outer stroke, which keeps following the rounded corners, and this
+     1px line is the inner stroke; between them the block's own fill shows,
+     so the bar reads hollow in every state that recolours `--spine`. It
+     spans 3px, a pixel wider than the solid spine: at 2px there is no room
+     for a gap between two strokes. The bar is paint only, so the title does
+     not move. */
+  .ev.free { --spine-width: 1px; }
+  .ev.free::before { content: ''; position: absolute; top: 0; bottom: 0; width: 1px;
+                     left: 2px; background: var(--spine); pointer-events: none; }
+  .ev.copies-open::before { display: none; }
+
+  /* Private or confidential: a lock in the top-right corner, in the block's
+     ink, centred on the title's first line (2px padding + half of the 15px
+     line, less half the glyph). The title gives up the glyph's width so its
+     ellipsis stops short of the lock instead of running under it, and the
+     tentative `?` steps left of it. A block too short or narrow to hold it
+     clips it like any other content. */
+  .lock { position: absolute; top: 4.5px; right: 5px; line-height: 0; opacity: .9;
+          pointer-events: none; }
+  .ev.private > b { padding-right: 12px; }
+  .ev.private .rs { right: 18px; }
 
   /* Everyone else said no (2026-09-04). Half the usual fill, and nothing
      else: the block recedes a step without changing shape, which is as much

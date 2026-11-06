@@ -1,6 +1,8 @@
 <!-- ui/src/lib/Filmstrip.svelte -->
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import { formatDate } from './datefmt';
   import { dateFormat } from './date.svelte';
   import { clockFormat } from './clock.svelte';
@@ -190,6 +192,8 @@
                 class:allday={ev.is_all_day}
                 class:nobodycoming={ev.all_guests_declined}
                 class:pending={ev.pending}
+                class:free={isFree(ev)}
+                class:private={isPrivate(ev)}
                 title={ev.all_guests_declined ? 'Everyone declined' : undefined}
                 class:keyboard={keyboardCursor
                   ? cursorNamesEvent(keyboardCursor, d.startMs, ev)
@@ -208,6 +212,11 @@
                        thing anyone looks for should not be a screen-width
                        away from the first. -->
                   <em class="where">{locationLabel(ev.location)}</em>
+                {/if}
+                {#if isPrivate(ev)}
+                  <!-- First of the meta glyphs: it is about who may see the
+                       event at all, which outranks how often it happens. -->
+                  <span class="meta lock"><LockGlyph size={11} /></span>
                 {/if}
                 {#if ev.recurring}
                   <!-- One glyph, muted: "this row repeats" is orientation,
@@ -317,6 +326,12 @@
           color: var(--text); border-radius: var(--event-chip-radius, 4px);
           padding: 4px 8px 4px 10px; }
   .srow.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Free: the spine as an outline, as on the grid (`EventBlock`'s `.free`):
+     the shadow thins to the outer stroke and this line is the inner one,
+     3px across. The row has no fill, so the gap is the page. */
+  .srow.free { box-shadow: inset 1px 0 0 0 var(--cal); }
+  .srow.free::before { content: ''; position: absolute; top: 0; bottom: 0; width: 1px;
+                       left: 2px; background: var(--cal); pointer-events: none; }
   /* The grid's mark, in the list: same dotted strike, same meaning (see
      `EventBlock`'s `.nobodycoming`). */
   .srow.nobodycoming b { text-decoration: line-through; text-decoration-style: dotted; }
@@ -347,6 +362,9 @@
               /* Optical: the icons sit on the baseline row beside 11px text
                  and read high without a nudge. */
               transform: translateY(2px); }
+  /* The lock is its own component, so `.meta svg` above cannot reach it;
+     the wrapper takes the same optical nudge instead. */
+  .meta.lock { transform: translateY(1.5px); }
 
   /* The widget's camera, not a labelled chip: one glyph in the row's own
      meta register, accent-inked so "there is a call to join" still reads at

@@ -1,6 +1,8 @@
 <!-- ui/src/lib/AllDayBand.svelte -->
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import type { Lane, UiEvent } from './api';
   import type { Rect } from './position';
   import { gutterWidth } from './secondzone.svelte';
@@ -77,6 +79,8 @@
           class:cl={lane.cont_left}
           class:cr={lane.cont_right}
           class:pending={ev.pending}
+          class:free={isFree(ev)}
+          class:private={isPrivate(ev)}
           class:keyboard={keyboardSelected}
           data-kbd-selected-event={keyboardSelected ? '' : undefined}
           style="
@@ -90,6 +94,7 @@
           onclick={(e) => open(ev, e)}
         >
           {lane.cont_left ? '‹ ' : ''}{ev.title}
+          {#if isPrivate(ev)}<span class="lock"><LockGlyph /></span>{/if}
           <CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} />
         </button>
       {/each}
@@ -196,6 +201,20 @@
   /* Flat edges mark a span continuing beyond this week. */
   .chip.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
   .chip.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  /* Free: the spine as an outline (see `EventBlock`'s `.free`). A border can
+     do here what the block needs a pseudo-element for: `double` is two
+     strokes with the fill showing between them. It needs 3px to have a gap
+     at all, so the bar widens by a pixel and the left padding gives that
+     pixel back, keeping the label where it was. After `.cl` on
+     purpose: a free span continuing from last week keeps its outline, and
+     its squared corners still say it continues. */
+  .chip.free { border-left-style: double; border-left-width: 3px; padding-left: 6px; }
+  .rows.sliding .chip.free { padding-left: calc(6px + max(0px, var(--offscreen) * 100%)); }
+  /* Private: a trailing lock, centred on the line. The label gives up the
+     glyph's width so its ellipsis ends before the lock rather than under it. */
+  .chip.private { padding-right: 19px; }
+  .chip .lock { position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+                line-height: 0; opacity: .9; pointer-events: none; }
   .chip.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .more { font: inherit; font-size: 10px; color: var(--muted); opacity: .7; padding: 2px 4px;

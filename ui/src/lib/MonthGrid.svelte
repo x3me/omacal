@@ -1,6 +1,8 @@
 <!-- ui/src/lib/MonthGrid.svelte -->
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import { rotate } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
   import type { MonthPayload, UiEvent } from './api';
@@ -137,6 +139,8 @@
             class:cl={lane.cont_left}
             class:cr={lane.cont_right}
             class:pending={ev.pending}
+            class:free={isFree(ev)}
+            class:private={isPrivate(ev)}
             class:keyboard={keyboardSelected}
             data-kbd-selected-event={keyboardSelected ? '' : undefined}
             style="
@@ -148,7 +152,7 @@
             onpointerdown={(e) => rightDown(ev, e)}
             onpointerup={(e) => rightUp(ev, e)}
             oncontextmenu={(e) => e.preventDefault()}
-          >{lane.cont_left ? '‹ ' : ''}{ev.title}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
+          >{lane.cont_left ? '‹ ' : ''}{ev.title}{#if isPrivate(ev)}<span class="lock"><LockGlyph size={9} /></span>{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
         {/each}
         {#if row.bar_overflow.length}
           <!-- A span, not a button: unlike a cell's own overflow, these
@@ -185,6 +189,8 @@
               <button
                 class="timed"
                 class:pending={ev.pending}
+                class:free={isFree(ev)}
+                class:private={isPrivate(ev)}
                 data-combined-count={ev.copies?.length || undefined}
                 style:color={ev.copies?.length ? "var(--text)" : undefined}
                 class:keyboard={keyboardCursor
@@ -197,7 +203,7 @@
                 onpointerdown={(e) => rightDown(ev, e)}
                 onpointerup={(e) => rightUp(ev, e)}
                 oncontextmenu={(e) => e.preventDefault()}
-              ><i class="dot" style="background:{ev.color}"></i>{ev.title}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
+              ><i class="dot" style="background:{isFree(ev) ? 'none' : ev.color}"></i>{#if isPrivate(ev)}<span class="title">{ev.title}</span><span class="lock"><LockGlyph size={9} /></span>{:else}{ev.title}{/if}<CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} /></button>
             {/each}
             {#if cell.timed.length > MONTH_GRID_TIMED_LIMIT}
               <button class="more" onclick={() => pickDay(cell.start_ms)}>
@@ -249,6 +255,13 @@
   }
   .bar.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
   .bar.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  /* Free and private, as `AllDayBand`'s chips draw them: a 3px `double`
+     spine with the extra pixel taken back from the padding, and a trailing
+     lock the label's ellipsis stops short of. */
+  .bar.free { border-left-style: double; border-left-width: 3px; padding-left: 5px; }
+  .bar.private { padding-right: 16px; }
+  .bar .lock { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+               line-height: 0; opacity: .9; pointer-events: none; }
   .bar.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   /* Date + three timed lines + the cell's `+N more`, including their gaps and
@@ -296,6 +309,13 @@
            text-overflow: ellipsis; position: relative; z-index: 1; flex: none; }
   .timed.pending { opacity: .62; outline: 1px dashed var(--cal); outline-offset: -1px; border-radius: 3px; }
   .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  /* A timed row has a dot where the other surfaces have a spine, so free is
+     the dot's outline: a ring the same size, in the calendar's colour. */
+  .timed.free .dot { box-shadow: inset 0 0 0 1.5px var(--cal); }
+  /* Private: the lock trails the title. The title gets its own box only on
+     these rows, so it can shrink and the lock is never the part clipped. */
+  .timed .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .timed .lock { flex: none; line-height: 0; opacity: .75; }
   .timed.keyboard { border-radius: 3px;
                     outline: 2px solid var(--accent); outline-offset: 1px; }
 
