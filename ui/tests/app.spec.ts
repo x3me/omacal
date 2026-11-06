@@ -3603,6 +3603,89 @@ test.describe('App', () => {
     await expect(modal.getByRole('radio', { name: 'Catppuccin Latte' })).toHaveAttribute('aria-checked', 'true');
   });
 
+  /** "Follow the desktop" wears a light theme and a dark one, and which two
+   *  is the user's choice, as a Mac app offers it. The two pickers show only
+   *  while it is chosen; each offers the themes of its own side, sorted by
+   *  the backend's palettes rather than a list of names here; each choice is
+   *  stored, survives a detour through a pinned theme, and is kept. */
+  test('following the desktop, a theme is chosen for light mode and for dark mode', async ({ page }) => {
+    await writable(page);
+    const open = async () => {
+      await page.getByRole('button', { name: 'Menu' }).click();
+      await page.getByRole('button', { name: 'Settings…' }).click();
+      await modal.getByRole('tab', { name: 'Appearance' }).click();
+    };
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await open();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    const dark = modal.getByRole('combobox', { name: 'In dark mode' });
+    // Nothing chosen is the built-in pair: what following the desktop wore.
+    await expect(light).toHaveValue('light');
+    await expect(dark).toHaveValue('dark');
+    await expect(light.locator('option')).toHaveText(['Light', 'Catppuccin Latte', 'Rosé Pine Dawn']);
+    await expect(dark.locator('option')).toHaveText(['Dark', 'Tokyo Night', 'Catppuccin Mocha']);
+
+    // The "Follow the desktop" card is drawn in what it resolves to, so a
+    // new choice fetches the previews again.
+    const previews = () => page.evaluate(() =>
+      window.__harness.calls.filter((c: any) => c.cmd === 'appearance_previews').length);
+    await expect.poll(previews).toBeGreaterThan(0);
+    const before = await previews();
+    await light.selectOption('rose-pine-dawn');
+    await expect.poll(() => settingValues(page, 'autoLightTheme')).toEqual(['rose-pine-dawn']);
+    await expect.poll(previews).toBe(before + 1);
+    await dark.selectOption('tokyo-night');
+    await expect.poll(() => settingValues(page, 'autoDarkTheme')).toEqual(['tokyo-night']);
+
+    // A pinned theme has no sides, so the pickers go, and come back holding
+    // what was chosen.
+    const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    await themes.getByRole('radio', { name: 'Light', exact: true }).click();
+    await expect(light).toHaveCount(0);
+    await expect(dark).toHaveCount(0);
+    await themes.getByRole('radio', { name: 'Follow the desktop', exact: true }).click();
+    await expect(light).toHaveValue('rose-pine-dawn');
+    await expect(dark).toHaveValue('tokyo-night');
+
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await open();
+    await expect(light).toHaveValue('rose-pine-dawn');
+    await expect(dark).toHaveValue('tokyo-night');
+  });
+
+  /** On Omarchy, following the desktop wears the Omarchy theme, which is
+   *  neither side of anything: there is no pair to choose. */
+  test('on Omarchy there is no light or dark theme to choose', async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ desktop: 'omarchy' })));
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await expect(modal.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(modal.getByRole('combobox', { name: /mode$/ })).toHaveCount(0);
+  });
+
+  /** The form offers each side only its own themes, so a refusal comes from
+   *  a stale form. Played by adding a dark theme to the light list: the
+   *  backend's sentence shows, and the picker goes back to what is stored
+   *  rather than showing a choice that was never kept. */
+  test('a dark theme offered for light mode is refused and the picker goes back', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    await expect(light.locator('option')).toHaveCount(3);
+    await light.evaluate((el) => el.append(new Option('Tokyo Night', 'tokyo-night')));
+    await light.selectOption('tokyo-night');
+    await expect(modal.getByText('light mode needs a light theme')).toBeVisible();
+    await expect(light).toHaveValue('light');
+    expect(await settingValues(page, 'autoLightTheme')).toEqual(['tokyo-night']);
+  });
+
   /**
    * Issue #36. The row exists, its list is asserted whole so a choice cannot
    * quietly vanish, the choice reaches the command, and the default is the

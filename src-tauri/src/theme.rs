@@ -59,13 +59,12 @@ impl Palette {
         }
     }
 
-    /// The built-in palette a system's light-or-dark setting asks for.
-    /// No preference is dark: what every copy showed before it asked.
-    pub fn for_system(scheme: SystemScheme) -> Self {
-        match scheme {
-            SystemScheme::Light => Palette::fallback_light(),
-            SystemScheme::Dark | SystemScheme::NoPreference => Palette::fallback_dark(),
-        }
+    /// The palette a system's light-or-dark setting asks for: whichever theme
+    /// the user gave `Auto` for that side, the built-in Light and Dark unless
+    /// they chose otherwise. No preference is the dark side: what every copy
+    /// showed before it asked.
+    pub fn for_system(scheme: SystemScheme, auto: AutoPair) -> Self {
+        auto.for_scheme(scheme).palette().expect("an AutoPair holds only pinned themes")
     }
 
     /// A named theme's palette, for a desktop that has no Omarchy theme to
@@ -146,6 +145,8 @@ pub fn system_scheme() -> SystemScheme {
 /// `Auto` stays the default: the Omarchy theme if there is one, and
 /// otherwise the system's own light-or-dark ([`SystemScheme`]) — which until
 /// 2026-09-24 it never asked, so every Mac on `Auto` was dark for good.
+/// Which theme it wears on each side is the user's to choose ([`AutoPair`]),
+/// the built-in Light and Dark unless they do.
 ///
 /// `Light` and `Dark` are the user overruling that, and they take the built-in
 /// palette **whole** — including on Omarchy, where the theme's own accent is
@@ -203,6 +204,78 @@ impl Appearance {
     /// been told not to follow.
     pub fn is_pinned(self) -> bool {
         !matches!(self, Appearance::Auto)
+    }
+
+    /// The palette a pinned choice wears, whole; `None` for `Auto`, which is
+    /// not a palette but a rule for finding one ([`resolve`]).
+    pub fn palette(self) -> Option<Palette> {
+        match self {
+            Appearance::Auto => None,
+            Appearance::Light => Some(Palette::fallback_light()),
+            Appearance::Dark => Some(Palette::fallback_dark()),
+            named => Palette::named(named),
+        }
+    }
+
+    /// Whether `Auto` may wear this while the system is dark (`dark`) or
+    /// light: a pinned theme whose palette is that side's. Read off the
+    /// palette's own `is_dark` rather than a list of names, so a theme added
+    /// later lands on the right side without anyone remembering to say so.
+    pub fn suits(self, dark: bool) -> bool {
+        self.palette().is_some_and(|p| p.is_dark == dark)
+    }
+}
+
+/// Which theme `Auto` wears on each side of the system's light-or-dark, on a
+/// desktop with no Omarchy theme: one for light mode and one for dark, the
+/// way a Mac app offers it. The default is the built-in Light and Dark, which
+/// is all `Auto` could wear before this existed, so nobody who never opens
+/// the setting sees a change.
+///
+/// The fields are private so a pair can only be built through
+/// [`AutoPair::from_stored`], which holds the one invariant everything else
+/// leans on: each side is a pinned theme of that side, never `Auto` (which
+/// would resolve to itself) and never a dark theme for light mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoPair {
+    light: Appearance,
+    dark: Appearance,
+}
+
+impl Default for AutoPair {
+    fn default() -> Self {
+        Self { light: Appearance::Light, dark: Appearance::Dark }
+    }
+}
+
+impl AutoPair {
+    /// The two stored spellings read back. A side whose row is absent,
+    /// garbage, a spelling a future version writes, `auto`, or a theme of the
+    /// other side falls back to that side's default on its own, so one bad
+    /// row cannot cost the user the other choice.
+    pub fn from_stored(light: Option<&str>, dark: Option<&str>) -> Self {
+        let side = |stored: Option<&str>, dark: bool, default: Appearance| {
+            stored.and_then(Appearance::parse).filter(|a| a.suits(dark)).unwrap_or(default)
+        };
+        let stock = Self::default();
+        Self { light: side(light, false, stock.light), dark: side(dark, true, stock.dark) }
+    }
+
+    pub fn light(self) -> Appearance {
+        self.light
+    }
+
+    pub fn dark(self) -> Appearance {
+        self.dark
+    }
+
+    /// The side a system setting picks. No preference is dark, as
+    /// [`Palette::for_system`] says.
+    pub fn for_scheme(self, scheme: SystemScheme) -> Appearance {
+        match scheme {
+            SystemScheme::Light => self.light,
+            SystemScheme::Dark | SystemScheme::NoPreference => self.dark,
+        }
     }
 }
 
@@ -459,17 +532,18 @@ pub fn parse_alacritty(toml_src: &str) -> Option<Palette> {
 /// A pinned [`Appearance`] short-circuits the whole chain, theme directory and
 /// all: it is the user saying which of the two built-in palettes they want,
 /// and a theme file cannot outrank that. `Auto` is the chain exactly as it was.
-pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance) -> Palette {
-    match appearance {
-        Appearance::Light => return Palette::fallback_light(),
-        Appearance::Dark => return Palette::fallback_dark(),
-        Appearance::Auto => {}
-        named => return Palette::named(named).expect("every other variant is a named theme"),
+///
+/// `auto` is only read on `Auto` with no Omarchy theme: which theme to wear
+/// for the system's light or dark side. An Omarchy theme still outranks it,
+/// because there "Follow the desktop" means the desktop's own theme.
+pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance, auto: AutoPair) -> Palette {
+    if let Some(pinned) = appearance.palette() {
+        return pinned;
     }
     let Some(dir) = theme_dir else {
         // No Omarchy theme: follow the system's light-or-dark instead, which
         // is what "Follow the desktop theme" says it does.
-        return Palette::for_system(system_scheme());
+        return Palette::for_system(system_scheme(), auto);
     };
     let colors_src = std::fs::read_to_string(dir.join("colors.toml")).ok();
 
@@ -562,13 +636,13 @@ blue = "#1e66f5"
 
     #[test]
     fn resolve_falls_back_when_the_directory_is_missing() {
-        let p = resolve(Some(std::path::Path::new("/nonexistent/omarchy/theme")), Appearance::Auto);
+        let p = resolve(Some(std::path::Path::new("/nonexistent/omarchy/theme")), Appearance::Auto, AutoPair::default());
         assert_eq!(p, Palette::fallback_dark());
     }
 
     #[test]
     fn resolve_falls_back_when_given_nothing() {
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        assert_eq!(resolve(None, Appearance::Auto, AutoPair::default()), Palette::fallback_dark());
     }
 
     #[test]
@@ -588,7 +662,7 @@ blue = "#7aa2f7"
 white = "#a9b1d6"
 "##;
         std::fs::write(&theme_file, toml_content).expect("write temp theme file");
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#1a1b26");
         assert_eq!(p.text, "#c0caf5");
         assert_eq!(p.accent, "#7aa2f7");
@@ -613,7 +687,7 @@ white = "#a9b1d6"
         .unwrap();
         std::fs::write(temp_dir.join("colors.toml"), "accent = \"#e0af68\"").unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.accent, "#e0af68", "the theme said orange; blue was a guess");
         assert_eq!(p.bg, "#1a1b26", "everything else still comes from alacritty");
 
@@ -641,7 +715,7 @@ white = "#a9b1d6"
         )
         .unwrap();
         std::fs::write(temp_dir.join("colors.toml"), "accent = \"nope\"").unwrap();
-        assert_eq!(resolve(Some(&temp_dir), Appearance::Auto).accent, "#7aa2f7");
+        assert_eq!(resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default()).accent, "#7aa2f7");
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -768,18 +842,96 @@ light_foreground = "#adb5c4"
         )
         .unwrap();
 
-        assert_eq!(resolve(Some(&dir), Appearance::Light), Palette::fallback_light());
-        assert_eq!(resolve(Some(&dir), Appearance::Dark), Palette::fallback_dark());
+        assert_eq!(resolve(Some(&dir), Appearance::Light, AutoPair::default()), Palette::fallback_light());
+        assert_eq!(resolve(Some(&dir), Appearance::Dark, AutoPair::default()), Palette::fallback_dark());
         // Auto still follows the theme, which is every existing install.
-        let auto = resolve(Some(&dir), Appearance::Auto);
+        let auto = resolve(Some(&dir), Appearance::Auto, AutoPair::default());
         assert_eq!(auto.bg, "#2e3440", "Auto is the behaviour that must not move");
 
         // And with no Omarchy at all — the case issue #30 is about.
-        assert_eq!(resolve(None, Appearance::Light), Palette::fallback_light());
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        assert_eq!(resolve(None, Appearance::Light, AutoPair::default()), Palette::fallback_light());
+        assert_eq!(resolve(None, Appearance::Auto, AutoPair::default()), Palette::fallback_dark());
         // A named theme outranks the installed one exactly as Light does.
-        assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn).bg, "#faf4ed");
-        assert_eq!(resolve(None, Appearance::TokyoNight).bg, "#1a1b26");
+        assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn, AutoPair::default()).bg, "#faf4ed");
+        assert_eq!(resolve(None, Appearance::TokyoNight, AutoPair::default()).bg, "#1a1b26");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Auto wears the theme chosen for the side the system is on, and no
+    /// preference is the dark side, as it always was.
+    #[test]
+    fn auto_wears_the_theme_chosen_for_each_side() {
+        let pair = AutoPair::from_stored(Some("rose-pine-dawn"), Some("tokyo-night"));
+        assert_eq!(Palette::for_system(SystemScheme::Light, pair), Palette::named(Appearance::RosePineDawn).unwrap());
+        assert_eq!(Palette::for_system(SystemScheme::Dark, pair), Palette::named(Appearance::TokyoNight).unwrap());
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference, pair), Palette::named(Appearance::TokyoNight).unwrap());
+        // And through `resolve`, which must hand the pair on rather than a
+        // default. No test sets the process's scheme, so it is no preference.
+        assert_eq!(resolve(None, Appearance::Auto, pair).bg, "#1a1b26");
+        // The built-in two are themes of their side like any other.
+        let built_in = AutoPair::from_stored(Some("light"), Some("dark"));
+        assert_eq!(built_in, AutoPair::default());
+    }
+
+    /// Nothing stored is the built-in pair, which is everything `Auto` wore
+    /// before it could be asked: nobody who never opens the setting sees a
+    /// change.
+    #[test]
+    fn auto_defaults_to_the_built_in_light_and_dark() {
+        assert_eq!(AutoPair::from_stored(None, None), AutoPair::default());
+        assert_eq!((AutoPair::default().light(), AutoPair::default().dark()), (Appearance::Light, Appearance::Dark));
+        assert_eq!(Palette::for_system(SystemScheme::Light, AutoPair::default()), Palette::fallback_light());
+        assert_eq!(Palette::for_system(SystemScheme::Dark, AutoPair::default()), Palette::fallback_dark());
+    }
+
+    /// A row this version cannot honour falls back on its own side only:
+    /// garbage, a theme a future version names, `auto` (which would resolve
+    /// to itself), and a theme of the other side, which would leave someone
+    /// in dark mode on a white page they never chose.
+    #[test]
+    fn a_stale_or_wrong_sided_choice_falls_back_to_that_sides_default() {
+        let stock = AutoPair::default();
+        assert_eq!(AutoPair::from_stored(Some("solarized"), Some("")), stock);
+        assert_eq!(AutoPair::from_stored(Some("auto"), Some("auto")), stock);
+        assert_eq!(AutoPair::from_stored(Some("tokyo-night"), Some("catppuccin-latte")), stock);
+        assert_eq!(AutoPair::from_stored(Some("dark"), Some("light")), stock);
+        // One bad row does not cost the other side its choice.
+        let half = AutoPair::from_stored(Some("catppuccin-latte"), Some("rose-pine-dawn"));
+        assert_eq!((half.light(), half.dark()), (Appearance::CatppuccinLatte, Appearance::Dark));
+        let half = AutoPair::from_stored(Some("garbage"), Some("catppuccin-mocha"));
+        assert_eq!((half.light(), half.dark()), (Appearance::Light, Appearance::CatppuccinMocha));
+    }
+
+    /// The sides are read off each palette's `is_dark`, and `Auto` is on
+    /// neither: it is not a palette.
+    #[test]
+    fn a_theme_suits_the_side_its_palette_is_on() {
+        for a in [Appearance::Light, Appearance::CatppuccinLatte, Appearance::RosePineDawn] {
+            assert!(a.suits(false) && !a.suits(true), "{a:?}");
+        }
+        for a in [Appearance::Dark, Appearance::TokyoNight, Appearance::CatppuccinMocha] {
+            assert!(a.suits(true) && !a.suits(false), "{a:?}");
+        }
+        assert!(!Appearance::Auto.suits(true) && !Appearance::Auto.suits(false));
+        assert_eq!(Appearance::Auto.palette(), None);
+    }
+
+    /// An Omarchy theme still decides `Auto` whatever the pair says, and a
+    /// pinned choice ignores the pair as it ignores the theme.
+    #[test]
+    fn the_omarchy_theme_and_a_pinned_choice_both_outrank_the_pair() {
+        let dir = std::env::temp_dir().join(format!("omacal-auto-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("colors.toml"),
+            "mode = \"dark\"\nbackground = \"#2e3440\"\nforeground = \"#d8dee9\"\n",
+        )
+        .unwrap();
+        let pair = AutoPair::from_stored(Some("rose-pine-dawn"), Some("tokyo-night"));
+        assert_eq!(resolve(Some(&dir), Appearance::Auto, pair).bg, "#2e3440");
+        assert_eq!(resolve(Some(&dir), Appearance::Light, pair), Palette::fallback_light());
+        assert_eq!(resolve(None, Appearance::Dark, pair), Palette::fallback_dark());
+        assert_eq!(resolve(None, Appearance::CatppuccinLatte, pair).bg, "#eff1f5");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -787,9 +939,9 @@ light_foreground = "#adb5c4"
     /// dark, as it always was.
     #[test]
     fn auto_without_omarchy_follows_the_system() {
-        assert_eq!(Palette::for_system(SystemScheme::Light), Palette::fallback_light());
-        assert_eq!(Palette::for_system(SystemScheme::Dark), Palette::fallback_dark());
-        assert_eq!(Palette::for_system(SystemScheme::NoPreference), Palette::fallback_dark());
+        assert_eq!(Palette::for_system(SystemScheme::Light, AutoPair::default()), Palette::fallback_light());
+        assert_eq!(Palette::for_system(SystemScheme::Dark, AutoPair::default()), Palette::fallback_dark());
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference, AutoPair::default()), Palette::fallback_dark());
         assert_eq!(SystemScheme::from_portal(0), SystemScheme::NoPreference);
         assert_eq!(SystemScheme::from_portal(1), SystemScheme::Dark);
         assert_eq!(SystemScheme::from_portal(2), SystemScheme::Light);
@@ -900,7 +1052,7 @@ muted = "#4c566a"
         )
         .unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#1a1b26");
         assert_eq!(p.text, "#a9b1d6");
         assert_eq!(p.accent, "#e0af68");
@@ -920,7 +1072,7 @@ muted = "#4c566a"
         )
         .unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#eff1f5");
         assert_eq!(p.accent, "#1e66f5");
         assert!(!p.is_dark);

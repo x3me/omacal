@@ -48,9 +48,18 @@ pub fn spawn(app: AppHandle) {
                 &app.state::<crate::AppState>().pool,
             ))
         };
+        // Read for the moment the theme directory goes away, when `Auto`
+        // falls back to following the system and wears the user's pair.
+        let auto_pair = |app: &tauri::AppHandle| {
+            use tauri::Manager;
+            tauri::async_runtime::block_on(crate::settings::auto_pair(
+                &app.state::<crate::AppState>().pool,
+            ))
+        };
         let mut last = crate::theme::resolve(
             crate::theme::omarchy_theme_dir().as_deref(),
             appearance(&app),
+            auto_pair(&app),
         );
         for event in &rx {
             if event.is_err() {
@@ -67,7 +76,7 @@ pub fn spawn(app: AppHandle) {
             if chosen.is_pinned() {
                 continue;
             }
-            let next = crate::theme::resolve(crate::theme::omarchy_theme_dir().as_deref(), chosen);
+            let next = crate::theme::resolve(crate::theme::omarchy_theme_dir().as_deref(), chosen, auto_pair(&app));
             if next != last {
                 tracing::info!("theme changed, repainting");
                 // GTK's dark hint follows the palette so the webview's native

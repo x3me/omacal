@@ -220,6 +220,12 @@ export type AppSettings = {
    *  exist: off Omarchy there was no theme to wear and dark was the only
    *  answer the app had (issue #30). */
   appearance: Appearance;
+  /** The themes `'auto'` wears while the system is in light mode and in dark
+   *  mode, off Omarchy. `'light'` and `'dark'` unless chosen; the backend
+   *  reads a stale row back as that side's default, so these are always a
+   *  theme of their side. */
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   /** Whether the window draws a title bar, or `null` where the choice is not
    *  omacal's — macOS, whose overlay title bar *is* the frame. The modal
    *  shows the row only when there is an answer, so this is the one place
@@ -304,6 +310,8 @@ export type SettingValues = {
   keepRemindersOnScreen: boolean;
   trayIcon: boolean;
   appearance: Appearance;
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   windowFrame: WindowFrame;
   quitOnClose: boolean;
   startOnLogin: StartOnLogin;
