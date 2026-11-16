@@ -1714,34 +1714,41 @@ pub fn upsert_exception(raw: &str, ev: &EventWrite, now: Timestamp) -> Option<St
             && names_occurrence(&lines, b, &rid_value)
     });
 
-    // The exception block is rewritten wholesale, so its `ATTENDEE` lines have
-    // to be carried across by hand or editing one occurrence would empty its
-    // guest list. `None` keeps them verbatim, which is the promise every other
-    // path already makes; `Some` reconciles against them.
-    let existing = replaced.map(|b| attendee_lines_of(&lines, b)).unwrap_or_default();
+    // The block is rewritten wholesale, and an exception replaces its
+    // occurrence whole (RFC 5545 §3.8.4.4): whatever is not carried across is
+    // gone from that date. So the fields this write does not own come from the
+    // exception being replaced, or, for a new one, from the master. An
+    // occurrence detached by moving it is still the meeting it was.
+    let source = replaced.or_else(|| {
+        blocks
+            .iter()
+            .find(|b| !b.is_exception && b.uid.as_deref() == Some(ev.uid.as_str()))
+    });
+
+    // Its people. A new exception used to start from nobody, so dragging one
+    // occurrence of a meeting sent that date out with no guests, which a
+    // scheduling server reads as everyone uninvited. `None` keeps the
+    // source's `ATTENDEE` lines verbatim, the promise every other path
+    // already makes; `Some` reconciles against them, PARTSTATs included.
+    let existing = source.map(|b| attendee_lines_of(&lines, b)).unwrap_or_default();
     let existing_texts: Vec<String> = existing.iter().map(|l| l.text.clone()).collect();
     let merged = match &ev.attendees {
         Some(want) => respell(merge_attendee_lines(&existing_texts, want), &existing),
         None => respell(existing_texts, &existing),
     };
 
-    // `TRANSP` and `CLASS` are rewritten with the block too, so a field this
-    // write does not own is carried across the same way: from the exception
-    // being replaced, or, for a new one, from the master. An occurrence
-    // detached by moving it is still the meeting it was, free or private
-    // included. A field the write does own is rendered by `vevent_lines`.
-    let source = replaced.or_else(|| {
-        blocks
-            .iter()
-            .find(|b| !b.is_exception && b.uid.as_deref() == Some(ev.uid.as_str()))
-    });
+    // `ORGANIZER`, which no write owns, and `TRANSP` / `CLASS` when this
+    // write does not own them (a field it does own is rendered by
+    // `vevent_lines`). Free or private, and whose meeting it is, survive the
+    // move.
     let carried: Vec<String> = source
         .map(|b| {
             own_props(&lines, b)
                 .into_iter()
                 .map(|k| &lines[k])
                 .filter(|l| {
-                    (ev.transp.is_none() && is_prop(&l.text, "TRANSP"))
+                    is_prop(&l.text, "ORGANIZER")
+                        || (ev.transp.is_none() && is_prop(&l.text, "TRANSP"))
                         || (ev.class.is_none() && is_prop(&l.text, "CLASS"))
                 })
                 .flat_map(|l| l.physical.iter().cloned())
@@ -2864,6 +2871,83 @@ END:VEVENT\r\nEND:VCALENDAR";
         let ex = exception_of(&out, 18);
         assert_eq!((ex.transp.as_deref(), ex.class.as_deref()),
                    (Some("TRANSPARENT"), Some("CONFIDENTIAL")));
+    }
+
+    const MEETING_RAW: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m1\r\nSUMMARY:Weekly sync\r\nDTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\nRRULE:FREQ=WEEKLY;COUNT=10\r\nORGANIZER;CN=Ana:mailto:ana@example.com\r\nATTENDEE;CN=Ana;PARTSTAT=ACCEPTED:mailto:ana@example.com\r\nATTENDEE;CN=Bo;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mailto:bo@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:cy@example.com\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:m1\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260831T091500\r\nSUMMARY:Weekly sync (moved)\r\nDTSTART;TZID=Europe/Sofia:20260831T140000\r\nDTEND;TZID=Europe/Sofia:20260831T141500\r\nORGANIZER;CN=Ana:mailto:ana@example.com\r\nATTENDEE;CN=Ana;PARTSTAT=ACCEPTED:mailto:ana@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR";
+
+    /// **An occurrence moved on its own is still the same meeting, with the
+    /// same people.** An exception replaces its occurrence whole (RFC 5545
+    /// §3.8.4.4), and `upsert_exception` writes the block afresh, so what it
+    /// does not carry is gone from that date: a first exception used to go
+    /// out with no `ATTENDEE` at all (they came only from an exception being
+    /// replaced) and every rewrite dropped `ORGANIZER`. A server that
+    /// schedules (iCloud, Fastmail) reads that as everyone uninvited from the
+    /// day. A drag (`attendees: None`) now carries the master's people, as
+    /// they were, onto a new exception; a replaced exception keeps its own,
+    /// its own decline included; and an edit that names the guests reconciles
+    /// against those, not against nobody.
+    #[test]
+    fn an_occurrence_detached_on_its_own_keeps_its_organizer_and_guests() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let exception_of = |out: &str, day: i8| {
+            events_in(&parse(out).unwrap())
+                .into_iter()
+                .find(|e| matches!(&e.recurrence_id,
+                    Some(IcsTime::Zoned { dt, .. }) if dt.day() == day))
+                .expect("exception present")
+        };
+        let people = |e: &CalEvent| {
+            e.attendees.iter().map(|a| (a.email.clone(), a.response_status.clone())).collect::<Vec<_>>()
+        };
+        let drag = |day: i8| {
+            let mut ev = write_sample("m1");
+            ev.recurrence_id = Some(WriteTime::Zoned {
+                dt: jiff::civil::date(2026, 8, day).at(9, 15, 0, 0),
+                tzid: "Europe/Sofia".into(),
+            });
+            ev
+        };
+
+        // First time this occurrence is detached: the master's people, verbatim.
+        let out = upsert_exception(MEETING_RAW, &drag(24), now).unwrap();
+        let ex = exception_of(&out, 24);
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
+        assert_eq!(people(&ex), vec![
+            ("ana@example.com".into(), "accepted".into()),
+            ("bo@example.com".into(), "accepted".into()),
+            ("cy@example.com".into(), "needsAction".into()),
+        ]);
+        assert!(out.contains("ATTENDEE;CN=Bo;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mailto:bo@example.com"),
+                "carried as the server wrote it, parameters and all");
+        let master = events_in(&parse(&out).unwrap()).into_iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        assert_eq!(master.attendees.len(), 3, "the master is untouched");
+
+        // An exception that already exists keeps its own people, Bo's decline
+        // for that one date included, and its organizer.
+        let out = upsert_exception(MEETING_RAW, &drag(31), now).unwrap();
+        let ex = exception_of(&out, 31);
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
+        assert_eq!(people(&ex), vec![
+            ("ana@example.com".into(), "accepted".into()),
+            ("bo@example.com".into(), "declined".into()),
+        ]);
+        assert_eq!(out.matches("ORGANIZER").count(), 2, "one per block, nothing doubled");
+
+        // An edit naming the guests reconciles against the master's list for a
+        // new exception: Bo stays (answer kept), Cy is removed, Dee is added.
+        let mut ev = drag(24);
+        ev.attendees = Some(vec![
+            AttendeeWrite { address: "ana@example.com".into(), display_name: Some("Ana".into()), optional: false },
+            AttendeeWrite { address: "bo@example.com".into(), display_name: Some("Bo".into()), optional: false },
+            AttendeeWrite { address: "dee@example.com".into(), display_name: None, optional: false },
+        ]);
+        let out = upsert_exception(MEETING_RAW, &ev, now).unwrap();
+        let ex = exception_of(&out, 24);
+        let got = people(&ex);
+        assert!(got.contains(&("bo@example.com".into(), "accepted".into())), "Bo's answer kept: {got:?}");
+        assert!(got.iter().any(|(e, _)| e == "dee@example.com"), "Dee added: {got:?}");
+        assert!(!got.iter().any(|(e, _)| e == "cy@example.com"), "Cy removed: {got:?}");
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
     }
 
     #[test]
