@@ -69,7 +69,8 @@ export type Appearance =
 
 /** The rows, in the order the select offers them, and the labels the spec
  *  drives them by. Here rather than in the markup so the component and its
- *  test read one list. The named themes are for a desktop with no Omarchy
+ *  test read one list. Light and Dark are offered on Omarchy only, and the
+ *  named themes everywhere else (`SettingsModal`'s `themeOptions`). The named themes are for a desktop with no Omarchy
  *  theme to follow (`theme::Palette::named`): four of Omarchy's own most used,
  *  Retro Bloom (a community Omarchy theme on Gruvbox's palette), and Daylight,
  *  omacal's own bright one, with Daylight Dark, the same look on a near-black

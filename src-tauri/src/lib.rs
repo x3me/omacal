@@ -1612,6 +1612,13 @@ pub fn run() {
                 open_date: std::sync::Mutex::new(open_date),
             });
             sync_loop::spawn(app.handle().clone());
+            // Before anything reads the choice: off Omarchy a stored Light or
+            // Dark becomes Daylight or Daylight Dark, so the picker ticks
+            // what is worn (`Appearance::on_this_desktop`).
+            tauri::async_runtime::block_on(settings::retire_plain_themes(
+                &app.state::<AppState>().pool,
+                theme::omarchy_theme_dir().is_some(),
+            ));
             // Before the first palette is resolved: off Omarchy, "Follow the
             // desktop theme" follows the system's light-or-dark.
             system_theme::init(app.handle());

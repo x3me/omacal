@@ -3541,16 +3541,18 @@ test.describe('App', () => {
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Appearance' }).click();
     const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    // Off Omarchy the plain Light and Dark are retired: Daylight and Daylight
+    // Dark do their job (`theme::Appearance::on_this_desktop`).
     await expect(themes.locator('.tname')).toHaveText([
-      'Follow the desktop', 'Light', 'Dark',
+      'Follow the desktop',
       'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Retro Bloom',
       'Daylight', 'Daylight Dark',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
 
-    await themes.getByRole('radio', { name: 'Light', exact: true }).click();
-    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['light']);
+    await themes.getByRole('radio', { name: 'Daylight', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['daylight']);
 
     // Reopened, the picker shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -3558,7 +3560,7 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    await expect(modal.getByRole('radio', { name: 'Light', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(modal.getByRole('radio', { name: 'Daylight', exact: true })).toHaveAttribute('aria-checked', 'true');
   });
 
   /** The named themes, for a desktop with no Omarchy theme to follow — macOS

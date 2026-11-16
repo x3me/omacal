@@ -1275,6 +1275,23 @@ pub(crate) async fn appearance(pool: &SqlitePool) -> crate::theme::Appearance {
         .unwrap_or(crate::theme::Appearance::Auto)
 }
 
+/// Rewrites a stored Light or Dark as Daylight or Daylight Dark on a desktop
+/// with no Omarchy theme, once, at startup ([`theme::Appearance::
+/// on_this_desktop`] has the rule and the reason). `resolve` already wears
+/// the new palette either way; this is so the picker, which no longer offers
+/// the two off Omarchy, ticks the card that is actually worn. Never on
+/// Omarchy, where both stay. A failed write changes nothing that matters:
+/// the palette is right regardless, and the next launch tries again.
+pub(crate) async fn retire_plain_themes(pool: &SqlitePool, omarchy: bool) {
+    let stored = appearance(pool).await;
+    let honoured = stored.on_this_desktop(omarchy);
+    if honoured != stored {
+        if let Err(e) = write(pool, APPEARANCE_KEY, honoured.as_str()).await {
+            tracing::warn!(%e, "could not move a retired theme choice to its successor");
+        }
+    }
+}
+
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s
 /// reason: `setup` reads it at launch to decorate the window before it is
 /// shown, and `read_settings` reports it to the form.
@@ -2330,6 +2347,28 @@ mod tests {
                 "{stored:?} is not a usable duration and must fall back",
             );
         }
+    }
+
+    /// Off Omarchy a stored Light or Dark becomes its successor once, at
+    /// startup, so the picker (which no longer offers either there) ticks
+    /// what is worn; on Omarchy the row is left exactly as it was.
+    #[tokio::test]
+    async fn a_retired_theme_choice_moves_to_its_successor_off_omarchy_only() {
+        use crate::theme::Appearance;
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for (stored, omarchy, after) in [
+            ("light", false, "daylight"),
+            ("dark", false, "daylight-dark"),
+            ("light", true, "light"),
+            ("dark", true, "dark"),
+            ("catppuccin-latte", false, "catppuccin-latte"),
+            ("auto", false, "auto"),
+        ] {
+            write(&pool, APPEARANCE_KEY, stored).await.unwrap();
+            retire_plain_themes(&pool, omarchy).await;
+            assert_eq!(read(&pool, APPEARANCE_KEY).await.as_deref(), Some(after), "{stored} omarchy={omarchy}");
+        }
+        assert_eq!(appearance(&pool).await, Appearance::Auto);
     }
 
     #[tokio::test]

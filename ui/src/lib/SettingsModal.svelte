@@ -814,10 +814,16 @@
    *  follow: on Omarchy they are one `omarchy-theme-set` away, and a pinned
    *  choice here would fight it. */
   const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn', 'retro-bloom', 'daylight', 'daylight-dark']);
+  /** And the plain Light and Dark are the other way round: kept on Omarchy,
+   *  as the way out of a hard-to-read Omarchy theme, and retired everywhere
+   *  else, where Daylight and Daylight Dark do their job better
+   *  (`theme::Appearance::on_this_desktop`, which also moves a stored choice
+   *  of either to its successor). */
+  const PLAIN_THEMES: ReadonlySet<Appearance> = new Set(['light', 'dark']);
   const themeOptions = $derived(
     settings?.desktop === 'omarchy'
       ? APPEARANCE_OPTIONS.filter(([id]) => !NAMED_THEMES.has(id))
-      : APPEARANCE_OPTIONS,
+      : APPEARANCE_OPTIONS.filter(([id]) => !PLAIN_THEMES.has(id)),
   );
   /** Each card's colours, fetched when the pane opens: the backend resolves
    *  them, and "Follow the desktop" is whatever the desktop is right now. */

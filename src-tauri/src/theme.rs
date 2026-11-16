@@ -111,13 +111,17 @@ impl Palette {
         }
     }
 
-    /// The built-in palette a system's light-or-dark setting asks for.
-    /// No preference is dark: what every copy showed before it asked.
+    /// What "Follow the desktop" wears where there is no Omarchy theme: the
+    /// system's light-or-dark setting, as Daylight or Daylight Dark since the
+    /// plain Light and Dark were retired off Omarchy
+    /// ([`Appearance::on_this_desktop`]). No preference is dark: what every
+    /// copy showed before it asked.
     pub fn for_system(scheme: SystemScheme) -> Self {
-        match scheme {
-            SystemScheme::Light => Palette::fallback_light(),
-            SystemScheme::Dark | SystemScheme::NoPreference => Palette::fallback_dark(),
-        }
+        let theme = match scheme {
+            SystemScheme::Light => Appearance::Daylight,
+            SystemScheme::Dark | SystemScheme::NoPreference => Appearance::DaylightDark,
+        };
+        Palette::named(theme).expect("Daylight and Daylight Dark are named themes")
     }
 
     /// A named theme's palette, for a desktop that has no Omarchy theme to
@@ -254,6 +258,8 @@ pub fn system_scheme() -> SystemScheme {
 /// obligation to be legible on white (Omarchy ships pale yellows and washed
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
+/// That is their job on Omarchy, and only there now: off Omarchy they were
+/// retired for Daylight and Daylight Dark ([`Appearance::on_this_desktop`]).
 ///
 /// The seven named themes are the same kind of choice — see
 /// [`Palette::named`] — spelled as Omarchy spells its themes.
@@ -313,6 +319,22 @@ impl Appearance {
     /// been told not to follow.
     pub fn is_pinned(self) -> bool {
         !matches!(self, Appearance::Auto)
+    }
+
+    /// The choice as this desktop honours it. **Off Omarchy the plain Light
+    /// and Dark are retired** (Plamen, 2026-11-16: "we have better ones in
+    /// light and dark modes"): Daylight and Daylight Dark took their places,
+    /// in the picker, as what "Follow the desktop" wears ([`Palette::
+    /// for_system`]), and for anyone who had chosen one of the two. On
+    /// Omarchy, where the named themes are hidden, Light and Dark stay: they
+    /// are the way out of an Omarchy theme that is hard to read. `omarchy` is
+    /// whether there is an Omarchy theme directory.
+    pub fn on_this_desktop(self, omarchy: bool) -> Self {
+        match (self, omarchy) {
+            (Appearance::Light, false) => Appearance::Daylight,
+            (Appearance::Dark, false) => Appearance::DaylightDark,
+            (appearance, _) => appearance,
+        }
     }
 }
 
@@ -572,7 +594,7 @@ pub fn parse_alacritty(toml_src: &str) -> Option<Palette> {
 /// all: it is the user saying which of the two built-in palettes they want,
 /// and a theme file cannot outrank that. `Auto` is the chain exactly as it was.
 pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance) -> Palette {
-    match appearance {
+    match appearance.on_this_desktop(theme_dir.is_some()) {
         Appearance::Light => return Palette::fallback_light(),
         Appearance::Dark => return Palette::fallback_dark(),
         Appearance::Auto => {}
@@ -678,9 +700,12 @@ blue = "#1e66f5"
         assert_eq!(p, Palette::fallback_dark());
     }
 
+    /// No Omarchy theme and no word from the system: Daylight Dark, since
+    /// the plain Dark was retired off Omarchy. (No test sets the system
+    /// scheme, so it is the process default, no preference.)
     #[test]
     fn resolve_falls_back_when_given_nothing() {
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        assert_eq!(resolve(None, Appearance::Auto), Palette::named(Appearance::DaylightDark).unwrap());
     }
 
     #[test]
@@ -886,22 +911,27 @@ light_foreground = "#adb5c4"
         let auto = resolve(Some(&dir), Appearance::Auto);
         assert_eq!(auto.bg, "#2e3440", "Auto is the behaviour that must not move");
 
-        // And with no Omarchy at all — the case issue #30 is about.
-        assert_eq!(resolve(None, Appearance::Light), Palette::fallback_light());
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        // And with no Omarchy at all — the case issue #30 is about — where
+        // the plain two are retired and their successors are worn.
+        let daylight = Palette::named(Appearance::Daylight).unwrap();
+        let daylight_dark = Palette::named(Appearance::DaylightDark).unwrap();
+        assert_eq!(resolve(None, Appearance::Light), daylight);
+        assert_eq!(resolve(None, Appearance::Dark), daylight_dark);
         // A named theme outranks the installed one exactly as Light does.
         assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn).bg, "#faf4ed");
         assert_eq!(resolve(None, Appearance::TokyoNight).bg, "#1a1b26");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// With no Omarchy theme, Auto is the system's choice; no preference is
-    /// dark, as it always was.
+    /// With no Omarchy theme, Auto is the system's choice, worn as Daylight
+    /// or Daylight Dark; no preference is dark, as it always was.
     #[test]
     fn auto_without_omarchy_follows_the_system() {
-        assert_eq!(Palette::for_system(SystemScheme::Light), Palette::fallback_light());
-        assert_eq!(Palette::for_system(SystemScheme::Dark), Palette::fallback_dark());
-        assert_eq!(Palette::for_system(SystemScheme::NoPreference), Palette::fallback_dark());
+        let daylight = Palette::named(Appearance::Daylight).unwrap();
+        let daylight_dark = Palette::named(Appearance::DaylightDark).unwrap();
+        assert_eq!(Palette::for_system(SystemScheme::Light), daylight);
+        assert_eq!(Palette::for_system(SystemScheme::Dark), daylight_dark);
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference), daylight_dark);
         assert_eq!(SystemScheme::from_portal(0), SystemScheme::NoPreference);
         assert_eq!(SystemScheme::from_portal(1), SystemScheme::Dark);
         assert_eq!(SystemScheme::from_portal(2), SystemScheme::Light);
@@ -1091,6 +1121,22 @@ selection = "#504945"
             if name.starts_with("Daylight") {
                 assert!(light, "{name}: {fill_hex} takes dark text");
             }
+        }
+    }
+
+    /// **The plain Light and Dark, retired off Omarchy** (2026-11-16): there,
+    /// each is honoured as its successor, and every other choice as itself;
+    /// on Omarchy nothing moves, Light and Dark included, because they are
+    /// the way out of a hard-to-read Omarchy theme.
+    #[test]
+    fn light_and_dark_are_their_successors_off_omarchy_only() {
+        assert_eq!(Appearance::Light.on_this_desktop(false), Appearance::Daylight);
+        assert_eq!(Appearance::Dark.on_this_desktop(false), Appearance::DaylightDark);
+        for a in NAMED.into_iter().chain([Appearance::Auto]) {
+            assert_eq!(a.on_this_desktop(false), a, "{a:?} off Omarchy");
+        }
+        for a in NAMED.into_iter().chain([Appearance::Auto, Appearance::Light, Appearance::Dark]) {
+            assert_eq!(a.on_this_desktop(true), a, "{a:?} on Omarchy");
         }
     }
 
