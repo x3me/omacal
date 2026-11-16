@@ -714,19 +714,14 @@ fn call(request: &serde_json::Value) -> Result<serde_json::Value, CallError> {
 /// The envelope to the terminal, in both registers, with the exit the spec
 /// names: the app's own refusal is 6, and transport trouble stays 4/5 —
 /// the one distinction an agent acts on (retry nothing on 6).
-fn finish(json: bool, envelope: serde_json::Value, done_word: &str) -> i32 {
+fn finish(json: bool, envelope: serde_json::Value, done_word: &str, sent_name: Option<&str>) -> i32 {
     if envelope.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         if json {
             // Relayed, not rebuilt: the bytes the app answered are the bytes
             // the agent reads.
             println!("{envelope}");
         } else {
-            let title = envelope["data"]["summary"].as_str().unwrap_or("");
-            if title.is_empty() {
-                println!("{done_word}.");
-            } else {
-                println!("{done_word}: {title}");
-            }
+            println!("{}", done_line(&envelope, done_word, sent_name));
         }
         return EXIT_OK;
     }
@@ -739,6 +734,33 @@ fn finish(json: bool, envelope: serde_json::Value, done_word: &str) -> i32 {
         _ => EXIT_ERROR,
     };
     fail(json, code, message, exit)
+}
+
+/// What a text-mode write prints once the app has said yes: the verb's word
+/// and the thing's name.
+///
+/// One socket answers in two shapes. An event write answers with the event
+/// (`events::EventDetail`), whose name is `title`; a task write answers with
+/// the whole task list (`Vec<tasks::TaskVm>`), which names no one task. The
+/// old code read `data.summary`, which neither shape has, so every write
+/// printed a bare "Created." / "Saved.". The app's own `title` wins, since it
+/// is the event as stored; `sent_name` is what the CLI itself sent or read,
+/// for the answers that carry no name.
+pub(crate) fn done_line(
+    envelope: &serde_json::Value,
+    done_word: &str,
+    sent_name: Option<&str>,
+) -> String {
+    let name = envelope["data"]["title"]
+        .as_str()
+        .into_iter()
+        .chain(sent_name)
+        .map(str::trim)
+        .find(|s| !s.is_empty());
+    match name {
+        Some(name) => format!("{done_word}: {name}"),
+        None => format!("{done_word}."),
+    }
 }
 
 /// The row the prechecks read — one query through the store's own
@@ -972,7 +994,9 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
         }
     };
 
-    send(&request, json, done_word)
+    // The app's answer names the event (`EventDetail::title`); nothing to
+    // fall back on.
+    send(&request, json, done_word, None)
 }
 
 /// Sends one request to the running app and reports what came back.
@@ -980,9 +1004,14 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
 /// Shared with `cli_tasks`: the socket, the three failure shapes and the
 /// "the write's fate is unknown" wording are the same contract whichever
 /// verb asked, and two copies of it would be two chances to drift.
-pub(crate) fn send(request: &serde_json::Value, json: bool, done_word: &str) -> i32 {
+pub(crate) fn send(
+    request: &serde_json::Value,
+    json: bool,
+    done_word: &str,
+    sent_name: Option<&str>,
+) -> i32 {
     match call(request) {
-        Ok(envelope) => finish(json, envelope, done_word),
+        Ok(envelope) => finish(json, envelope, done_word, sent_name),
         Err(CallError::NotRunning) => fail(
             json,
             "not_running",
@@ -1414,5 +1443,26 @@ mod tests {
 
         let respond = respond_request(41, "accepted", "all", s);
         assert!(crate::ipc::parse_request(&respond.to_string()).is_ok(), "{respond}");
+    }
+
+    /// The line a text-mode write prints. A task write is answered with the
+    /// whole list, so the name has to be the one the CLI sent, never some
+    /// task the list happens to hold; an event's own title outranks what was
+    /// sent, because it is the event as the app stored it.
+    #[test]
+    fn the_done_line_names_the_thing_written() {
+        let list = serde_json::json!({ "ok": true, "data": [
+            { "id": 1, "summary": "Some other task" },
+            { "id": 2, "summary": "Water the plants" },
+        ]});
+        assert_eq!(done_line(&list, "Added", Some("Water the plants")), "Added: Water the plants");
+        assert_eq!(done_line(&list, "Completed", None), "Completed.", "no name rather than a wrong one");
+
+        let event = serde_json::json!({ "ok": true, "data": { "id": 7, "title": "Standup, moved" } });
+        assert_eq!(done_line(&event, "Saved", Some("Standup")), "Saved: Standup, moved");
+
+        let untitled = serde_json::json!({ "ok": true, "data": { "id": 8, "title": "  " } });
+        assert_eq!(done_line(&untitled, "Created", None), "Created.");
+        assert_eq!(done_line(&untitled, "Created", Some("Lunch")), "Created: Lunch");
     }
 }

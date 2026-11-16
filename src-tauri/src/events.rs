@@ -4119,6 +4119,21 @@ mod tests {
         assert!(d.can_edit);
     }
 
+    /// The CLI's text line after a write (`cli_write::done_line`) names the
+    /// event from this very answer, serialised the way the socket sends it.
+    /// It read `data.summary` for as long as event writes existed, and
+    /// `EventDetail` calls the name `title`, so every event write printed a
+    /// bare "Created.".
+    #[tokio::test]
+    async fn a_cli_write_names_the_event_from_the_apps_own_answer() {
+        let mut ev = stored(vec![]);
+        ev.summary = Some("Standup".into());
+        let (pool, id) = seeded_pool_with(&ev).await;
+        let detail = event_detail_impl(&state_with(pool, false), id).await.unwrap();
+        let envelope = serde_json::json!({ "ok": true, "data": detail });
+        assert_eq!(crate::cli_write::done_line(&envelope, "Created", None), "Created: Standup");
+    }
+
     /// The other half of the same payload: the raw rule tells the form what to
     /// *show*, this tells it whether the Repeat control may be used at all.
     ///
