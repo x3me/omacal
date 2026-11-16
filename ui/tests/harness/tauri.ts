@@ -156,6 +156,9 @@ export type Harness = {
   /** What the next `export_event` answers: a path, or `null` for a chooser
    *  the user dismissed. Set before the button is pressed. */
   exportAnswers(path: string | null): void;
+  /** What the next `pick_ics_file` answers: a path, or `null` for a chooser
+   *  the user dismissed (#180). */
+  pickAnswers(path: string | null): void;
   /** Every command the app has invoked, in order. */
   calls: { cmd: string; args: unknown }[];
   /** The values `set_setting` was sent for one key, oldest first — what a
@@ -166,6 +169,8 @@ export type Harness = {
 /** What the `export_event` stub answers. A spec sets it through
  *  `window.__harness.exportAnswers(...)` before pressing the button. */
 let exportAnswer: string | null = '/home/u/Documents/Board prep.ics';
+/** What the `pick_ics_file` stub answers; `pickAnswers(...)` sets it. */
+let pickAnswer: string | null = '/home/u/Downloads/webinars.ics';
 
 /** What `set_calendar_sync(id, false)` reports removing, absent a forced failure. */
 export const CALENDAR_SYNC_REMOVED = 143;
@@ -254,6 +259,9 @@ const harness: Harness = {
   },
   exportAnswers(path) {
     exportAnswer = path;
+  },
+  pickAnswers(path) {
+    pickAnswer = path;
   },
   async emit(event, payload) {
     if (event === 'preferences-requested') preferencesPending = true;
@@ -1038,6 +1046,8 @@ export function installTauriStub(scenario: string): Harness {
       // second, so the "says nothing for a cancel" rule has a way to fail.
       case 'export_event':
         return exportAnswer;
+      case 'pick_ics_file':
+        return pickAnswer;
       case 'get_status':
         return status;
       // The date a dated fresh launch parked on the backend. One scenario

@@ -1784,6 +1784,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             export::export_event,
+            import::pick_ics_file,
             invites::pending_invites,
             invites::declined_guests,
             invites::dismiss_decline_notice,

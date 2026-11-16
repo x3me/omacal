@@ -600,6 +600,33 @@ async fn calendar_zone(state: &crate::AppState, calendar_id: i64) -> Result<Stri
         .ok_or_else(|| NO_SUCH_CALENDAR.to_string())
 }
 
+/// The form's "Import .ics…" (#180): the platform's file chooser, filtered to
+/// calendar files, and the path picked, or `None` when it was dismissed. Only
+/// the path comes back: what to do with the file is the same panel a drop
+/// opens ([`plan_ics_import`], then [`run_ics_import`]), so a picked file and
+/// a dropped one cannot be imported two different ways. On Linux the chooser
+/// is the desktop's portal picker when there is one (#182,
+/// `gtk_use_portal`).
+#[tauri::command]
+pub(crate) async fn pick_ics_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // The chooser answers on its own thread; a channel turns the callback
+    // into something to await, as `export_event` does.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Calendar file", &["ics", "ICS"])
+        .pick_file(move |chosen| {
+            let _ = tx.send(chosen);
+        });
+    let Some(chosen) = rx.await.map_err(|_| crate::export::EXPORT_DISMISSED.to_string())? else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|e| crate::errors::user_facing(&anyhow::anyhow!("{e}")))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 /// What dropping a file on the window asks: what would this do?
 #[tauri::command]
 pub(crate) async fn plan_ics_import(

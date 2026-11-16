@@ -7561,6 +7561,56 @@ test.describe('dropping a file on the calendar', () => {
 });
 
 /**
+ * The visible way in (#180): drag-and-drop works, but nobody finds it without
+ * being told, and a new event is where people look for a way to bring events
+ * in. The button asks for a file and then hands it to the panel a drop opens,
+ * so a picked file and a dropped one are imported the same way.
+ */
+test.describe('importing from the new-event form', () => {
+  const newForm = (page: import('@playwright/test').Page) => page.getByRole('dialog', { name: 'New event' });
+  const picks = (page: import('@playwright/test').Page) =>
+    page.evaluate(() => (window as any).__harness.calls.filter((c: any) => c.cmd === 'pick_ics_file').length);
+  /** Mounted, keys and all, before `n` is pressed: the keydown listener is
+   *  attached on mount, and the view switcher is the mark that it has. */
+  const openNew = async (page: import('@playwright/test').Page) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app('writable'));
+    await expect(page.locator('.vswitch button')).toHaveCount(5);
+  };
+
+  test('a picked file closes the form and opens the import panel', async ({ page }) => {
+    await openNew(page);
+    await page.keyboard.press('n');
+    await newForm(page).getByRole('button', { name: 'Import .ics…' }).click();
+    await expect(page.getByRole('dialog', { name: 'Import webinars.ics' })).toBeVisible();
+    await expect(newForm(page)).toHaveCount(0);
+    expect(await picks(page)).toBe(1);
+  });
+
+  test('a dismissed chooser leaves the form as it was', async ({ page }) => {
+    await openNew(page);
+    await page.evaluate(() => (window as any).__harness.pickAnswers(null));
+    await page.keyboard.press('n');
+    await newForm(page).getByLabel('Title', { exact: true }).fill('Half typed');
+    await newForm(page).getByRole('button', { name: 'Import .ics…' }).click();
+    await expect.poll(() => picks(page)).toBe(1);
+    await expect(newForm(page)).toBeVisible();
+    await expect(newForm(page).getByLabel('Title', { exact: true })).toHaveValue('Half typed');
+    await expect(page.getByRole('dialog', { name: /^Import / })).toHaveCount(0);
+  });
+
+  test('an edit offers no import', async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app('writable'));
+    await page.locator('.ev').filter({ hasText: 'Standup' }).first().click();
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    const edit = page.getByRole('dialog', { name: 'Edit event' });
+    await expect(edit).toBeVisible();
+    await expect(edit.getByRole('button', { name: 'Import .ics…' })).toHaveCount(0);
+  });
+});
+
+/**
  * Carrying a task from the Tasks pane onto the calendar (#115). Dropped on an
  * hour it becomes due then; dropped on a day's TASKS row it becomes due that
  * day. It stays a task, on its list, either way.

@@ -27,6 +27,11 @@ export const planIcsImport = (calendarId: number, path: string) =>
 export const runIcsImport = (calendarId: number, path: string) =>
   invoke<ImportReport>('run_ics_import', { calendarId, path });
 
+/** The file chooser behind the form's "Import .ics…" (#180): the picked
+ *  path, or `null` when it was dismissed. Only a path, because what happens
+ *  next is the panel a dropped file opens. */
+export const pickIcsFile = () => invoke<string | null>('pick_ics_file');
+
 /** The sentence above the preview.
  *
  *  It names the guest count because that is the one thing an import quietly

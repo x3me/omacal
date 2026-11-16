@@ -26,6 +26,7 @@
   import { dateKey, freshness, getWeather, weatherByDate, type DayWeather, type WeatherReport } from './lib/weather';
   import WeatherPopover from './lib/WeatherPopover.svelte';
   import ImportPanel from './lib/ImportPanel.svelte';
+  import { pickIcsFile } from './lib/importics';
   import TasksSidebar from './lib/TasksSidebar.svelte';
   import { taskChips } from './lib/taskchips';
   import { setTaskCompleted, updateTask } from './lib/tasks';
@@ -478,6 +479,20 @@
     });
     return () => { un.then((f) => f()); };
   });
+  /** The new-event form's "Import .ics…" (#180): the platform's chooser,
+   *  then the same panel a dropped file opens. Choosing a file means bringing
+   *  events in rather than writing this one, so the form closes; dismissing
+   *  the chooser leaves it as it was, typed fields and all. */
+  async function importFromForm() {
+    try {
+      const path = await pickIcsFile();
+      if (path === null) return;
+      form = null;
+      importPath = path;
+    } catch (e) {
+      error = String(e);
+    }
+  }
   const openWeather = (dayStartMs: number, anchor: import('./lib/position').Rect) => {
     weatherCard = { dayStartMs, anchor };
   };
@@ -2790,6 +2805,7 @@
     anchor={form.anchor}
     initial={form.initial}
     chooseCalendar={form.mode === 'create' && form.chooseCalendar === true}
+    onimport={form.mode === 'create' && form.chooseCalendar !== true ? importFromForm : undefined}
     {calendars}
     onsave={saveForm}
     oncancel={() => (form = null)}

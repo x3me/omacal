@@ -37,6 +37,7 @@
     oncancel,
     onvaluechange,
     chooseCalendar = false,
+    onimport,
   }: {
     /** The rect to sit beside: the clicked block, or the clicked grid cell. */
     anchor: Rect;
@@ -56,6 +57,11 @@
     onvaluechange?: (v: EventFormValue) => void;
     /** A duplicate starts by choosing where the new event should live. */
     chooseCalendar?: boolean;
+    /** "Import .ics…" (#180): offered only when given, which the caller does
+     *  for a new event and not for an edit or a duplicate. Drag-and-drop imports too, but
+     *  nobody finds it without being told; a new event is where people look
+     *  for a way to bring events in. What it opens is the caller's. */
+    onimport?: () => void;
   } = $props();
 
   // A working copy. Every field the user can change lives here; the facts they
@@ -1223,6 +1229,9 @@
     {#if error}<p class="err" data-testid="form-error">{error}</p>{/if}
 
     <div class="actions">
+      {#if onimport}
+        <button type="button" class="ghost import" onclick={onimport}>Import .ics…</button>
+      {/if}
       <button type="button" class="ghost" onclick={oncancel}>Cancel</button>
       <!-- Deliberately never disabled by validity. A Save that does nothing
            when clicked leaves the user guessing which field is wrong; a Save
@@ -1429,5 +1438,8 @@
   .actions button { font: inherit; font-size: 11.5px; cursor: pointer;
                     border-radius: 6px; padding: 5px 12px; border: 1px solid var(--hairline); }
   .ghost { background: none; color: var(--muted); }
+  /* Not a step of saving this event, so it stands apart from Cancel and Save
+     at the row's other end. */
+  .actions .import { margin-right: auto; border-color: transparent; padding-left: 4px; }
   .primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
 </style>
