@@ -1207,6 +1207,34 @@ pub fn apply_gtk_theme_early() {
     if drop_hook_gtk_theme(gtk_theme.as_deref(), user_override.as_deref(), in_appimage) {
         std::env::remove_var("GTK_THEME");
     }
+    if let Some(value) = gtk_use_portal(cfg!(target_os = "linux"), std::env::var_os("GTK_USE_PORTAL").is_some()) {
+        std::env::set_var("GTK_USE_PORTAL", value);
+    }
+}
+
+/// What to export as `GTK_USE_PORTAL`, if anything, before GTK reads it (#182).
+///
+/// The file choosers (export's save dialog, the form's "Import .ics…") are
+/// `tauri-plugin-dialog`'s, and on Linux that is rfd's GTK3 backend, which
+/// builds a `GtkFileChooserNative`. GTK hands a native chooser to the
+/// desktop portal's FileChooser only when it believes it should, which
+/// outside a sandbox means `GTK_USE_PORTAL=1`; otherwise it draws its own
+/// GTK3 dialog inside the app and never asks the picker the user chose in
+/// `portals.conf` (GNOME's, KDE's, or a custom one like flea).
+///
+/// The variable, not rfd's own `xdg-portal` backend: rfd picks one backend at
+/// compile time, and its portal backend's fallback is zenity and then
+/// nothing, so a desktop with no FileChooser portal would get no dialog at
+/// all. GTK's portal path falls back to its own dialog when the portal is not
+/// there, so every desktop still gets a chooser.
+///
+/// GTK reads the variable once and caches it, so it must be set before the
+/// first dialog, and it is inherited by what this process launches: a GTK
+/// app started from here uses the desktop's picker too, which is the desktop
+/// working as configured. A value someone set themselves, `0` included, is
+/// theirs and left alone. Linux only: nothing else reads it.
+fn gtk_use_portal(linux: bool, already_set: bool) -> Option<&'static str> {
+    (linux && !already_set).then_some("1")
 }
 
 /// Exports `TZ` from the display-tz sidecar, and **must run first thing in
@@ -1952,6 +1980,17 @@ mod tests {
             "a person's own GTK_THEME, outside any AppImage"
         );
         assert!(!drop_hook_gtk_theme(None, None, true));
+    }
+
+    /// #182: the file choosers go to the desktop's portal picker on Linux,
+    /// unless someone already said otherwise. `GTK_USE_PORTAL=0` is a choice,
+    /// and so is `1`; only an absent variable is ours to fill. Elsewhere there
+    /// is no GTK to read it.
+    #[test]
+    fn the_file_chooser_asks_the_portal_unless_told_otherwise() {
+        assert_eq!(gtk_use_portal(true, false), Some("1"));
+        assert_eq!(gtk_use_portal(true, true), None, "a value the user set stays theirs");
+        assert_eq!(gtk_use_portal(false, false), None, "not on macOS");
     }
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
