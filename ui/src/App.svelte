@@ -1258,6 +1258,12 @@
     const un = listen('sync-finished', async () => {
       await refreshStatus();
       await refreshInvites();
+      // A sync can also change *which* calendars exist: a CalDAV account
+      // lists its collections again on every pass (#174), so a calendar or
+      // task list made or deleted on another device lands here, not at the
+      // next launch. Before the reload, so the grid draws with it. Quiet,
+      // like the tray: a failed read keeps the list the window already has.
+      try { calendars = await getCalendars(); } catch { /* keep the last list */ }
       await reload();
       // A change whose own follow-up sync failed is retried now that a sync
       // has got through (spec 2026-10-09); nothing happens otherwise.

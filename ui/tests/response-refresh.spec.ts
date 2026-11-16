@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { APP_MON, APP_NOW, APP_SERIES_ID, APP_ONE_OFF_ID, appWritableWeek, POPOVER_DETAILS, FIXTURES } from './fixtures';
+import { APP_MON, APP_NOW, APP_SERIES_ID, APP_ONE_OFF_ID, APP_WRITE_CALENDARS, appWritableWeek, POPOVER_DETAILS, FIXTURES } from './fixtures';
 
 const series = APP_SERIES_ID, other = APP_ONE_OFF_ID;
 const calls = (page: Page, cmd: string) => page.evaluate(c => window.__harness.calls.filter(x => x.cmd === c).length, cmd);
@@ -340,4 +340,44 @@ test('a sticky failure stays under a modal instead of covering its controls', as
   for (const tab of ['General', 'Appearance', 'Notifications']) {
     await modal.getByRole('tab', {name: tab}).click();
   }
+});
+
+// A CalDAV account lists its collections again on every sync (#174), so the
+// calendar list can change under a running window: a task list made on the
+// phone, a calendar deleted on the server. The window learns of it from the
+// sync, not at the next launch. Reopening the panel alone must not be what
+// shows it, or this test would pass without the refresh it is about.
+test('a finished sync brings a calendar made elsewhere into the list, and drops one deleted there', async ({page}) => {
+  await page.clock.setFixedTime(APP_NOW);
+  await page.goto('/tests/harness/index.html?c=App&f=writable');
+  const panel = async () => {
+    await page.getByRole('button', {name: 'Menu', exact: true}).click();
+    await page.getByRole('button', {name: /Calendars/}).click();
+    return page.getByRole('group', {name: 'Calendars', exact: true});
+  };
+  // Escape steps back one level: the panel first, then the menu.
+  const close = async () => {
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', {name: 'Menu', exact: true})).toHaveAttribute('aria-expanded', 'false');
+  };
+
+  let list = await panel();
+  await expect(list.getByRole('checkbox', {name: 'Team', exact: true})).toBeVisible();
+  await close();
+
+  const [holidays, , personal] = APP_WRITE_CALENDARS;
+  const errands = {...personal, id: 42, summary: 'Errands', is_primary: false, provider: 'caldav' as const};
+  await page.evaluate(c => window.__harness.setResponseData({calendars: c}), [holidays, personal, errands]);
+
+  list = await panel();
+  await expect(list.getByRole('checkbox', {name: 'Team', exact: true})).toBeVisible();
+  await expect(list.getByRole('checkbox', {name: 'Errands', exact: true})).toHaveCount(0);
+  await close();
+
+  await page.evaluate(() => window.__harness.emit('sync-finished', null));
+  list = await panel();
+  await expect(list.getByRole('checkbox', {name: 'Errands', exact: true})).toBeVisible();
+  await expect(list.getByRole('checkbox', {name: 'Team', exact: true})).toHaveCount(0);
+  await expect(list.getByRole('checkbox', {name: 'Personal', exact: true})).toBeVisible();
 });

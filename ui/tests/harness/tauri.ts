@@ -208,7 +208,10 @@ let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = 
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
 let holdWriteOnce: 'update_event' | 'delete_event_cmd' | 'create_event' | null = null;
 let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
-type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
+type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
+  /** The calendar list as the store holds it after a sync — set it, then emit
+   *  `sync-finished`, to stand in for collections made or deleted elsewhere. */
+  calendars?: Calendar[]};
 let responseData: ResponseData = {};
 let parkedSettings: (() => void) | null = null;
 let holdMenubarOnce: string | null = null;
@@ -1099,6 +1102,7 @@ export function installTauriStub(scenario: string): Harness {
       // assertion undisturbed. CalendarPopover specs never take this path —
       // they mount the component directly with fixture props instead.
       case 'get_calendars':
+        if (responseData.calendars) return structuredClone(responseData.calendars);
         // `cross-zone` needs a writable list for the same reason `writable`
         // does: without one the form's calendar select has nothing to seed
         // from and Save refuses, so the edit half of its agreement spec could
