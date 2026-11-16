@@ -877,6 +877,58 @@ test.describe('EventBlock hover occludes what it covers', () => {
     expect(declined, 'declined must not render the same text colour as accepted')
       .not.toBe(accepted);
   });
+
+  /** A declined block keeps one coloured edge, its spine at 45% of the
+   *  calendar's colour. A theme with a deeper hover fill (Daylight's 31%)
+   *  drew that fill nearly as strong as the spine, and the edge vanished
+   *  under the pointer, so a declined block hovers to the stock 16% in every
+   *  theme. Asserted as the fill it lands on and as the edge it leaves. */
+  test('a declined block keeps its spine on hover in a themed tint', async ({ page }) => {
+    await page.goto(show('EventBlock', 'rsvp-declined-15'));
+    const themes = {
+      daylight: { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+                  accent: '#d32f3a', is_dark: false,
+                  style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                           today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
+    };
+    const ev = page.locator('.ev');
+    for (const [name, palette] of Object.entries(themes)) {
+      await page.evaluate((p) => (window as any).__setPalette(p), palette);
+      await ev.hover();
+      const got = await ev.evaluate((el) => {
+        const probe = (css: string) => {
+          const s = document.createElement('span');
+          s.style.color = css;
+          document.body.append(s);
+          const c = getComputedStyle(s).color;
+          s.remove();
+          return c;
+        };
+        const cs = getComputedStyle(el);
+        const spine = cs.boxShadow.match(/^(rgba?\([^)]*\)|color\([^)]*\))/)![1];
+        return {
+          fill: probe(cs.backgroundColor), spine: probe(spine),
+          stock: probe('color-mix(in srgb, #5b8def 16%, var(--bg))'),
+        };
+      });
+      expect(got.fill, `${name}: hovered fill`).toBe(got.stock);
+      // Channels to WCAG relative luminance, in either serialisation.
+      const lum = (css: string) => {
+        const fn = /^color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/.exec(css);
+        const ch = fn ? fn.slice(1, 4).map(Number) : css.match(/[\d.]+/g)!.slice(0, 3).map((v) => Number(v) / 255);
+        const [r, g, b] = ch.map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const [hi, lo] = [lum(got.spine), lum(got.fill)].sort((a, b) => b - a);
+      expect((hi + 0.05) / (lo + 0.05), `${name}: spine against the hovered fill`).toBeGreaterThan(1.25);
+      await page.mouse.move(0, 0);
+    }
+  });
 });
 
 /**

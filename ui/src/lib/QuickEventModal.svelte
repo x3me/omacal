@@ -243,6 +243,6 @@
   .edit { background: color-mix(in srgb, var(--text) 5%, transparent); }
   footer kbd { margin-left: 5px; padding: 1px 4px; border-color: currentColor;
                opacity: .65; font-size: 8.5px; }
-  footer .primary { color: var(--on-accent); background: var(--accent);
-                    border-color: var(--accent); font-weight: 600; }
+  footer .primary { color: var(--on-accent); background: var(--accent-fill);
+                    border-color: var(--accent-fill); font-weight: 600; }
 </style>

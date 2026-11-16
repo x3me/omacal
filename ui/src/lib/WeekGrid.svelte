@@ -2609,7 +2609,7 @@
   @container (max-width: 104px) { .wx { display: none; } }
   .head b { font-size: 15px; color: var(--text);
             font-weight: 500; letter-spacing: -.02em; }
-  .head.today b { background: var(--accent); color: var(--on-accent); width: 23px; height: 23px;
+  .head.today b { background: var(--accent-fill); color: var(--on-accent); width: 23px; height: 23px;
                   line-height: 23px; border-radius: 50%; font-weight: 600; }
   .head.keyboard:not(.today) b { color: var(--accent); font-weight: 650; }
 

@@ -236,14 +236,14 @@
           grid-auto-rows: 15px; gap: 2px 0; padding: 2px 0; }
 
   .bar { position: relative; appearance: none; -webkit-appearance: none; font: inherit;
-         text-align: left; cursor: pointer; border: 0; border-left: 2px solid var(--cal);
+         text-align: left; cursor: pointer; border: 0; border-left: var(--event-spine-width, 2px) solid var(--cal);
          font-size: 10.5px; border-radius: var(--event-chip-radius, 4px); padding: 1px 6px; white-space: nowrap;
          overflow: hidden; text-overflow: ellipsis; margin: 0 2px;
          /* Keep the former 16% visual tint in an opaque base. The shared
             preference supplies all actual alpha once startup applies it. */
          --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
          background: color-mix(in srgb, var(--cal) 16%, transparent);
-         color: color-mix(in srgb, var(--cal) 60%, var(--text)); }
+         color: color-mix(in srgb, var(--cal) var(--event-ink, 60%), var(--text)); }
   /* Saving (pending-changes spec): faded and dashed until Google confirms. */
   .bar.pending { opacity: .62; outline: 1.5px dashed var(--cal); outline-offset: -1.5px; }
   :global(:root[data-event-transparency]) .bar {
@@ -256,9 +256,10 @@
   .bar.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
   .bar.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   /* Free and private, as `AllDayBand`'s chips draw them: a 3px `double`
-     spine with the extra pixel taken back from the padding, and a trailing
-     lock the label's ellipsis stops short of. */
-  .bar.free { border-left-style: double; border-left-width: 3px; padding-left: 5px; }
+     spine with what it adds over the theme's spine taken back from the
+     padding, and a trailing lock the label's ellipsis stops short of. */
+  .bar.free { border-left-style: double; border-left-width: 3px;
+              padding-left: calc(3px + var(--event-spine-width, 2px)); }
   .bar.private { padding-right: 16px; }
   .bar .lock { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
                line-height: 0; opacity: .9; pointer-events: none; }

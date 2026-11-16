@@ -185,7 +185,7 @@
   button { font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 5px; cursor: pointer; padding: 6px 10px; }
   button:hover { background: var(--surface, #303540); } button:focus-visible { outline: 2px solid var(--accent, #87b7ff); outline-offset: -2px; }
   nav { background: var(--surface, #303540); border-radius: 6px; padding: 3px; } nav button { flex: 1; } nav button[aria-pressed='true'] { background: var(--bg, #20232b); box-shadow: 0 1px 3px #0003; }
-  .join { background: var(--accent, #87b7ff); color: var(--on-accent, #10151c); flex-shrink: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+  .join { background: var(--accent-fill, var(--accent, #87b7ff)); color: var(--on-accent, #10151c); flex-shrink: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
   .scroll { overflow: auto; flex: 1; min-height: 0; } footer { border-top: 1px solid var(--hairline, #444); padding-top: 8px; } footer button:first-child { margin-right: auto; }
   .fold, .more { width: 100%; text-align: left; color: var(--muted, #999); font-size: 12px; padding: 8px 8px; }
   .fold:hover, .more:hover { color: var(--text, #e5e7eb); }

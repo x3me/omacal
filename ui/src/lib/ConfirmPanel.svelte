@@ -109,6 +109,6 @@
      carries its status in a glyph rather than a hue. The weight of a
      destructive action comes from the dialog, the wording and where focus
      starts, not from a colour the theme cannot promise. */
-  .actions :global(.primary) { background: var(--accent); border-color: var(--accent);
+  .actions :global(.primary) { background: var(--accent-fill); border-color: var(--accent-fill);
                                color: var(--on-accent); }
 </style>

@@ -193,6 +193,6 @@
   .actions button { font: inherit; padding: 5px 12px; border-radius: 6px;
                     border: 1px solid var(--hairline); background: none; color: var(--text);
                     cursor: pointer; }
-  .actions .go { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .actions .go { background: var(--accent-fill); color: var(--on-accent); border-color: transparent; }
   .actions button:disabled { opacity: .5; cursor: default; }
 </style>

@@ -3543,7 +3543,8 @@ test.describe('App', () => {
     const themes = modal.getByRole('radiogroup', { name: 'Theme' });
     await expect(themes.locator('.tname')).toHaveText([
       'Follow the desktop', 'Light', 'Dark',
-      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn',
+      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight',
+      'Daylight Dark',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
@@ -4807,6 +4808,100 @@ test.describe('App', () => {
       .poll(() => page.evaluate(() => document.documentElement.style.colorScheme))
       .toBe('light');
   });
+
+  test('a theme with a style sets the knobs, and the next theme removes them', async ({ page }) => {
+    // Daylight is the one palette that carries `style`; everything else
+    // must leave the stylesheets on their own fallbacks, which is what keeps
+    // the other themes pixel-identical. Removal is the half that can rot: a
+    // `setPalette` that only ever wrote would leave Daylight's bolder blocks
+    // on every theme chosen after it. Today's column is the exception that
+    // proves the rule: it is not a knob of its own but replaces
+    // `--today-tint`, so it goes back to that variable's stock value.
+    await page.goto(app());
+    const knobs = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint', '--event-tint-hover', '--event-spine-width',
+              '--event-title-weight', '--event-chip-weight', '--event-ink',
+              '--event-sub-opacity', '--heading-size', '--heading-weight',
+              '--title-year', '--today-tint'].map((n) => s.getPropertyValue(n));
+    });
+    expect((await knobs())[10]).not.toBe('');
+    expect((await knobs()).slice(0, 10)).toEqual(Array(10).fill(''));
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+      accent: '#d32f3a', is_dark: false,
+      style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+               today: '#f2f2f4', heading_size: 24, heading_weight: 700 },
+    }));
+    await expect.poll(knobs).toEqual(['22%', '31%', '3px', '600', '500', '48%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#f2f2f4']);
+    // The title keeps its text whole and only the year turns the accent.
+    const h1 = page.locator('header h1');
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(211, 47, 58)');
+    expect(await h1.evaluate((e) => e.textContent)).toMatch(/^[A-Za-z]+\s?\d{4}$/);
+    await expect(h1.locator('span:not(.year)').first()).not.toHaveCSS('color', 'rgb(211, 47, 58)');
+
+    // Daylight Dark turns the same knobs to its own values, straight over
+    // Daylight's: nothing of the bright one may survive the switch.
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+      accent: '#ef5350', is_dark: true,
+      style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+               today: '#1e2024', heading_size: 24, heading_weight: 700,
+               tint_space: 'srgb-linear', accent_fill: '#d32f3a' },
+    }));
+    await expect.poll(knobs).toEqual(['10%', '19%', '3px', '600', '500', '42%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#1e2024']);
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(239, 83, 80)');
+    // Its two knobs of its own. A timed block's fill is mixed in linear
+    // light, which keeps yellow and orange calendars from going olive over
+    // near-black; and the accent's fills (the active view here) take the
+    // deeper red, so their text is the light ink rather than dark text on
+    // a bright red.
+    const extra = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint-space', '--accent-fill', '--on-accent'].map((n) => s.getPropertyValue(n));
+    });
+    await expect.poll(extra).toEqual(['srgb-linear', '#d32f3a', 'var(--ink-on-dark)']);
+    const probe = (css: string) => page.evaluate((c) => {
+      const el = document.createElement('span');
+      el.style.color = c;
+      document.body.append(el);
+      const got = getComputedStyle(el).color;
+      el.remove();
+      return got;
+    }, css);
+    // Compared as sRGB channels: the event-transparency rule re-mixes the
+    // fill in sRGB, so the block reports `color(srgb …)` whichever space the
+    // tint was mixed in, while the probe reports the space it was given.
+    const srgb = (css: string) => {
+      const m = /^color\((srgb(?:-linear)?) ([\d.e-]+) ([\d.e-]+) ([\d.e-]+)/.exec(css);
+      if (!m) return css.match(/[\d.]+/g)!.slice(0, 3).map((v) => Number(v) / 255);
+      const ch = m.slice(2, 5).map(Number);
+      return m[1] === 'srgb' ? ch : ch.map((v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055));
+    };
+    const block = page.locator('.ev').first();
+    const cal = await block.evaluate((el) => getComputedStyle(el).getPropertyValue('--cal').trim());
+    const fill = srgb(await block.evaluate((el) => getComputedStyle(el).backgroundColor));
+    const linear = srgb(await probe(`color-mix(in srgb-linear, ${cal} 10%, #16171a)`));
+    const plain = srgb(await probe(`color-mix(in srgb, ${cal} 10%, #16171a)`));
+    fill.forEach((v, i) => expect(v).toBeCloseTo(linear[i], 2));
+    expect(Math.max(...fill.map((v, i) => Math.abs(v - plain[i])))).toBeGreaterThan(0.02);
+    const view = page.locator('.vswitch button.active');
+    await expect(view).toHaveCSS('background-color', 'rgb(211, 47, 58)');
+    await expect(view).toHaveCSS('color', await probe('var(--ink-on-dark)'));
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#fdfdfb', surface: '#ffffff', text: '#1a1a1a',
+      muted: '#6b6b70', accent: '#c04a2b', is_dark: false,
+    }));
+    await expect.poll(knobs).toEqual([...Array(10).fill(''), 'rgba(0,0,0,.025)']);
+    // And neither of Daylight Dark's own survives: the mix is sRGB again and
+    // the accent fills with the accent.
+    await expect.poll(extra).toEqual(['', '#c04a2b', 'var(--ink-on-dark)']);
+    await expect(view).toHaveCSS('background-color', 'rgb(192, 74, 43)');
+  });
 });
 
 // The grid, the popover and the form must name the SAME day for an all-day
@@ -5321,6 +5416,18 @@ test.describe('App: one band, not two', () => {
     const controls = handles.filter((h) => CLICKABLE.includes(h.tag));
     expect(controls, 'a header control was turned into a drag handle and stopped clicking')
       .toEqual([]);
+
+    // A press on the title's own text lands on the handle itself, not on a
+    // part inside it: Tauri's script honours a bare attribute only on the
+    // element pressed, and the title is drawn as parts so the year can take
+    // a colour.
+    // Every part is probed, not the box's centre, which can fall on a space.
+    const missed = await page.locator('header h1').evaluate((h1) =>
+      [...h1.querySelectorAll('span')].filter((s) => {
+        const b = s.getBoundingClientRect();
+        return document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) !== h1;
+      }).map((s) => s.textContent));
+    expect(missed, 'a press on these parts of the title lands on something that is not the drag handle').toEqual([]);
   });
 
   /**
@@ -7154,6 +7261,84 @@ test.describe('the tasks sidebar', () => {
       (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
     )).toMatchObject({ summary: 'Buy milk', priority: 1 });
     await expect(side.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  /** High, Medium and Low must be told apart in any theme. They used to be the
+   *  error red, the theme's accent and the muted grey, so Daylight (red accent)
+   *  drew High and Medium nearly alike. The mark is the text colour for an
+   *  outlined chip and the fill for High's solid one; the text on that fill is
+   *  held to the same 4.5:1 as the others (10px text). */
+  test('the three priority levels are told apart in a light and a dark theme', async ({ page }) => {
+    const side = await openTasks(page);
+    for (const [task, level] of [['Buy milk', 'High'], ['Ship the release', 'Medium'], ['Answer the issue', 'Low']]) {
+      await side.getByRole('button', { name: task, exact: true }).click();
+      await side.getByRole('combobox', { name: 'Priority' }).click();
+      await side.getByRole('option', { name: level }).click();
+      await side.getByRole('button', { name: 'Save' }).click();
+      await expect(side.locator('.pchip', { hasText: new RegExp(`^${level}$`) })).toHaveCount(1);
+    }
+    const themes = {
+      daylight: { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+                  accent: '#d32f3a', is_dark: false,
+                  style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                           today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
+      latte: { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false },
+      // A dark theme with the same red accent: the accent must not matter.
+      redDark: { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#ff5555', is_dark: true },
+    };
+    for (const [name, palette] of Object.entries(themes)) {
+      await page.evaluate((p) => window.__harness.emit('theme-changed', p), palette);
+      const marks = await side.evaluate((el, bgs) => {
+        const rgb = (c: string) => c.startsWith('#')
+          ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16))
+          : (c.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        const lum = (c: number[]) => {
+          const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a: number[], b: number[]) => {
+          const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        return ['High', 'Medium', 'Low'].map((level) => {
+          const cs = getComputedStyle(el.querySelector(`.pchip.${level.toLowerCase()}`)!);
+          const text = rgb(cs.color), fill = rgb(cs.backgroundColor);
+          const solid = cs.backgroundColor !== 'rgba(0, 0, 0, 0)';
+          return {
+            level, solid, mark: solid ? fill : text,
+            // Text against what is behind it: the fill, or each theme background.
+            text: solid ? ratio(text, fill) : Math.min(...bgs.map((b) => ratio(text, rgb(b)))),
+            mark_vs_bg: Math.min(...bgs.map((b) => ratio(solid ? fill : text, rgb(b)))),
+          };
+        });
+      }, [palette.bg, palette.surface]);
+      const [hi, med, lo] = marks;
+      expect(hi.solid, `${name}: High is the filled one`).toBe(true);
+      expect(med.solid || lo.solid, `${name}: Medium and Low are outlined`).toBe(false);
+      for (const m of marks) {
+        expect(m.text, `${name}: ${m.level} text`).toBeGreaterThanOrEqual(4.5);
+        expect(m.mark_vs_bg, `${name}: ${m.level} mark`).toBeGreaterThanOrEqual(3);
+      }
+      // Pairwise apart as the eye reads colour (CIE76 distance in Lab), which
+      // a channel difference does not: dark red and dark orange are close in RGB.
+      const lab = (c: number[]) => {
+        const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+        const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+        const x = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+        const y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+        const z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+        return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+      };
+      const apart = (a: number[], b: number[]) => Math.hypot(...lab(a).map((v, i) => v - lab(b)[i]));
+      expect(apart(hi.mark, med.mark), `${name}: High vs Medium`).toBeGreaterThan(40);
+      expect(apart(med.mark, lo.mark), `${name}: Medium vs Low`).toBeGreaterThan(40);
+      expect(apart(hi.mark, lo.mark), `${name}: High vs Low`).toBeGreaterThan(40);
+    }
   });
 
   /** The chip must not make the pane scroll sideways, however long the title
