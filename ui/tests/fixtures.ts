@@ -2845,6 +2845,24 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     },
   },
   EventPopover: {
+    // #185: a booking on a meeting room's calendar, as Google shows it. The
+    // room is the calendar ("LSG - Boardroom"), the organizer is the room's
+    // own machine address (hidden by the organizer line), and there is no
+    // Location at all, so the calendar line is the only place the room is
+    // named.
+    'room-calendar': {
+      detail: detail({
+        id: 185, calendar_id: 41, title: 'EXT - Bernhard Baumgartner', can_edit: false,
+        organizer_email: 'c_188fb2d5f4a6e1c0e3b9d7a2f5c8e1b4@resource.calendar.google.com',
+        description: '10 aperitif dinatoire - commandé',
+      }),
+      calendars: [
+        cal({ id: 40, account_email: 'me@x.com', summary: 'LSG - Salle 2', color_hex: '#e67c73' }),
+        cal({ id: 41, account_email: 'me@x.com', summary: 'LSG - Boardroom', color_hex: '#7cb342' }),
+      ],
+      anchor: ANCHOR, occurrenceStartMs: MON + 14 * H, occurrenceEndMs: MON + 18 * H,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
     // Copy link on a calendar the user cannot edit: copying is reading, so it
     // stays. Google's conference field and a *different* Zoom link in
     // `location` at once, which proves the copied URL is the one Join opens

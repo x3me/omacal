@@ -6324,6 +6324,39 @@ test.describe('WeekGrid: more all-day events than the band draws', () => {
   });
 });
 
+/**
+ * #185: a meeting room is a calendar, and the room's name is how people find
+ * their way to it. Google's card ends with the calendar's name; the popover
+ * named the description and nothing else, because a room's own address is
+ * what the organizer line hides and a room booking has no Location.
+ */
+test.describe('EventPopover: the calendar it is on', () => {
+  test('names the calendar in its colour, which for a room booking is the room', async ({ page }) => {
+    await page.goto('/tests/harness/index.html?c=EventPopover&f=room-calendar');
+    const line = page.locator('.pop .calendar');
+    await expect(line).toHaveText('LSG - Boardroom');
+    await expect(line.locator('.dot')).toHaveCSS('background-color', 'rgb(124, 179, 66)');
+    // The room's own address stays hidden, as before.
+    await expect(page.locator('.pop')).not.toContainText('resource.calendar.google.com');
+    await expect(page.locator('.pop .organizer')).toHaveCount(0);
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async (value: string) => { (window as any).__fieldCopy = value; } },
+      });
+    });
+    await page.getByRole('button', { name: 'Copy calendar name' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__fieldCopy)).toBe('LSG - Boardroom');
+  });
+
+  test('says nothing when the calendar is not known', async ({ page }) => {
+    await page.goto('/tests/harness/index.html?c=EventPopover&f=readonly-conference');
+    await expect(page.locator('.pop')).toBeVisible();
+    await expect(page.locator('.pop .calendar')).toHaveCount(0);
+  });
+});
+
 test.describe('EventPopover: who said no', () => {
   const show = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
 

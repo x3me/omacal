@@ -4,7 +4,7 @@
   import { dateFormat } from './date.svelte';
   import { meetingUrl } from './location';
   import type { EventCopy } from './api';
-  import type { Calendar } from './calendars';
+  import { calendarInk, type Calendar } from './calendars';
   import { exportEvent, openConference } from './api';
   import { clockFormat } from './clock.svelte';
   import { formatClock } from './timefmt';
@@ -237,6 +237,14 @@
    * anything cleverer about locations is `location.ts`'s documented
    * non-goal, not something to smuggle in here.
    */
+  /** The calendar the event sits on, named as the calendar list names it.
+   *  Google's own card ends with this line, and for a meeting room it is the
+   *  room: a room is a calendar, its name is how people find their way to it,
+   *  and its own address is exactly what the organizer line hides (#185).
+   *  Left out when the copy picker below is showing, which names every
+   *  calendar the event is on already, and when the calendar is not known. */
+  const eventCalendar = $derived(calendars.find((c) => c.id === detail.calendar_id) ?? null);
+
   const locationShown = $derived.by(() => {
     const loc = detail.location?.trim();
     if (!loc) return null;
@@ -612,6 +620,13 @@
        onclick={() => copyField(detail.organizer_email!, 'organizer email')}
        >Organized by {detail.organizer_email}</button></p>
   {/if}
+  {#if eventCalendar && !(copies.length > 1 && onchoosecopy)}
+    <p class="calendar"><i class="dot" style="background:{calendarInk(eventCalendar.color_hex)}"></i><button
+       type="button" class="copyfield" aria-label="Copy calendar name"
+       data-copy-label="calendar name" data-copy-value={eventCalendar.summary}
+       onclick={() => copyField(eventCalendar.summary, 'calendar name')}
+       >{eventCalendar.summary}</button></p>
+  {/if}
 
   {#if shownAttendees.length}
     {@const declined = shownAttendees.filter((a) => a.response_status === 'declined' && !a.is_self)}
@@ -801,7 +816,9 @@
   .copydesc:hover { color: var(--text); }
   .desc a { color: var(--accent); }
 
-  .loc, .organizer { color: var(--muted); font-size: 11px; margin: 0 0 4px; }
+  .loc, .organizer, .calendar { color: var(--muted); font-size: 11px; margin: 0 0 4px; }
+  .calendar { display: flex; align-items: center; gap: 6px; }
+  .calendar .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .conference-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
                         margin: 0 0 8px; }
   .conf { display: inline-block; color: var(--accent); font-size: 11px;

@@ -165,6 +165,9 @@ test('a combined event shows both colors and lets Edit target the selected calen
   await expect(block.locator('.calendar-colors > span').nth(1)).toHaveCSS('background-color', 'rgb(32, 176, 128)');
   const picker = page.getByLabel('Calendar copy', { exact: true });
   await expect(picker.locator('option')).toHaveCount(2);
+  // The picker names every calendar the event is on, so the popover's own
+  // calendar line (#185) stays out of the way rather than name one of them twice.
+  await expect(page.locator('.pop .calendar')).toHaveCount(0);
   await picker.selectOption(String(HOME_ID));
   await expect(page.getByRole('dialog', { name: 'Client call' })).toContainText('Personal notes');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
