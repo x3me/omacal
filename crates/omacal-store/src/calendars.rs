@@ -995,9 +995,121 @@ pub async fn delete_account(pool: &SqlitePool, account_id: i64) -> anyhow::Resul
     Ok(gone)
 }
 
+/// Removes one calendar a server no longer has, and everything it owned —
+/// `delete_account`'s sweep, for one calendar instead of all of an account's.
+/// Returns how many calendar rows went (0 or 1).
+///
+/// For a CalDAV collection that is gone from the server, and only that: the
+/// caller (`omacal_sync::caldav::refresh_collections`) has already heard the
+/// collection itself answer 404 or 410. A calendar the *user* removes keeps its row
+/// with `sync_enabled = 0` instead (`set_sync_enabled`), so that the next
+/// sign-in cannot bring it back; a collection the server deleted is not
+/// coming back, and a row left for it would be a calendar nothing can sync or
+/// remove.
+pub async fn delete_calendar(pool: &SqlitePool, calendar_id: i64) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    // The ledgers with no foreign key, by hand and through the events before
+    // the cascade takes them — the same three sweeps as `delete_account`.
+    sqlx::query(
+        "DELETE FROM fired_reminders WHERE event_id IN (
+            SELECT id FROM events WHERE calendar_id = ?1)",
+    )
+    .bind(calendar_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM invite_notices WHERE event_id IN (
+            SELECT id FROM events WHERE calendar_id = ?1)",
+    )
+    .bind(calendar_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM invite_scan WHERE calendar_id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *tx)
+        .await?;
+    let gone = sqlx::query("DELETE FROM calendars WHERE id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    // After the cascade, in the same transaction: the 0011 delete trigger just
+    // recorded every one of its events as "cancelled", and a calendar deleted
+    // on the server is not a hundred cancelled meetings.
+    sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(gone)
+}
+
 #[cfg(test)]
 mod cascade_tests {
     use super::*;
+
+    /// `delete_calendar` takes one calendar and all it owned, ledgers
+    /// included, and leaves its neighbour on the same account whole.
+    #[tokio::test]
+    async fn deleting_one_calendar_sweeps_it_and_nothing_beside_it() {
+        let pool = crate::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:x', 'x@x', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        for (cal, url) in [(1, "gone"), (2, "kept")] {
+            sqlx::query(
+                "INSERT INTO calendars (id, account_id, google_id, summary, timezone, access_role, supports_tasks)
+                 VALUES (?1, 1, ?2, 'Cal', 'UTC', 'owner', 1)",
+            )
+            .bind(cal).bind(url)
+            .execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO events (id, calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, updated_at)
+                 VALUES (?1, ?1, 'ev', 0, 1, 'UTC', 'UTC', 0)",
+            )
+            .bind(cal)
+            .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO tasks (calendar_id, uid, updated_at) VALUES (?1, 't', 0)")
+                .bind(cal).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                 VALUES (?1, 'ctag', 0, 1)",
+            )
+            .bind(cal).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO fired_reminders (event_id, occurrence_ms, minutes, occurrence_end_ms, fired_at_ms)
+                 VALUES (?1, 0, 5, 1, 0)",
+            )
+            .bind(cal).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO invite_notices (event_id, noticed_at_ms, posted) VALUES (?1, 0, 1)")
+                .bind(cal).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO invite_scan (calendar_id, seeded_at_ms) VALUES (?1, 0)")
+                .bind(cal).execute(&pool).await.unwrap();
+        }
+
+        assert_eq!(delete_calendar(&pool, 1).await.unwrap(), 1);
+        for (table, key) in [("calendars", "id"), ("events", "calendar_id"), ("tasks", "calendar_id"),
+                             ("sync_state", "calendar_id"), ("fired_reminders", "event_id"),
+                             ("invite_notices", "event_id"), ("invite_scan", "calendar_id"),
+                             ("event_changes", "calendar_id")] {
+            let gone: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE {key} = 1"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(gone, 0, "{table} still holds the deleted calendar's row");
+        }
+        for (table, key) in [("calendars", "id"), ("events", "calendar_id"), ("tasks", "calendar_id"),
+                             ("sync_state", "calendar_id"), ("fired_reminders", "event_id"),
+                             ("invite_notices", "event_id"), ("invite_scan", "calendar_id")] {
+            let kept: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE {key} = 2"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(kept, 1, "{table} lost the neighbouring calendar's row");
+        }
+        let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(accounts, 1, "the account outlives its calendar");
+        assert_eq!(delete_calendar(&pool, 1).await.unwrap(), 0, "second delete finds nothing");
+    }
 
     #[tokio::test]
     async fn deleting_an_account_cascades_through_everything_it_owned() {

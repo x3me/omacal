@@ -731,3 +731,63 @@ async fn a_private_ca_is_trusted_when_the_system_store_names_it() {
         "discovery came back over TLS",
     );
 }
+
+/// The calendar list follows the server after the account is connected: a
+/// task list made with MKCALENDAR afterwards (how another client makes one)
+/// is added as tasks-only, and a collection deleted on the server loses its
+/// row once it answers 404.
+#[tokio::test]
+#[ignore = "needs a live Radicale on 127.0.0.1:5232"]
+async fn the_calendar_list_follows_collections_made_and_deleted_after_connecting() {
+    let base = base_url();
+    let user = format!("omacal-e2e-lists-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    mkcalendar(&base, &user, "old", "VEVENT").await;
+    let client = CalDavClient::new(&base, &user, "pw").expect("client");
+
+    // What `connect_caldav` writes.
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query(
+        "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+         VALUES ('caldav:e2e', 'e2e@test', 0, 'caldav', ?1, ?2)",
+    )
+    .bind(&base)
+    .bind(&user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let at_connect = client.discover().await.expect("discovery");
+    omacal_sync::caldav::upsert_collections(&pool, 1, &at_connect, "UTC").await.unwrap();
+    let names = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT summary, supports_events, supports_tasks FROM calendars ORDER BY summary",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(names(pool.clone()).await, vec![("old".into(), 1, 0), ("work".into(), 1, 0)]);
+
+    // Made on another device, after connecting.
+    mkcalendar(&base, &user, "bernard", "VTODO").await;
+    let out = omacal_sync::caldav::refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+    assert_eq!(out.added, 1);
+    assert_eq!(out.removed, 0);
+    assert_eq!(
+        names(pool.clone()).await,
+        vec![("bernard".into(), 0, 1), ("old".into(), 1, 0), ("work".into(), 1, 0)]
+    );
+
+    // Deleted on the server.
+    let resp = reqwest::Client::new()
+        .delete(format!("{base}/{user}/old/"))
+        .basic_auth(&user, Some("pw"))
+        .send()
+        .await
+        .expect("radicale reachable");
+    assert!(resp.status().is_success(), "DELETE answered {}", resp.status());
+    let out = omacal_sync::caldav::refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+    assert_eq!(out.added, 0);
+    assert_eq!(out.removed, 1);
+    assert_eq!(names(pool.clone()).await, vec![("bernard".into(), 0, 1), ("work".into(), 1, 0)]);
+}
