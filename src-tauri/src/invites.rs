@@ -822,35 +822,46 @@ mod tests {
     }
 
     /// The click is offered — and instructed — only where it can act.
+    ///
+    /// Two rules, and only the first is the same on every platform: *who*
+    /// may answer (a Google event the user is a guest on and may write) is
+    /// `offers_accept`; *whether a click exists* is the transport's, and
+    /// only Linux's notification daemon carries one (`cfg!` in
+    /// `invite_notification_with_format`). This test asserted Linux's card
+    /// on every OS and failed on every Mac that ran it; CI is Linux-only, so
+    /// nothing said so.
     #[test]
     fn the_accepting_click_exists_only_for_an_answerable_google_event() {
-        let n = invite_notification(&candidate(), SOFIA);
-        assert_eq!(
-            n.actions,
-            vec![Action::AcceptInvite { event_id: 7, start_ms: NOW + HOUR }]
-        );
-        assert!(
-            n.body.ends_with("Click to accept · right-click to dismiss"),
-            "{}", n.body
-        );
-
         let mut caldav = candidate();
         caldav.provider = "caldav".into();
-        let n = invite_notification(&caldav, SOFIA);
-        assert!(n.actions.is_empty(), "no RSVP write exists for CalDAV");
-        assert!(
-            !n.body.contains("Click to accept"),
-            "must not instruct a click that does nothing"
-        );
-        // Sticky with no click of its own still spells its way out.
-        assert!(n.body.ends_with("Right-click to dismiss"), "{}", n.body);
-
         let mut reader = candidate();
         reader.access_role = "reader".into();
-        assert!(invite_notification(&reader, SOFIA).actions.is_empty());
-
         let mut not_a_guest = candidate();
         not_a_guest.attendees.clear();
-        assert!(invite_notification(&not_a_guest, SOFIA).actions.is_empty());
+
+        assert!(offers_accept(&candidate()));
+        assert!(!offers_accept(&caldav), "no RSVP write exists for CalDAV");
+        assert!(!offers_accept(&reader));
+        assert!(!offers_accept(&not_a_guest));
+        for c in [&caldav, &reader, &not_a_guest] {
+            let n = invite_notification(c, SOFIA);
+            assert!(n.actions.is_empty());
+            assert!(!n.body.contains("Click to accept"), "must not instruct a click that does nothing");
+        }
+
+        let n = invite_notification(&candidate(), SOFIA);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                n.actions,
+                vec![Action::AcceptInvite { event_id: 7, start_ms: NOW + HOUR }]
+            );
+            assert!(n.body.ends_with("Click to accept · right-click to dismiss"), "{}", n.body);
+            // Sticky with no click of its own still spells its way out.
+            let n = invite_notification(&caldav, SOFIA);
+            assert!(n.body.ends_with("Right-click to dismiss"), "{}", n.body);
+        } else {
+            assert!(n.actions.is_empty(), "macOS's transport has no click to offer");
+            assert!(!n.body.to_lowercase().contains("click"), "{}", n.body);
+        }
     }
 }

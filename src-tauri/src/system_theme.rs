@@ -58,26 +58,35 @@ pub fn init(app: &AppHandle) {
         }
         return;
     }
-    #[cfg(target_os = "linux")]
-    {
-        if theme::omarchy_theme_dir().is_some() {
-            return; // Omarchy's theme decides; there is nothing to follow here.
-        }
-        let read = tauri::async_runtime::block_on(async {
-            tokio::time::timeout(std::time::Duration::from_millis(500), portal::read()).await
-        });
-        match read {
-            Ok(Ok(scheme)) => theme::set_system_scheme(scheme),
-            Ok(Err(e)) => tracing::debug!(%e, "no portal colour scheme; staying on no preference"),
-            Err(_) => tracing::debug!("portal did not answer in time; staying on no preference"),
-        }
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = portal::watch(app).await {
-                tracing::debug!(%e, "portal colour-scheme watch ended");
-            }
-        });
+    follow_portal(app);
+}
+
+/// Linux's half of [`init`]: the portal's colour scheme, read once and then
+/// watched. A function of its own, with a no-op twin elsewhere, so `init`
+/// reads the same on every platform — a `#[cfg]` block inline left macOS's
+/// `return` as the function's last statement, which clippy calls needless.
+#[cfg(not(target_os = "linux"))]
+fn follow_portal(_app: &AppHandle) {}
+
+#[cfg(target_os = "linux")]
+fn follow_portal(app: &AppHandle) {
+    if theme::omarchy_theme_dir().is_some() {
+        return; // Omarchy's theme decides; there is nothing to follow here.
     }
+    let read = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(500), portal::read()).await
+    });
+    match read {
+        Ok(Ok(scheme)) => theme::set_system_scheme(scheme),
+        Ok(Err(e)) => tracing::debug!(%e, "no portal colour scheme; staying on no preference"),
+        Err(_) => tracing::debug!("portal did not answer in time; staying on no preference"),
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = portal::watch(app).await {
+            tracing::debug!(%e, "portal colour-scheme watch ended");
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
