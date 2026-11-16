@@ -494,9 +494,12 @@ pub struct Report {
 
 /// The identifiers the target calendar already holds.
 ///
-/// On a CalDAV calendar these *are* the files' UIDs (`omacal-sync`'s
-/// `caldav` module stores `ev.uid` as the provider identifier), so importing
-/// the same file twice is a no-op there. On a Google calendar the column
+/// On a CalDAV calendar these are the events' UIDs (`omacal-sync`'s `caldav`
+/// module stores `ev.uid` as the provider identifier), and an import writes
+/// each event under the file's own UID (`run_file` hands it to the create),
+/// so importing the same file twice is a no-op there. That second half was
+/// missing until #180: the create minted a fresh UUID, and a re-import
+/// duplicated everything. On a Google calendar the column
 /// holds Google's own event id instead, which an `.ics` file does not carry,
 /// so a re-import cannot be recognised and will create the events again.
 /// That is a real limit and the reason this returns what it can see rather
@@ -559,7 +562,7 @@ pub(crate) async fn run_file(
             report.failed.push(p);
             continue;
         };
-        match crate::events::create_event_body(state, calendar_id, input, "none").await {
+        match crate::events::create_event_body(state, calendar_id, input, "none", Some(&ev.uid)).await {
             Ok(_) => report.imported += 1,
             Err(e) => {
                 tracing::warn!(%e, summary = p.summary(), "import: one event refused");

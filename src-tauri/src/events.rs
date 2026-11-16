@@ -911,7 +911,7 @@ pub async fn create_event(
     fields: crate::write::EventInput,
     send_updates: String,
 ) -> Result<EventDetail, String> {
-    create_event_body(&state, calendar_id, fields, &send_updates).await
+    create_event_body(&state, calendar_id, fields, &send_updates, None).await
 }
 
 /// The whole of `create_event` minus the Tauri `State` wrapper — guards,
@@ -922,14 +922,20 @@ pub async fn create_event(
 /// in the house. `fields_from_input` is fallible since #12 (a weekly
 /// pattern or ending that cannot serialize refuses here), and the refusal
 /// reaches the CLI's socket exactly as it reaches the form.
+///
+/// `uid` is an identity the event already has, which only an `.ics` import
+/// supplies (see [`crate::caldav_write::create`]). A CalDAV calendar keeps
+/// it; Google mints its own ids on insert and ignores it, which is the limit
+/// `import::existing_uids` already states.
 pub(crate) async fn create_event_body(
     state: &AppState,
     calendar_id: i64,
     fields: crate::write::EventInput,
     send_updates: &str,
+    uid: Option<&str>,
 ) -> Result<EventDetail, String> {
     let fields = crate::write::fields_from_input(fields)?;
-    create_impl(state, calendar_id, fields, send_updates)
+    create_impl(state, calendar_id, fields, send_updates, uid)
         .await
         .map_err(|e| crate::errors::user_facing(&e))
         .inspect(|_| crate::upcoming::refresh_soon(state.pool.clone(), state.demo))
@@ -975,6 +981,7 @@ async fn create_impl(
     calendar_id: i64,
     fields: crate::write::EventFields,
     send_updates: &str,
+    uid: Option<&str>,
 ) -> anyhow::Result<EventDetail> {
     if state.demo {
         anyhow::bail!("demo mode — there is nothing to create");
@@ -999,7 +1006,7 @@ async fn create_impl(
         if fields.conference.is_some() {
             anyhow::bail!("Google Meet can only be added to a Google calendar");
         }
-        return crate::caldav_write::create(state, calendar_id, fields).await;
+        return crate::caldav_write::create(state, calendar_id, fields, uid).await;
     }
 
     let (cal_google_id, access_role, account_email, cal_tz) =
@@ -4538,7 +4545,7 @@ mod tests {
     async fn creating_refuses_in_demo_mode_without_touching_config_keyring_or_google() {
         let pool = omacal_store::connect_memory().await.unwrap();
         let err =
-            create_impl(&state_with(pool, true), 1, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, true), 1, sample_fields(), "none", None).await.unwrap_err();
         assert!(err.to_string().contains("demo"), "got: {err}");
         // Binds the emitter to `errors.rs`'s allowlist: checking only
         // `.contains` above would leave this green even if the two literals
@@ -4557,7 +4564,7 @@ mod tests {
         let pool = omacal_store::connect_memory().await.unwrap();
         let cal = seed_calendar(&pool, "reader").await;
         let err =
-            create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, false), cal, sample_fields(), "none", None).await.unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
         assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
     }
@@ -4575,7 +4582,7 @@ mod tests {
             .await
             .unwrap();
         let err =
-            create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, false), cal, sample_fields(), "none", None).await.unwrap_err();
         assert_eq!(crate::errors::user_facing(&err), NOT_AN_EVENT_CALENDAR);
     }
 
