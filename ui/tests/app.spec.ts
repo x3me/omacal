@@ -3543,8 +3543,8 @@ test.describe('App', () => {
     const themes = modal.getByRole('radiogroup', { name: 'Theme' });
     await expect(themes.locator('.tname')).toHaveText([
       'Follow the desktop', 'Light', 'Dark',
-      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight',
-      'Daylight Dark',
+      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Retro Bloom',
+      'Daylight', 'Daylight Dark',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');

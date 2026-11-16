@@ -136,6 +136,14 @@ impl Palette {
     ///   Latte's blue measures 4.3:1 on its background and 4.0:1 on a card.
     /// - Rosé Pine Dawn takes **pine**: foam, which the theme file names,
     ///   measures 3.1:1.
+    /// - Retro Bloom is @itscallssh's Omarchy theme
+    ///   (github.com/itscallssh/omarchy-retro-bloom-theme): Gruvbox's dark
+    ///   palette (morhetz/gruvbox, MIT) around its orange, `#fe8019`, as the
+    ///   accent (5.8:1 on the page). Page, card, text and accent are what this
+    ///   app reads from its `colors.toml` on Omarchy; muted is Gruvbox's fg4,
+    ///   the theme's `dark_foreground` (5.3:1): the file's `muted` is 3.0:1,
+    ///   and its `light_foreground`, which an Omarchy theme's muted is read
+    ///   from, is brighter than its text.
     /// - The light themes' cards sit a shade nearer their background than the
     ///   shift would put them (1.05:1, not 1.07:1): at the shifted shade,
     ///   Latte's mauve and Dawn's muted grey fell just under 4.5:1 on a card,
@@ -177,6 +185,7 @@ impl Palette {
             Appearance::CatppuccinMocha => p("#1e1e2e", "#252535", "#cdd6f4", "#a6adc8", "#cba6f7", true),
             Appearance::CatppuccinLatte => p("#eff1f5", "#e9ebef", "#4c4f69", "#5c5f77", "#8839ef", false),
             Appearance::RosePineDawn => p("#faf4ed", "#f5efe8", "#575279", "#6e6a86", "#286983", false),
+            Appearance::RetroBloom => p("#282828", "#2f2f2f", "#ebdbb2", "#a89984", "#fe8019", true),
             Appearance::Daylight => Self {
                 style: Some(ThemeStyle {
                     tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
@@ -246,7 +255,7 @@ pub fn system_scheme() -> SystemScheme {
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
 ///
-/// The six named themes are the same kind of choice — see
+/// The seven named themes are the same kind of choice — see
 /// [`Palette::named`] — spelled as Omarchy spells its themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -262,6 +271,8 @@ pub enum Appearance {
     CatppuccinLatte,
     #[serde(rename = "rose-pine-dawn")]
     RosePineDawn,
+    #[serde(rename = "retro-bloom")]
+    RetroBloom,
     Daylight,
     #[serde(rename = "daylight-dark")]
     DaylightDark,
@@ -279,6 +290,7 @@ impl Appearance {
             Appearance::CatppuccinMocha => "catppuccin-mocha",
             Appearance::CatppuccinLatte => "catppuccin-latte",
             Appearance::RosePineDawn => "rose-pine-dawn",
+            Appearance::RetroBloom => "retro-bloom",
             Appearance::Daylight => "daylight",
             Appearance::DaylightDark => "daylight-dark",
         }
@@ -290,7 +302,7 @@ impl Appearance {
         [
             Appearance::Auto, Appearance::Light, Appearance::Dark, Appearance::TokyoNight,
             Appearance::CatppuccinMocha, Appearance::CatppuccinLatte, Appearance::RosePineDawn,
-            Appearance::Daylight, Appearance::DaylightDark,
+            Appearance::RetroBloom, Appearance::Daylight, Appearance::DaylightDark,
         ]
         .into_iter()
         .find(|a| a.as_str() == stored)
@@ -896,11 +908,42 @@ light_foreground = "#adb5c4"
         assert_eq!(SystemScheme::from_portal(7), SystemScheme::NoPreference);
     }
 
-    const NAMED: [Appearance; 6] = [
+    const NAMED: [Appearance; 7] = [
         Appearance::TokyoNight, Appearance::CatppuccinMocha,
-        Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::Daylight,
-        Appearance::DaylightDark,
+        Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::RetroBloom,
+        Appearance::Daylight, Appearance::DaylightDark,
     ];
+
+    /// Retro Bloom on a Mac is Retro Bloom as Omarchy wears it: the page,
+    /// card, text and accent this app reads from the theme's own
+    /// `colors.toml` (verbatim below, from
+    /// github.com/itscallssh/omarchy-retro-bloom-theme). Only muted is
+    /// chosen rather than read, as `Palette::named` says why.
+    #[test]
+    fn retro_bloom_is_its_omarchy_theme() {
+        const COLORS: &str = r##"mode = "dark"
+background        = "#282828"
+darker_background = "#1d2021"
+dark_background    = "#232323"
+lighter_background = "#3c3836"
+foreground        = "#ebdbb2"
+dark_foreground    = "#a89984"
+light_foreground   = "#f2e5bc"
+bright_foreground  = "#fbf1c7"
+muted   = "#7c6f64"
+accent  = "#fe8019"
+selection = "#504945"
+"##;
+        let omarchy = parse_colors(COLORS).unwrap();
+        let named = Palette::named(Appearance::RetroBloom).unwrap();
+        assert_eq!(named.bg, omarchy.bg);
+        assert_eq!(named.surface, omarchy.surface);
+        assert_eq!(named.text, omarchy.text);
+        assert_eq!(named.accent, omarchy.accent);
+        assert_eq!(named.is_dark, omarchy.is_dark);
+        assert_eq!(named.muted, "#a89984", "Gruvbox fg4, the file's dark_foreground");
+        assert!(named.style.is_none(), "colours only, no Daylight-style knobs");
+    }
 
     /// WCAG contrast of two `#rrggbb` colours.
     fn contrast(a: &str, b: &str) -> f64 {
