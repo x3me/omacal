@@ -179,11 +179,13 @@ export function setPalette(p: Palette): void {
  *  of each stock number, in the CSS that uses it. Same set-or-remove shape as
  *  the corner-style variables in `appearance.ts`.
  *
- *  Three are derived rather than carried, so a theme does not restate them: a hovered block deepens 9 points past its rest tint (7 -> 16
- *  today), and the all-day and month chips, which already sit at 16%, take
- *  their title one step lighter than a block's (600 -> 500 today), and the
- *  title's year takes the accent. Today's column is the one knob that is not
- *  a variable of its own: it replaces `--today-tint` in `setPalette`. */
+ *  Three variables are derived rather than carried, so a theme does not
+ *  restate them: the hovered block's tint, 9 points past its rest tint
+ *  (7 -> 16 today); the title weight of the all-day chips, which already
+ *  sit at 16%, one step lighter than a block's (600 -> 500 today);
+ *  and the title's year, which takes the accent. Today's column is the one
+ *  knob that is not a variable of its own: it replaces `--today-tint` in
+ *  `setPalette`. */
 function setThemeStyle(r: CSSStyleDeclaration, s: ThemeStyle | undefined): void {
   const vars: Record<string, string | undefined> = {
     '--event-tint': s && `${s.tint}%`,

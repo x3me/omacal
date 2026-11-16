@@ -19,7 +19,7 @@
    *  clip it, and driven from the keyboard as a select-only combobox (ARIA's
    *  pattern): the focus stays on the field and the arrows move through the
    *  rows. */
-  let { label, choices, value, disabled = false, compact = false, dotOnly = false, noDot = false, onpick }: {
+  let { label, choices, value, disabled = false, compact = false, dotOnly = false, noDot = false, wide = false, onpick }: {
     /** The control's name, which a screen reader says before its answer. */
     label: string;
     choices: ListChoice[];
@@ -34,6 +34,10 @@
     /** Leave the colour dot out altogether, for a picker whose choices carry
      *  no colour (a task's priority). */
     noDot?: boolean;
+    /** Show the whole answer, up to the width of the row, for a picker on a
+     *  row of its own whose names are worth reading in full (a theme's: the
+     *  two Catppuccins differ only past the add row's cap). */
+    wide?: boolean;
     onpick: (id: number | null) => void;
   } = $props();
 
@@ -95,7 +99,7 @@
   <i class="dot" class:any={c?.id === null} style:background={c && c.id !== null ? calendarInk(c.color) : null}></i>
 {/snippet}
 
-<span class="picker" class:open class:compact class:dotonly={dotOnly} bind:this={field}>
+<span class="picker" class:open class:compact class:dotonly={dotOnly} class:wide bind:this={field}>
   <div
     class="field"
     role="combobox"
@@ -157,6 +161,7 @@
   .picker { position: relative; display: inline-flex; flex: none; min-width: 0; max-width: 45%; }
   .picker.compact { flex: 0 1 auto; max-width: 100%; }
   .picker.dotonly { max-width: none; }
+  .picker.wide { max-width: 100%; }
   .picker.open { z-index: 41; }
 
   /* The add row's field: the height and the edge of the input beside it. */
@@ -169,6 +174,7 @@
   .field[aria-disabled='true'] { cursor: default; opacity: .6; }
   .compact .field { max-width: 100%; font-size: 11.5px; padding: 3px 7px 3px 8px;
                     border-radius: 6px; background: none; }
+  .wide .field { max-width: 100%; }
   .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The add row's neighbour, `newlist`: a square the height of the input. */
   .dotonly .field { width: 30px; padding: 0; justify-content: center; }

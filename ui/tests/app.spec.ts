@@ -3606,6 +3606,149 @@ test.describe('App', () => {
     await expect(modal.getByRole('radio', { name: 'Catppuccin Latte' })).toHaveAttribute('aria-checked', 'true');
   });
 
+  /** "Follow the desktop" wears a light theme and a dark one, and which two
+   *  is the user's choice, as a Mac app offers it. The two pickers show only
+   *  while it is chosen; each offers the themes of its own side, sorted by
+   *  the backend's palettes rather than a list of names here; each choice is
+   *  stored, survives a detour through a pinned theme, and is kept. The
+   *  pickers are the app's own (`ListPicker`), so their lists are drawn in
+   *  the theme rather than by GTK. */
+  test('following the desktop, a theme is chosen for light mode and for dark mode', async ({ page }) => {
+    await writable(page);
+    const open = async () => {
+      await page.getByRole('button', { name: 'Menu' }).click();
+      await page.getByRole('button', { name: 'Settings…' }).click();
+      await modal.getByRole('tab', { name: 'Appearance' }).click();
+    };
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await open();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    const dark = modal.getByRole('combobox', { name: 'In dark mode' });
+    const list = (name: string) => page.getByRole('listbox', { name });
+    // Nothing chosen is Daylight and Daylight Dark: what following the
+    // desktop wore before there was a choice.
+    await expect(light).toHaveText('Daylight');
+    await expect(dark).toHaveText('Daylight Dark');
+    // Never the plain Light and Dark, retired where these rows show; Retro
+    // Bloom is dark.
+    await light.click();
+    await expect(list('In light mode').locator('.name')).toHaveText(['Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight']);
+    await expect(list('In light mode').getByRole('option', { name: 'Daylight', exact: true })).toHaveAttribute('aria-selected', 'true');
+    // Escape closes only the list: the pane stays.
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(modal).toBeVisible();
+    await dark.click();
+    await expect(list('In dark mode').locator('.name')).toHaveText(['Tokyo Night', 'Catppuccin Mocha', 'Retro Bloom', 'Daylight Dark']);
+    await page.keyboard.press('Escape');
+
+    // The "Follow the desktop" card is drawn in what it resolves to, so a
+    // new choice fetches the previews again.
+    const previews = () => page.evaluate(() =>
+      window.__harness.calls.filter((c: any) => c.cmd === 'appearance_previews').length);
+    await expect.poll(previews).toBeGreaterThan(0);
+    const before = await previews();
+    await light.click();
+    await list('In light mode').getByRole('option', { name: 'Rosé Pine Dawn', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'autoLightTheme')).toEqual(['rose-pine-dawn']);
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect.poll(previews).toBe(before + 1);
+    await dark.click();
+    await list('In dark mode').getByRole('option', { name: 'Tokyo Night', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'autoDarkTheme')).toEqual(['tokyo-night']);
+
+    // A pinned theme has no sides, so the pickers go, and come back holding
+    // what was chosen.
+    const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    await themes.getByRole('radio', { name: 'Daylight', exact: true }).click();
+    await expect(light).toHaveCount(0);
+    await expect(dark).toHaveCount(0);
+    await themes.getByRole('radio', { name: 'Follow the desktop', exact: true }).click();
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect(dark).toHaveText('Tokyo Night');
+
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await open();
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect(dark).toHaveText('Tokyo Night');
+  });
+
+  /** The closed field shows the whole name of the theme it holds: the two
+   *  Catppuccins differ only past the point an ellipsis would cut. Every
+   *  name on each side is picked in turn, so the widest one is covered
+   *  whichever it is in the engine's font. */
+  test('each mode picker shows the whole name of the theme it holds', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    for (const label of ['In light mode', 'In dark mode']) {
+      const field = modal.getByRole('combobox', { name: label });
+      const list = page.getByRole('listbox', { name: label });
+      // Until the previews arrive a side lists only its current choice.
+      await field.click();
+      await expect.poll(() => list.getByRole('option').count()).toBeGreaterThan(1);
+      const names = await list.locator('.name').allTextContents();
+      await page.keyboard.press('Escape');
+      for (const name of names) {
+        if ((await field.textContent())?.trim() !== name) {
+          await field.click();
+          await list.getByRole('option', { name, exact: true }).click();
+        }
+        await expect(field).toHaveText(name);
+        const cut = await field.locator('.name').evaluate((el) => el.scrollWidth > el.clientWidth);
+        expect(cut, `${label}: "${name}" is cut short`).toBe(false);
+      }
+    }
+  });
+
+  /** On Omarchy, following the desktop wears the Omarchy theme, which is
+   *  neither side of anything: there is no pair to choose. */
+  test('on Omarchy there is no light or dark theme to choose', async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ desktop: 'omarchy' })));
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    // Settings have loaded and say Omarchy: until they do, Follow the
+    // desktop is already checked and the rows are already absent, so the
+    // assertions below would pass on a form that has not decided yet.
+    await expect(modal.getByText('wears your Omarchy theme')).toBeVisible();
+    await expect(modal.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(modal.getByRole('combobox', { name: /mode$/ })).toHaveCount(0);
+  });
+
+  /** The form offers each side only its own themes, so a refusal comes from
+   *  a stale form. Played by previews that put Tokyo Night on the light side
+   *  while the stub's backend still reads it as dark: the backend's sentence
+   *  shows, and the field stays on what is stored rather than showing a
+   *  choice that was never kept. */
+  test('a dark theme offered for light mode is refused and the picker keeps what is stored', async ({ page }) => {
+    await writable(page);
+    await page.evaluate(() => {
+      const ipc = (window as any).__TAURI_INTERNALS__;
+      const invoke = ipc.invoke;
+      ipc.invoke = async (cmd: string, ...rest: unknown[]) => {
+        const answer = await invoke(cmd, ...rest);
+        if (cmd !== 'appearance_previews') return answer;
+        return answer.map((p: any) => (p.appearance === 'tokyo-night' ? { ...p, palette: { ...p.palette, is_dark: false } } : p));
+      };
+    });
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    await light.click();
+    await page.getByRole('listbox', { name: 'In light mode' }).getByRole('option', { name: 'Tokyo Night', exact: true }).click();
+    await expect(modal.getByText('light mode needs a light theme')).toBeVisible();
+    await expect(light).toHaveText('Daylight');
+    expect(await settingValues(page, 'autoLightTheme')).toEqual(['tokyo-night']);
+  });
+
   /**
    * Issue #36. The row exists, its list is asserted whole so a choice cannot
    * quietly vanish, the choice reaches the command, and the default is the
