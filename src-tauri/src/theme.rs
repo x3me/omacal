@@ -151,12 +151,12 @@ impl Palette {
     /// - Daylight is ours, not a theme file's: the Fantastical-style bright
     ///   look (white page, cool grey card, near-black ink, one crisp red). The
     ///   red is Fantastical's `#e0383e` pulled a shade darker, because that
-    ///   one measures 4.0:1 on the card (this one 4.6:1). It is also the only palette that sets
-    ///   a [`ThemeStyle`] — a stronger tint, a 3px edge, a bolder title in a
-    ///   darker shade of the calendar's colour, a grey today column and a
-    ///   large month-and-year heading whose year is the accent: what makes a
-    ///   block read at a glance on white, where the stock 7% wash is close to
-    ///   invisible.
+    ///   one measures 4.0:1 on the card (this one 4.6:1). It is also the first
+    ///   palette to set a [`ThemeStyle`] — a stronger tint, a 3px edge, a
+    ///   bolder title in a darker shade of the calendar's colour, a grey today
+    ///   column and a large month-and-year heading whose year is the accent:
+    ///   what makes a block read at a glance on white, where the stock 7% wash
+    ///   is close to invisible.
     /// - Daylight Dark is the same look with the lights off, and the second
     ///   palette with a [`ThemeStyle`]: neutral near-blacks rather than the
     ///   blue-tinted greys of Tokyo Night, and the same red lifted to
