@@ -93,6 +93,10 @@ const AUTOSTART_ASKED_KEY: &str = "autostart_asked";
 const WEATHER_KEY: &str = "weather_enabled";
 const PHOTON_PLACES_KEY: &str = "photon_places";
 const APPEARANCE_KEY: &str = "appearance";
+/// The themes `Auto` wears in the system's light and dark mode
+/// ([`crate::theme::AutoPair`]); absent is Daylight and Daylight Dark.
+const AUTO_LIGHT_THEME_KEY: &str = "appearance_auto_light";
+const AUTO_DARK_THEME_KEY: &str = "appearance_auto_dark";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
 const DISPLAY_TZ_KEY: &str = "display_timezone";
@@ -626,14 +630,23 @@ pub struct AppSettings {
     /// the Omarchy 4 bar widget being the case this was built for, driving
     /// the app over the single-instance flags (`--sync-now`, `--quit`).
     pub tray_icon: bool,
-    /// Which palette the app wears: the desktop's, or one of the two built
-    /// in. **`Auto` by default**, which is what omacal has always done — the
-    /// Omarchy theme if there is one, the dark fallback if there is not.
+    /// Which palette the app wears: the desktop's, or one of omacal's own
+    /// themes. **`Auto` by default**: the Omarchy theme if there is one, as
+    /// omacal has always done, and otherwise the theme chosen for the side
+    /// the system's light-or-dark is on (`auto_light_theme`,
+    /// `auto_dark_theme`).
     ///
-    /// The setting exists because that second half was a dead end: omacal has
-    /// no theme of its own, so every desktop that is not Omarchy got dark and
-    /// had no way to ask for anything else (issue #30).
+    /// The setting exists because that otherwise used to be a dead end:
+    /// omacal had no theme of its own, so every desktop that is not Omarchy
+    /// got dark and had no way to ask for anything else (issue #30).
     pub appearance: crate::theme::Appearance,
+    /// What `Auto` wears while the system is in light mode, and in dark
+    /// mode, on a desktop with no Omarchy theme. Read through
+    /// [`auto_pair`], so a stale row comes back as that side's default, a
+    /// plain Light or Dark as its successor, and the form never shows a
+    /// choice the app is not wearing.
+    pub auto_light_theme: crate::theme::Appearance,
+    pub auto_dark_theme: crate::theme::Appearance,
     /// Whether the window draws a title bar, or `None` where the choice is
     /// not omacal's to make — macOS, whose `titleBarStyle: "Overlay"` puts
     /// the traffic lights over the content, and where hiding them would
@@ -914,6 +927,7 @@ pub async fn read_settings(pool: &SqlitePool) -> AppSettings {
 /// tell the Omarchy story and the other one on whichever host runs it.
 pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSettings {
     let (visible_start_hour, visible_end_hour) = visible_hours(pool).await;
+    let auto = auto_pair(pool).await;
     let absolute_transparency = read(pool, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY)
         .await
         .as_deref()
@@ -1102,6 +1116,8 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         tray_icon: read(pool, TRAY_ICON_KEY).await.map(|v| v != "0").unwrap_or(true),
         quit_on_close: quit_on_close(pool).await,
         appearance: appearance(pool).await,
+        auto_light_theme: auto.light(),
+        auto_dark_theme: auto.dark(),
         // `None` is an absence, not a default: on macOS the frame is the
         // system's, and a row that does nothing is worse than no row.
         // `cfg!` rather than `#[cfg]` so both arms compile on the
@@ -1154,6 +1170,13 @@ pub const EVENT_DURATION_TOO_SHORT: &str =
 
 pub const INTERFACE_SCALE_OUT_OF_RANGE: &str =
     "the interface scale must be between 75 and 200 percent";
+
+/// Refusals for a theme offered to the wrong side of `Auto`. The form only
+/// offers each side its own themes, so these reach a person only through a
+/// stale form or a hand-made call; they say what to pick instead. Shown as
+/// [`SetError::Refused`], so no allowlist entry is needed.
+pub const NOT_A_LIGHT_THEME: &str = "light mode needs a light theme";
+pub const NOT_A_DARK_THEME: &str = "dark mode needs a dark theme";
 
 pub const TRANSPARENCY_OUT_OF_RANGE: &str =
     "background transparency must be between 0 and 50 percent; event transparency between 0 and 25 percent";
@@ -1290,6 +1313,17 @@ pub(crate) async fn retire_plain_themes(pool: &SqlitePool, omarchy: bool) {
             tracing::warn!(%e, "could not move a retired theme choice to its successor");
         }
     }
+}
+
+/// The two themes `Auto` chooses between, for [`appearance`]'s reason: every
+/// caller of `theme::resolve` needs them beside it. Each row is checked on
+/// its own (`AutoPair::from_stored`), so a theme renamed by a future version,
+/// or a light theme stored for dark mode by a hand edit, costs that one side.
+pub(crate) async fn auto_pair(pool: &SqlitePool) -> crate::theme::AutoPair {
+    crate::theme::AutoPair::from_stored(
+        read(pool, AUTO_LIGHT_THEME_KEY).await.as_deref(),
+        read(pool, AUTO_DARK_THEME_KEY).await.as_deref(),
+    )
 }
 
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s
@@ -1531,6 +1565,14 @@ pub enum Setting {
     /// Omarchy watcher emits, and moves GTK's dark hint with it: WebKitGTK
     /// draws `<select>` popups from the GTK theme, not the page.
     Appearance(crate::theme::Appearance),
+    /// The theme `Auto` wears in the system's light mode, and in its dark
+    /// mode. A plain Light or Dark is stored as its successor, and anything
+    /// else is refused unless it is a theme of that side, so the stored row
+    /// always means what the picker showed. Each write re-sends the palette
+    /// as `Appearance` does, which changes what is on screen only when it is
+    /// the side the app is wearing.
+    AutoLightTheme(crate::theme::Appearance),
+    AutoDarkTheme(crate::theme::Appearance),
     /// Applied live; the frame is the compositor's or GTK's to draw.
     WindowFrame(WindowFrame),
     /// Also stored in [`AppState::quit_on_close`], a mirror of the row:
@@ -1716,6 +1758,22 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         S::KeepRemindersOnScreen(on) => write(pool, KEEP_REMINDERS_KEY, flag(*on)).await?,
         S::TrayIcon(on) => write(pool, TRAY_ICON_KEY, flag(*on)).await?,
         S::Appearance(a) => write(pool, APPEARANCE_KEY, a.as_str()).await?,
+        // The pair is only worn off Omarchy, where a plain Light or Dark is
+        // its successor: stored as that, as `AutoPair::from_stored` reads it.
+        S::AutoLightTheme(a) => {
+            let a = a.on_this_desktop(false);
+            if !a.suits(false) {
+                return Err(refused(NOT_A_LIGHT_THEME));
+            }
+            write(pool, AUTO_LIGHT_THEME_KEY, a.as_str()).await?;
+        }
+        S::AutoDarkTheme(a) => {
+            let a = a.on_this_desktop(false);
+            if !a.suits(true) {
+                return Err(refused(NOT_A_DARK_THEME));
+            }
+            write(pool, AUTO_DARK_THEME_KEY, a.as_str()).await?;
+        }
         S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
         S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
         // The answer and the fact of having answered, in one write: whatever
@@ -1892,9 +1950,14 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
             crate::weather::refresh_soon(app.clone(), state.pool.clone(), state.demo, true);
         }
         S::TrayIcon(on) => crate::tray::set_visible(app, *on),
-        S::Appearance(appearance) => {
-            let palette =
-                crate::theme::resolve(crate::theme::omarchy_theme_dir().as_deref(), *appearance);
+        // Re-read rather than taken from the setting: the palette depends on
+        // all three rows, and the one just written is already among them.
+        S::Appearance(_) | S::AutoLightTheme(_) | S::AutoDarkTheme(_) => {
+            let palette = crate::theme::resolve(
+                crate::theme::omarchy_theme_dir().as_deref(),
+                appearance(&state.pool).await,
+                auto_pair(&state.pool).await,
+            );
             let dark = palette.is_dark;
             // GTK settings must not be touched from a command's thread.
             let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
@@ -1973,6 +2036,8 @@ mod tests {
             read(json!({"key": "menubarDateFormat", "value": {"format": "custom", "custom": "%-d"}})),
             Setting::MenubarDateFormat { .. }
         ));
+        assert!(matches!(read(json!({"key": "autoLightTheme", "value": "rose-pine-dawn"})), Setting::AutoLightTheme(crate::theme::Appearance::RosePineDawn)));
+        assert!(matches!(read(json!({"key": "autoDarkTheme", "value": "tokyo-night"})), Setting::AutoDarkTheme(crate::theme::Appearance::TokyoNight)));
         // A key this build does not know is an error, not a silent no-op.
         assert!(serde_json::from_value::<Setting>(json!({"key": "noSuchSetting", "value": 1})).is_err());
     }
@@ -2443,6 +2508,59 @@ mod tests {
             read(&p, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY).await.as_deref(),
             Some(ABSOLUTE_TRANSPARENCY_SEMANTICS),
         );
+    }
+
+    /// Each side of `Auto` stores its own theme, refuses one of the other
+    /// side (or `auto` itself) without touching what was stored, reads a
+    /// stale row back as that side's default rather than as the row, and
+    /// reads, and stores, the retired Light or Dark as its successor.
+    #[tokio::test]
+    async fn the_auto_pair_round_trips_and_refuses_the_wrong_side() {
+        use crate::theme::Appearance as A;
+        let p = pool().await;
+        let fresh = read_settings(&p).await;
+        assert_eq!((fresh.auto_light_theme, fresh.auto_dark_theme), (A::Daylight, A::DaylightDark));
+
+        let s = set(&p, Setting::AutoLightTheme(A::RosePineDawn)).await.unwrap();
+        assert_eq!((s.auto_light_theme, s.auto_dark_theme), (A::RosePineDawn, A::DaylightDark));
+        let s = set(&p, Setting::AutoDarkTheme(A::TokyoNight)).await.unwrap();
+        assert_eq!((s.auto_light_theme, s.auto_dark_theme), (A::RosePineDawn, A::TokyoNight));
+        // As `settings.ts` reads them.
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!((&wire["autoLightTheme"], &wire["autoDarkTheme"]), (&"rose-pine-dawn".into(), &"tokyo-night".into()));
+        assert_eq!(auto_pair(&p).await.for_scheme(crate::theme::SystemScheme::Dark), A::TokyoNight);
+
+        for (setting, refusal) in [
+            (Setting::AutoLightTheme(A::CatppuccinMocha), NOT_A_LIGHT_THEME),
+            (Setting::AutoLightTheme(A::Auto), NOT_A_LIGHT_THEME),
+            (Setting::AutoDarkTheme(A::Light), NOT_A_DARK_THEME),
+            (Setting::AutoDarkTheme(A::Auto), NOT_A_DARK_THEME),
+        ] {
+            assert_eq!(set(&p, setting).await.unwrap_err(), refusal);
+        }
+        let kept = read_settings(&p).await;
+        assert_eq!((kept.auto_light_theme, kept.auto_dark_theme), (A::RosePineDawn, A::TokyoNight));
+
+        // A row no form wrote: a renamed theme, and a dark one in the light slot.
+        write(&p, AUTO_LIGHT_THEME_KEY, "catppuccin-mocha").await.unwrap();
+        write(&p, AUTO_DARK_THEME_KEY, "solarized").await.unwrap();
+        let stale = read_settings(&p).await;
+        assert_eq!((stale.auto_light_theme, stale.auto_dark_theme), (A::Daylight, A::DaylightDark));
+        // And the appearance itself is untouched by either side.
+        assert_eq!(stale.appearance, A::Auto);
+
+        // The plain two, which each pass their side's check, are read as the
+        // themes that replaced them rather than worn as themselves.
+        write(&p, AUTO_LIGHT_THEME_KEY, "light").await.unwrap();
+        write(&p, AUTO_DARK_THEME_KEY, "dark").await.unwrap();
+        let retired = read_settings(&p).await;
+        assert_eq!((retired.auto_light_theme, retired.auto_dark_theme), (A::Daylight, A::DaylightDark));
+        // And sent as a setting, they are stored as those themes, so the row
+        // says what is worn.
+        set(&p, Setting::AutoLightTheme(A::Light)).await.unwrap();
+        set(&p, Setting::AutoDarkTheme(A::Dark)).await.unwrap();
+        assert_eq!(read(&p, AUTO_LIGHT_THEME_KEY).await.as_deref(), Some("daylight"));
+        assert_eq!(read(&p, AUTO_DARK_THEME_KEY).await.as_deref(), Some("daylight-dark"));
     }
 
     #[tokio::test]

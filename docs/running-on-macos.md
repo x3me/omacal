@@ -146,8 +146,12 @@ writes carries an `--autostart` flag: that flag is how a launch says where it
 came from.
 
 **Appearance** — how the calendar looks rather than what it does. **Theme**:
-follow the desktop (the Omarchy theme where there is one, dark elsewhere), or
-Light or Dark outright, replacing the whole palette without a restart.
+follow the desktop, or pick one of the built-in themes outright, replacing the
+whole palette without a restart. Following the desktop wears the Omarchy theme
+where there is one; on a Mac it wears a light theme in light mode and a dark
+one in dark mode, and switches when the system does. The two are Daylight and
+Daylight Dark until you pick others under **In light mode** and **In dark
+mode**, which appear while Follow the desktop is chosen.
 **Window frame**: on Linux only — a Hyprland desktop tiles the window and
 closes or moves it from the keyboard, so omacal draws no title bar there and
 one on any other desktop, where the frame is what you grab; pick Shown or
