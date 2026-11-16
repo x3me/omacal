@@ -91,6 +91,10 @@ const ev = (o: Partial<UiEvent> & { title: string; start_ms: number; end_ms: num
   // Nobody has declined: the quiet default again, and the one every fixture
   // that predates the mark describes.
   all_guests_declined: false,
+  // Busy and default visibility: what every event was before Show as and
+  // visibility were read, so every older fixture draws exactly as it did.
+  transparency: 'opaque',
+  visibility: 'default',
   ...o,
 });
 
@@ -513,6 +517,9 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   // passed by fixture if the default went the other way.
   is_organizer: true,
   guests_can_modify: false,
+  // Busy and default: what a server reports for an event that says nothing.
+  transparency: 'opaque',
+  visibility: 'default',
   // A Google event, which is what every fixture here was written against. A
   // CalDAV spec sets `mails_guests: false` on purpose.
   mails_guests: true,
@@ -2202,6 +2209,95 @@ export const IMPORT_PANEL_FIXTURES = {
   },
 };
 
+/**
+ * Show as and visibility, one of each on the same day so the looks sit side
+ * by side (2026-11-05, Fantastical's free outline and private lock): Tuesday
+ * holds a busy event, a free one, a private one and one that is both, an
+ * hour apart so none overlap and each takes the full width. Wednesday holds
+ * the collision cases: a tentative private event (the `?` and the lock share
+ * the corner), a 15-minute private one (the shortest block the lock has to
+ * fit in) and an unanswered free one (the dashed ring and the outline at
+ * once). The all-day band carries a free span, a private one and a busy one.
+ *
+ * Its own fixture rather than additions to `populatedWeek`, so no existing
+ * golden moves.
+ */
+export const showAsWeek = (): WeekPayload => {
+  const w = emptyWeek();
+  const tu = MON + 24 * H;
+  w.days[1] = day(1, [
+    ev({ id: 8101, title: 'Busy review', location: 'Meet', start_ms: tu + 9 * H, end_ms: tu + 10 * H }),
+    ev({ id: 8102, title: 'Focus - free', transparency: 'transparent',
+         start_ms: tu + 10.5 * H, end_ms: tu + 11.5 * H }),
+    ev({ id: 8103, title: 'Doctor - private', visibility: 'private', color: '#2dd4bf',
+         start_ms: tu + 12 * H, end_ms: tu + 13 * H }),
+    ev({ id: 8104, title: 'Walk - free private', transparency: 'transparent', visibility: 'confidential',
+         color: '#2dd4bf', start_ms: tu + 13.5 * H, end_ms: tu + 14.5 * H }),
+  ], [
+    placed(9 / 24, 1 / 24, 0, 1, 0), placed(10.5 / 24, 1 / 24, 0, 1, 1),
+    placed(12 / 24, 1 / 24, 0, 1, 2), placed(13.5 / 24, 1 / 24, 0, 1, 3),
+  ]);
+  const we = MON + 2 * 24 * H;
+  w.days[2] = day(2, [
+    ev({ id: 8201, title: 'Maybe private', visibility: 'private', response: 'tentative', color: '#f472b6',
+         start_ms: we + 9 * H, end_ms: we + 10 * H }),
+    ev({ id: 8202, title: 'Quick private', visibility: 'private',
+         start_ms: we + 11 * H, end_ms: we + 11 * H + 15 * 60_000 }),
+    ev({ id: 8203, title: 'Invite - free', transparency: 'transparent', response: 'needsAction', color: '#e2a03f',
+         start_ms: we + 13 * H, end_ms: we + 14 * H }),
+  ], [
+    placed(9 / 24, 1 / 24, 0, 1, 0), placed(11 / 24, 0.25 / 24, 0, 1, 1), placed(13 / 24, 1 / 24, 0, 1, 2),
+  ]);
+  w.all_day_events = [
+    ev({ id: 8301, title: 'Offsite - free', is_all_day: true, transparency: 'transparent', color: '#e2a03f',
+         start_ms: MON, end_ms: MON + 2 * 24 * H }),
+    ev({ id: 8302, title: 'Leave - private', is_all_day: true, visibility: 'private', color: '#2dd4bf',
+         start_ms: MON + 2 * 24 * H, end_ms: MON + 4 * 24 * H }),
+    ev({ id: 8303, title: 'Conference', is_all_day: true,
+         start_ms: MON + 4 * 24 * H, end_ms: MON + 5 * 24 * H }),
+  ];
+  w.all_day = [
+    { idx: 0, lane: 0, start_col: 0, end_col: 1, cont_left: false, cont_right: false },
+    { idx: 1, lane: 0, start_col: 2, end_col: 3, cont_left: false, cont_right: false },
+    { idx: 2, lane: 0, start_col: 4, end_col: 4, cont_left: false, cont_right: false },
+  ];
+  return w;
+};
+
+/** `showAsWeek`'s cases in Month: the three all-day kinds as bars in the
+ *  second row, and the four timed kinds in Monday 10 Aug's cell. */
+export const showAsMonth = (): MonthPayload => {
+  const m = emptyMonth(2026, 8, AUG_GRID_START, AUG_MONTH_START, SEP_MONTH_START);
+  const d = (n: number) => Date.UTC(2026, 7, n);
+  m.rows[1].bar_events = [
+    ev({ id: 8401, title: 'Offsite - free', is_all_day: true, transparency: 'transparent', color: '#e2a03f',
+         start_ms: d(3), end_ms: d(5) }),
+    ev({ id: 8402, title: 'Leave - private', is_all_day: true, visibility: 'private', color: '#2dd4bf',
+         start_ms: d(5), end_ms: d(7) }),
+    ev({ id: 8403, title: 'Conference', is_all_day: true, start_ms: d(7), end_ms: d(8) }),
+  ];
+  m.rows[1].bars = [
+    { idx: 0, lane: 0, start_col: 0, end_col: 1, cont_left: false, cont_right: false },
+    { idx: 1, lane: 0, start_col: 2, end_col: 3, cont_left: false, cont_right: false },
+    { idx: 2, lane: 0, start_col: 4, end_col: 4, cont_left: false, cont_right: false },
+  ];
+  const cell = m.rows[2].cells[0];
+  const at = (h: number) => cell.start_ms + h * H;
+  cell.timed = [
+    ev({ id: 8501, title: 'Busy review', start_ms: at(9), end_ms: at(10) }),
+    ev({ id: 8502, title: 'Focus - free', transparency: 'transparent', start_ms: at(10.5), end_ms: at(11.5) }),
+    ev({ id: 8503, title: 'Doctor - private', visibility: 'private', color: '#2dd4bf',
+         start_ms: at(12), end_ms: at(13) }),
+  ];
+  // The both-at-once row goes in the next cell: a cell draws three lines.
+  m.rows[2].cells[1].timed = [
+    ev({ id: 8504, title: 'Walk - free private', transparency: 'transparent', visibility: 'private',
+         color: '#2dd4bf', start_ms: m.rows[2].cells[1].start_ms + 13.5 * H,
+         end_ms: m.rows[2].cells[1].start_ms + 14.5 * H }),
+  ];
+  return m;
+};
+
 export const FIXTURES: Record<string, Record<string, any>> = {
   WeatherPopover: WEATHER_CARD_FIXTURES,
   ImportPanel: IMPORT_PANEL_FIXTURES,
@@ -2245,6 +2341,7 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // guarantees. A list fixture that no assembler could have produced would
     // prove the list renders something, not that it renders the payload.
     filmstrip: { week: filmstripWeek() },
+    'show-as': { week: showAsWeek() },
   },
   MonthGrid: {
     august: { month: augustMonth() },
@@ -2252,6 +2349,7 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     'two-bars': { month: twoBarsMonth() },
     // Same reasoning as `WeekGrid.filmstrip` above.
     filmstrip: { month: filmstripMonth() },
+    'show-as': { month: showAsMonth() },
   },
   // The list itself takes `days`, not a payload — the grouping is
   // `filmstrip.ts`'s and is tested against the payloads directly in
@@ -2262,6 +2360,7 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     week: { days: daysFromWeek(filmstripWeek()) },
     meta: { days: daysFromWeek(filmstripMeta()), weather: WEEK_WEATHER },
     month: { days: daysFromMonth(filmstripMonth()) },
+    'show-as': { days: daysFromWeek(showAsWeek()) },
     /** A period with nothing in it, which has to say so rather than render as
      *  blank (spec §3). `emptyWeek()` rather than a bare `[]`, so the empty
      *  case really is what the grouping returns for an empty payload. */
@@ -3336,6 +3435,30 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       })),
       calendars: FORM_CALENDARS,
     },
+    // `with-guests`' room, stored free and private: the form must open on
+    // those values rather than on the create defaults, and a save that never
+    // touches them must send neither (the event would otherwise go busy and
+    // default on every title change).
+    'free-private': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 40, title: 'Focus block', can_edit: true,
+        transparency: 'transparent', visibility: 'private',
+        organizer_email: 'me@x.com',
+        attendees: [
+          attendee({ email: 'me@x.com', is_self: true }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+        ],
+      })),
+      calendars: FORM_CALENDARS,
+    },
+    // A visibility the form can show but not choose. No guests, so a save
+    // goes straight out and the payload is all there is to read.
+    confidential: {
+      anchor: ANCHOR,
+      initial: editing(detail({ id: 41, title: 'Review', can_edit: true, visibility: 'confidential' })),
+      calendars: FORM_CALENDARS,
+    },
     // A description that is live markup if anything ever renders it, and that
     // must survive the round trip through the form byte for byte — sanitising
     // it on the way *in* would silently rewrite what its author typed and then
@@ -3355,6 +3478,22 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       initial: editing(detail({
         id: 13, title: 'Standup', is_recurring: true,
         recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly', can_edit: true,
+      })),
+      calendars: FORM_CALENDARS,
+    },
+    // `recurring-edit` with people on it, on Google: what the notify rule for
+    // a Show as change has to weigh against the scope. "This and following"
+    // splits the series, and the new tail goes out to every guest.
+    'recurring-with-guests': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 18, title: 'Standup', is_recurring: true,
+        recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly', can_edit: true,
+        organizer_email: 'me@x.com',
+        attendees: [
+          attendee({ email: 'me@x.com', is_self: true }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+        ],
       })),
       calendars: FORM_CALENDARS,
     },

@@ -5454,6 +5454,108 @@ test.describe('EventForm', () => {
     expect(saved.notify).toBe('all');
   });
 
+  // --- Show as and visibility ---------------------------------------------
+
+  test('Show as and Visibility open on the stored values', async ({ page }) => {
+    await open(page, 'free-private');
+    await expect(page.getByLabel('Show as', { exact: true })).toHaveValue('free');
+    await expect(page.getByLabel('Visibility', { exact: true })).toHaveValue('private');
+    // No Confidential option on an event that is not confidential: it cannot
+    // be chosen, so offering it disabled everywhere would be noise.
+    await expect(page.getByLabel('Visibility', { exact: true }).locator('option'))
+      .toHaveText(['Default', 'Public', 'Private']);
+  });
+
+  /**
+   * A change to Show as alone sends that one key, and goes straight out on an
+   * event with guests: whether the user's own time is blocked is not news to
+   * anyone invited, so there is no notify choice to make.
+   */
+  test('changing only Show as sends only transparency and asks nobody', async ({ page }) => {
+    await open(page, 'with-guests');
+    await expect(page.getByLabel('Show as', { exact: true })).toHaveValue('busy');
+    await page.getByLabel('Show as', { exact: true }).selectOption('free');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+    await expect(page.getByRole('dialog', { name: 'Save event' })).toHaveCount(0);
+    const [saved] = await saves(page);
+    expect(saved.notify).toBe('none');
+    expect(saved.fields.transparency).toBe('transparent');
+    expect('visibility' in saved.fields).toBe(false);
+    expect('guests' in saved.fields).toBe(false);
+  });
+
+  /**
+   * Except on "This and following". That save splits the series: the
+   * occurrences from here on become a new event, created with the guest list,
+   * and that is news to every guest whatever field prompted it. "This event"
+   * and "All events" edit what the guests already have, so they skip.
+   */
+  test('a Show as change on This and following still asks about guests', async ({ page }) => {
+    await open(page, 'recurring-with-guests');
+    await page.getByLabel('Show as', { exact: true }).selectOption('free');
+    await page.getByRole('radio', { name: 'This and following' }).check();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+    await expect(page.getByRole('dialog', { name: 'Save event' })).toBeVisible();
+    expect(await saves(page)).toEqual([]);
+    await page.getByRole('button', { name: 'Save and notify guests', exact: true }).click();
+    const [saved] = await saves(page);
+    expect(saved.scope).toBe('following');
+    expect(saved.notify).toBe('all');
+    expect(saved.fields.transparency).toBe('transparent');
+  });
+
+  for (const [radio, scope] of [['This event', 'this'], ['All events', 'all']] as const) {
+    test(`a Show as change on ${radio} goes straight out`, async ({ page }) => {
+      await open(page, 'recurring-with-guests');
+      await page.getByLabel('Show as', { exact: true }).selectOption('free');
+      await page.getByRole('radio', { name: radio }).check();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+      await expect(page.getByRole('dialog', { name: 'Save event' })).toHaveCount(0);
+      const [saved] = await saves(page);
+      expect(saved.scope).toBe(scope);
+      expect(saved.notify).toBe('none');
+    });
+  }
+
+  test('changing Visibility with something else still asks about guests', async ({ page }) => {
+    // The skip is for these two fields *alone*. A title change rides with it
+    // here, and that is news to the guests, so the choice comes back.
+    await open(page, 'with-guests');
+    await page.getByLabel('Visibility', { exact: true }).selectOption('private');
+    await page.getByLabel('Title', { exact: true }).fill('Board prep, moved');
+    await answerNotify(page, 'Save without notifying');
+
+    const [saved] = await saves(page);
+    expect(saved.fields.visibility).toBe('private');
+    expect('transparency' in saved.fields).toBe(false);
+  });
+
+  test('a save that leaves them alone sends neither, even when they are not the defaults', async ({ page }) => {
+    await open(page, 'free-private');
+    await answerNotify(page, 'Save without notifying');
+
+    const [saved] = await saves(page);
+    expect('transparency' in saved.fields).toBe(false);
+    expect('visibility' in saved.fields).toBe(false);
+  });
+
+  test('a confidential event shows it, cannot pick it, and keeps it on save', async ({ page }) => {
+    await open(page, 'confidential');
+    const select = page.getByLabel('Visibility', { exact: true });
+    await expect(select).toHaveValue('confidential');
+    await expect(select.locator('option[value="confidential"]')).toHaveJSProperty('disabled', true);
+
+    await page.getByLabel('Title', { exact: true }).fill('Review, renamed');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+    const [saved] = await saves(page);
+    expect(saved.fields.summary).toBe('Review, renamed');
+    expect('visibility' in saved.fields).toBe(false);
+  });
+
   test('Save on an event with guests saves nothing until the choice is made', async ({ page }) => {
     // The panel must *gate* the save rather than merely appear. Witnessed by
     // the absence of a save while it is open — a dialog that is visible and

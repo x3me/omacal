@@ -99,6 +99,11 @@ export type EventDetail = {
   /** Google's `guestsCanModify`: the organizer let guests change the event
    *  for everyone. Meaningful only when `is_organizer` is false. */
   guests_can_modify: boolean;
+  /** "Show as": `opaque` is busy, `transparent` is free. Google's own words,
+   * which the Rust side also maps CalDAV's `TRANSP` onto. */
+  transparency: 'opaque' | 'transparent';
+  /** `confidential` is read and kept but cannot be chosen in the form. */
+  visibility: 'default' | 'public' | 'private' | 'confidential';
   /** Whether this event's provider emails the people on it when asked to:
    *  Google does, CalDAV does not. `false` means no notify choice and no
    *  "told by email" line anywhere — see `MoveConfirm` and `DeleteConfirm`.
@@ -210,6 +215,13 @@ export type EventInput = {
    * because creating a Zoom meeting requires a separately-authorized Zoom
    * account, which omacal does not currently hold. */
   conference?: 'googleMeet' | 'none';
+  /** "Show as", or absent when the user did not touch it. Absent is what a
+   * drag, quick add or the CLI sends, and it is what keeps a free event free
+   * when it is moved. A create sends it only when it is not the default. */
+  transparency?: 'opaque' | 'transparent';
+  /** Visibility, or absent when untouched. There is no `confidential`: the
+   * form cannot set it, and an event that has it keeps it by sending nothing. */
+  visibility?: 'default' | 'public' | 'private';
 };
 
 /**

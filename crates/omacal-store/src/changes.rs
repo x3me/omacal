@@ -290,6 +290,7 @@ mod tests {
             // Somebody else's meeting — the shape the ledger reports on.
             organizer_email: Some("ana@x.com".into()),
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: vec![Attendee {
                 email: "me@x.com".into(),
                 display_name: None,

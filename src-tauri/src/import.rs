@@ -194,6 +194,11 @@ pub(crate) fn input_for(
         guests: None,
         reminders: reminders_for(ev),
         conference: None,
+        // Not carried, by decision for now: an imported event takes the
+        // server's defaults (busy, no class). Reading the file's `TRANSP` and
+        // `CLASS` here is a possible follow-up, not a missing line.
+        transparency: None,
+        visibility: None,
     })
 }
 

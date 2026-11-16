@@ -235,6 +235,9 @@ async fn the_whole_loop_against_a_real_server() {
         recurrence: vec!["RRULE:FREQ=DAILY;COUNT=10".into()],
         recurrence_id: None,
         alarms: Vec::new(),
+        // Untouched: this rename proves the attendee half, not these.
+        transp: None,
+        class: None,
         sequence: 1,
         // The rename owns the attendee list too (#114), so this one PUT proves
         // both halves against a real server: a mailbox and a `urn:uuid:`

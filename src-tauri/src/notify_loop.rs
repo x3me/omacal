@@ -485,6 +485,7 @@ mod tests {
             sequence: 0,
             organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders,
             calendar_default_reminders: Vec::new(),

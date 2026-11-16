@@ -211,6 +211,7 @@ mod tests {
             sequence: 0,
             organizer_email: Some("me@x.com".into()),
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees,
             reminders: Default::default(),
             calendar_default_reminders: Vec::new(),

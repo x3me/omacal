@@ -69,6 +69,15 @@ pub struct UiEvent {
     /// signed-in user's own row is excluded through `is_self`, so your own
     /// "no" — which already strikes the block through — never sets this.
     pub all_guests_declined: bool,
+    /// "Show as": `opaque` (busy) or `transparent` (free), the store's
+    /// vocabulary unchanged. The views draw a free event's colour bar as an
+    /// outline, the way Fantastical does, so that time you are still
+    /// available in reads differently from time you are not.
+    pub transparency: String,
+    /// `default` | `public` | `private` | `confidential`, as stored. Private
+    /// and confidential both put a lock on the block; the views never need
+    /// to tell those two apart, so the distinction is left to the dialog.
+    pub visibility: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +167,8 @@ pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
             let mut others = src.attendees.iter().filter(|a| !a.is_self).peekable();
             others.peek().is_some() && others.all(|a| a.response_status == "declined")
         },
+        transparency: src.transparency.clone(),
+        visibility: src.visibility.clone(),
     }
 }
 
@@ -961,6 +972,7 @@ mod tests {
             color_hex: None, calendar_timezone: "UTC".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
@@ -2665,7 +2677,7 @@ mod all_guests_declined_tests {
             status: "confirmed".into(), self_response: Some("accepted".into()),
             conference_uri: None, color_hex: None, calendar_timezone: "UTC".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
-            guests_can_modify: false, attendees: Vec::new(),
+            guests_can_modify: false, transparency: "opaque".into(), visibility: "default".into(), attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         };
         src.attendees = attendees;
