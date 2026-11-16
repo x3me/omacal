@@ -246,7 +246,7 @@ pub async fn sync_caldav_calendar(
 
     // An unchanged ctag means nothing was edited — but it says nothing about
     // what the window has newly reached, so the day-advance check gets a say
-    // before the short-circuit. See `crate::window_advanced_a_day`.
+    // before the short-circuit. See `crate::window_needs_refetch`.
     let ctag = client.ctag(collection_url).await?;
     // `supports_events` gates the check, because the window write below is
     // inside that branch: a tasks-only collection never records one, so an
@@ -255,7 +255,7 @@ pub async fn sync_caldav_calendar(
     if ctag.is_some()
         && ctag == stored_ctag
         && !(supports_events
-            && crate::window_advanced_a_day(pool, calendar_id, window_end_ms).await)
+            && crate::window_needs_refetch(pool, calendar_id, window_start_ms, window_end_ms).await)
     {
         return Ok(SyncOutcome::default());
     }
@@ -333,6 +333,10 @@ pub async fn sync_caldav_calendar(
         .await
         .map_err(anyhow::Error::from)?;
         outcome.deleted += deleted as usize;
+
+        let window_start_ms = omacal_store::history::retain_current_history(
+            &mut tx, calendar_id, window_start_ms, jiff::Timestamp::now().as_millisecond(),
+        ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(
             "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
@@ -1054,4 +1058,88 @@ mod tests {
             }
         }
     }
+
+    /// Pause after the REPORT reaches the server, then shorten history before
+    /// its old response is applied. No scheduling sleep decides the ordering.
+    #[tokio::test]
+    async fn a_caldav_fetch_cannot_undo_a_history_shrink() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let seen = entered.clone();
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>new</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.notify_one();
+                ResponseTemplate::new(207).set_body_string(
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/old.ics</d:href><d:propstat><d:prop><c:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:old\r\nDTSTART:20000101T090000Z\r\nDTEND:20000101T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>")
+            }).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        const DAY: i64 = 86_400_000;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let floor = now - 180 * DAY;
+        // Stop polling the sync after REPORT is observed, commit the shorter
+        // span, then resume it: apply necessarily sees the committed change.
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        let fetched = sync_caldav_calendar(&pool, &client, 1, &collection,
+            true, false, -2_208_988_800_000, now + 365 * DAY, now);
+        tokio::pin!(fetched);
+        tokio::select! {
+            _ = entered.notified() => {},
+            result = &mut fetched => panic!("sync finished before shrink: {result:?}"),
+        }
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months', '6')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (1, 'before', ?1, ?2)")
+            .bind(floor).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        let outcome = fetched.await.unwrap();
+        assert_eq!(outcome.upserted, 1, "the old event really reached apply");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id = 'old'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "the in-flight REPORT must not restore old rows");
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+
+    /// A ctag describes server edits, not how much history was requested.
+    /// Widening must REPORT even when that tag has not changed; the same
+    /// window and a shorter one need no additional download.
+    #[tokio::test]
+    async fn wider_caldav_history_refetches_an_unchanged_collection() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>same</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:"/>"#))
+            .expect(2).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        const DAY: i64 = 86_400_000;
+        let now = 1_786_341_600_000;
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (1, 'same', ?1, ?2)")
+            .bind(now - 180 * DAY).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        for (start, reports) in [(now - 180 * DAY, 0), (now - 730 * DAY, 1),
+                                 (-2_208_988_800_000, 2), (now - 180 * DAY, 2)] {
+            sync_caldav_calendar(&pool, &client, 1, &collection, true, false,
+                start, now + 365 * DAY, now).await.unwrap();
+            let count = server.received_requests().await.unwrap().iter()
+                .filter(|r| r.method.as_str() == "REPORT").count();
+            assert_eq!(count, reports, "start {start}");
+        }
+    }
+
 }

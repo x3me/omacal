@@ -7430,6 +7430,36 @@ test.describe("App: showing today's date", () => {
 
   /** #167: how far ahead the bar names the next meeting. A day unless
    *  chosen, saved with the other bar preferences. */
+  test('Keep history uses the offered spans and remembers Everything as zero', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    const picker = modal.getByRole('combobox', { name: 'Keep history' });
+    await expect(picker).toHaveText(/2 years/);
+    expect(await picker.locator('.name').evaluate(el => el.clientWidth >= el.scrollWidth),
+      'the chosen span must be readable, not squeezed to an arrow').toBe(true);
+    expect(await picker.evaluate(el => el.tagName)).not.toBe('SELECT');
+    for (const [label, value] of [['6 months', 6], ['5 years', 60], ['Everything', 0]] as const) {
+      await picker.click();
+      const list = page.getByRole('listbox', { name: 'Keep history' });
+      const fieldBox = (await picker.boundingBox())!;
+      const listBox = (await list.boundingBox())!;
+      expect(Math.abs(listBox.x - fieldBox.x), 'the popup stays beside its field inside Settings').toBeLessThan(3);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeGreaterThanOrEqual(0);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeLessThan(12);
+      await expect(list.getByRole('option')).toHaveText([/6 months/, /2 years/, /5 years/, /Everything/]);
+      await list.getByRole('option', { name: label, exact: true }).click();
+      await expect(picker).toHaveText(new RegExp(label));
+      const calls = await page.evaluate(() => window.__harness.settingValues('historySpan'));
+      expect(calls[calls.length - 1]).toBe(value);
+    }
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await expect(picker).toHaveText(/Everything/);
+  });
+
   test('the bar names the next meeting only as far ahead as chosen', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();

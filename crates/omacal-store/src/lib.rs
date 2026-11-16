@@ -9,6 +9,7 @@ pub mod changes;
 pub mod contacts;
 pub mod declines;
 pub mod events;
+pub mod history;
 pub mod invites;
 pub mod reminders;
 pub mod tasks;

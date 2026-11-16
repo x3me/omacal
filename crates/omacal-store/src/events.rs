@@ -671,6 +671,11 @@ pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec
     Ok(rows.iter().map(row_to_event).collect())
 }
 
+/// Masters are not date-bounded here. A series' own start says nothing about
+/// when it still occurs, and a long history keeps every series that ever
+/// did. `omacal_core::recur::expand` skips a rule that has already ended, so
+/// a view of today does not re-expand those; an open-ended series still
+/// expands, because it still occurs.
 pub async fn events_in_window(
     pool: &SqlitePool,
     from_ms: i64,
@@ -1952,4 +1957,30 @@ mod tests {
         assert_eq!(account_email, "a@x",
             "must be account a's own email, not account b's merely sharing an id with cal_on_a");
     }
+    /// Exercise the new migration on the actual preceding schema, including
+    /// main's 0019, rather than replaying SQL over a fully migrated database.
+    #[tokio::test]
+    async fn history_migration_0020_preserves_existing_choices() {
+        for (has_calendar, chosen, expected) in [
+            (true, None, Some("6")), (false, None, None),
+            (true, Some("60"), Some("60")), (false, Some("0"), Some("0")),
+        ] {
+            let pool = pool_migrated_below(20, 19).await;
+            if has_calendar { seed(&pool).await; }
+            if let Some(value) = chosen {
+                sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months', ?1)")
+                    .bind(value).execute(&pool).await.unwrap();
+            }
+            apply_migration(&pool, 20).await;
+            let value: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key = 'history_span_months'"
+            ).fetch_optional(&pool).await.unwrap();
+            assert_eq!(value.as_deref(), expected);
+        }
+        let fresh = crate::connect_memory().await.unwrap();
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&fresh).await.unwrap();
+        assert_eq!(versions, 20);
+    }
+
 }

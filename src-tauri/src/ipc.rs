@@ -477,6 +477,7 @@ mod tests {
             system_tz_change: Default::default(),
             quit_on_close: Default::default(),
             open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS),
         };
 
         // Dropped at the end of the test, socket and all.

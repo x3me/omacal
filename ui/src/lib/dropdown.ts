@@ -19,8 +19,13 @@ export function dropdown(popup: HTMLElement, field: HTMLElement | undefined) {
       { width: p.width, height: p.height },
       { width: window.innerWidth, height: window.innerHeight },
     );
-    popup.style.top = `${at.top}px`;
-    popup.style.left = `${at.left}px`;
+    // Settings is centred with a transform, which makes it the containing
+    // block even for a fixed popup. Convert viewport coordinates back to
+    // that block or the list opens a whole dialog-width away from its field.
+    const parent = popup.offsetParent;
+    const origin = parent?.getBoundingClientRect();
+    popup.style.top = `${at.top - (origin ? origin.top + parent!.clientTop : 0)}px`;
+    popup.style.left = `${at.left - (origin ? origin.left + parent!.clientLeft : 0)}px`;
     popup.style.visibility = 'visible';
   };
   // Hidden for the one frame before it is measured, so it never flashes at
