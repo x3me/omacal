@@ -7,6 +7,8 @@ export type Planned =
       summary: string;
       start_ms: number;
       all_day: boolean;
+      /** The repeat in the preview's words, end included ("weekly on Mon,
+       *  Wed, 10 times"), or `null` for a single event. */
       repeat: string | null;
       /** How many guests the file listed and the import will not carry. */
       dropped_guests: number;

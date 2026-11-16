@@ -592,7 +592,7 @@ pub enum RepeatEnd {
 impl WeekdayCode {
     const ALL: [Self; 7] = [Self::Su, Self::Mo, Self::Tu, Self::We, Self::Th, Self::Fr, Self::Sa];
 
-    fn text(self) -> &'static str {
+    pub(crate) fn text(self) -> &'static str {
         match self {
             Self::Su => "SU",
             Self::Mo => "MO",
@@ -608,7 +608,7 @@ impl WeekdayCode {
         Self::ALL.iter().position(|candidate| *candidate == self).unwrap_or(0)
     }
 
-    fn from_text(text: &str) -> Option<Self> {
+    pub(crate) fn from_text(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|day| day.text() == text)
     }
 }
@@ -798,7 +798,7 @@ fn basic_date(value: &str) -> Option<jiff::civil::Date> {
     format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8]).parse().ok()
 }
 
-fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
+pub(crate) fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
     let b = value.as_bytes();
     if b.len() != 16 || b[8] != b'T' || b[15] != b'Z'
         || !b[..8].iter().chain(&b[9..15]).all(|c| c.is_ascii_digit())
