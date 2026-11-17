@@ -384,6 +384,28 @@ pub(crate) fn class_of_stored(visibility: &str) -> Option<omacal_caldav::Class> 
     }
 }
 
+/// "Show as" and visibility for the tail of a "this and following" split.
+///
+/// The tail is a brand-new resource with no lines of its own to keep, so a
+/// field the form did not touch takes the value the dialog showed: the clicked
+/// occurrence's own. That is the series' for an ordinary occurrence, and the
+/// exception's for one that was moved and changed on its own, so a free
+/// occurrence of a busy series splits into a free series.
+fn tail_show_as(
+    fields: &EventFields,
+    occurrence: &StoredEvent,
+) -> (Option<omacal_caldav::Transp>, Option<omacal_caldav::Class>) {
+    let transp = fields
+        .transparency
+        .map(crate::write::Transparency::transp)
+        .or_else(|| transp_of_stored(&occurrence.transparency));
+    let class = fields
+        .visibility
+        .map(crate::write::Visibility::class)
+        .or_else(|| class_of_stored(&occurrence.visibility));
+    (transp, class)
+}
+
 /// The attendee list a write owns, out of the guest list the form sends.
 ///
 /// `None` all the way through: a path with no guest editor (a drag, the CLI's
@@ -462,6 +484,7 @@ pub(crate) async fn update(
                 .ok_or_else(|| anyhow::anyhow!("could not truncate the series"))?;
 
             let new_uid = uuid::Uuid::new_v4().to_string();
+            let (transp, class) = tail_show_as(&fields, &viewed);
             let ev = EventWrite {
                 uid: new_uid.clone(),
                 summary: fields.summary,
@@ -475,17 +498,8 @@ pub(crate) async fn update(
                 sequence: 0,
                 attendees: attendees_for(&fields.guests),
                 conference: None,
-                // A brand-new resource has no lines of its own to keep, so an
-                // untouched field falls back to the master's: the rest of a
-                // free series stays free after the split.
-                transp: fields
-                    .transparency
-                    .map(crate::write::Transparency::transp)
-                    .or_else(|| transp_of_stored(&master.transparency)),
-                class: fields
-                    .visibility
-                    .map(crate::write::Visibility::class)
-                    .or_else(|| class_of_stored(&master.visibility)),
+                transp,
+                class,
             };
             let ics = omacal_caldav::new_event_ics(&ev, now);
             let collection = href.rsplit_once('/').map(|(c, _)| c).unwrap_or("");
@@ -796,6 +810,26 @@ mod tests {
         assert!(out[1].optional);
     }
 
+    /// A form that touched nothing but "Show as" and visibility.
+    fn form_with(
+        transparency: Option<crate::write::Transparency>,
+        visibility: Option<crate::write::Visibility>,
+    ) -> EventFields {
+        EventFields {
+            summary: None,
+            location: None,
+            description: None,
+            when: When::Timed { start_ms: 0, end_ms: 0 },
+            tz: "Europe/Sofia".into(),
+            recurrence: None,
+            guests: None,
+            reminders: None,
+            conference: None,
+            transparency,
+            visibility,
+        }
+    }
+
     fn master(recurrence: Option<&str>) -> StoredEvent {
         StoredEvent {
             id: 1,
@@ -879,6 +913,31 @@ mod tests {
         assert_eq!(class_of_stored("private"), Some(omacal_caldav::Class::Private));
         assert_eq!(class_of_stored("confidential"), Some(omacal_caldav::Class::Confidential));
         assert_eq!(class_of_stored("default"), None);
+    }
+
+    /// The tail of a split takes "Show as" and visibility from the occurrence
+    /// the dialog was opened on, not from the series: a moved occurrence set
+    /// to Free and Private on a busy series splits into a free, private tail
+    /// when the user left both alone. A value the form did set still wins.
+    #[test]
+    fn a_split_tail_keeps_the_clicked_occurrences_show_as_and_visibility() {
+        let mut moved = master(None);
+        moved.transparency = "transparent".into();
+        moved.visibility = "private".into();
+        let untouched = form_with(None, None);
+        assert_eq!(
+            tail_show_as(&untouched, &moved),
+            (Some(omacal_caldav::Transp::Transparent), Some(omacal_caldav::Class::Private)),
+        );
+
+        let chosen = form_with(
+            Some(crate::write::Transparency::Opaque),
+            Some(crate::write::Visibility::Public),
+        );
+        assert_eq!(
+            tail_show_as(&chosen, &moved),
+            (Some(omacal_caldav::Transp::Opaque), Some(omacal_caldav::Class::Public)),
+        );
     }
 
     #[test]

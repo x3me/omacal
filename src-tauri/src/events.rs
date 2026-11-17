@@ -2396,24 +2396,32 @@ async fn split_series(
         body["attendees"] = serde_json::json!(attendees);
     }
 
-    // "Show as" and visibility: the form's choice when it made one, and the
-    // series' own otherwise. This body is an INSERT like `conferenceData`
-    // above, so an untouched field left out would quietly turn the rest of a
-    // free or private series busy and default. Copied from the wire master
-    // rather than `master_row`, so a value this app cannot set (confidential)
-    // travels as Google spelled it. Busy and default stay absent, the create
-    // path's rule.
+    // "Show as" and visibility: the form's choice when it made one, and
+    // otherwise what the dialog showed, which is the clicked occurrence's own.
+    // This body is an INSERT like `conferenceData` above, so an untouched
+    // field left out would quietly turn the rest of a free or private series
+    // busy and default. For an ordinary occurrence that is the series', copied
+    // from the wire master rather than `master_row`, so a value this app
+    // cannot set (confidential) travels as Google spelled it. For an exception
+    // (`original_start_utc` set) it is the exception's stored row: a moved
+    // occurrence set to Free on a busy series splits into a free series. Busy
+    // and default stay absent, the create path's rule.
+    let (own_transparency, own_visibility) = if ev.original_start_utc.is_some() {
+        (Some(ev.transparency.clone()), Some(ev.visibility.clone()))
+    } else {
+        (master.transparency.clone(), master.visibility.clone())
+    };
     let transparency = after
         .transparency
         .map(|t| t.as_str().to_string())
-        .or_else(|| master.transparency.clone());
+        .or(own_transparency);
     if let Some(t) = transparency.filter(|t| t != "opaque") {
         body["transparency"] = t.into();
     }
     let visibility = after
         .visibility
         .map(|v| v.as_str().to_string())
-        .or_else(|| master.visibility.clone());
+        .or(own_visibility);
     if let Some(v) = visibility.filter(|v| v != "default") {
         body["visibility"] = v.into();
     }
@@ -7967,6 +7975,61 @@ mod tests {
                 t => assert_eq!(body["transparency"], t),
             }
         }
+    }
+
+    /// Splitting from a moved occurrence that was set to Free and Private, on
+    /// a busy series: the dialog showed Free and Private, and the user left
+    /// both alone, so the tail is free and private too. Falling back to the
+    /// master instead turned the rest of the series busy and default.
+    #[tokio::test]
+    async fn a_split_from_a_moved_occurrence_carries_its_own_show_as_and_visibility() {
+        let mut ev = exception_row("master1_20260810T090000Z", OCCURRENCE, "confirmed");
+        ev.start_utc = OCCURRENCE + 5 * HOUR;
+        ev.end_utc = OCCURRENCE + 6 * HOUR;
+        ev.transparency = "transparent".into();
+        ev.visibility = "private".into();
+        let clicked = ev.start_utc;
+        let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let server = wiremock::MockServer::start().await;
+        mount_master(&server, &["RRULE:FREQ=WEEKLY"]).await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(clicked)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                UNTIL_BEFORE_OCCURRENCE,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            clicked,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Standup", clicked, clicked + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let sent = requests(&server).await;
+        let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+        let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        assert_eq!(body["transparency"], "transparent", "the occurrence's Free was dropped: {body}");
+        assert_eq!(body["visibility"], "private", "the occurrence's Private was dropped: {body}");
     }
 
     /// The truncation carries the ending and nothing else.
