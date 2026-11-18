@@ -328,6 +328,7 @@ pub(crate) async fn create(
         }
         .await,
     )
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// The resource name and the UID a create writes, given the UID the event
@@ -537,6 +538,7 @@ pub(crate) async fn update(
         }
         .await,
     )
+    .map_err(crate::events::mark_calendar_write_committed)
 }
 
 /// Google's response vocabulary rendered as `PARTSTAT` — two spellings of
