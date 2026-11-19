@@ -1047,6 +1047,47 @@ pub(crate) fn synced_window(now_ms: i64) -> (i64, i64) {
     (now_ms - 180 * DAY, now_ms + 365 * DAY)
 }
 
+/// Syncs the one calendar a write just changed, and nothing else.
+///
+/// What the UI's pending queue waits on after a write (`sync_now` with a
+/// calendar),
+/// in place of the full [`sync_all`] it used to wait on. That full sync
+/// failed whenever *any* target did, and a failed post-write sync leaves the
+/// written event dimmed and locked until a later sync succeeds, so one
+/// broken WebCal feed or one unreachable account froze every edit for the
+/// session. A write's own calendar is the only thing whose state it has to
+/// know, so it is the only one asked.
+///
+/// Takes the same turn as [`sync_all`]: a pass over this calendar must not
+/// overlap a full pass over it.
+pub(crate) async fn sync_one_calendar(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+    let _turn = sync_turn().lock().await;
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT a.provider, a.email, c.google_id FROM calendars c JOIN accounts a ON a.id = c.account_id
+         WHERE c.id = ?1 AND c.sync_enabled = 1",
+    )
+    .bind(calendar_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((provider, email, google_id)) = row else { return Ok(()) };
+    let (window_start, window_end) = synced_window(now_ms());
+    match provider.as_str() {
+        "google" => {
+            let cfg = load_config()?;
+            let token = access_token_for(state, &cfg, &email).await?;
+            let client = omacal_google::CalendarClient::new(GOOGLE_CALENDAR_API, &token);
+            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end)
+                .await?;
+        }
+        "caldav" => caldav_write::resync(state, calendar_id).await?,
+        // A WebCal feed or this device's own list: no write reaches a server.
+        _ => {}
+    }
+    Ok(())
+}
+
+
+
 /// The lock [`sync_all`] holds for its whole run. The background paths
 /// (`sync_loop`) check it first and skip rather than queue, because a sync
 /// already running answers what they would have asked.
@@ -1159,17 +1200,29 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
     sync_result(total, &failed)
 }
 
-/// Refreshes the access token and syncs every calendar of every account.
+/// Refreshes the access token and syncs every calendar of every account, or,
+/// given `calendar_id`, that calendar alone.
+///
+/// The second form is what the pending queue waits on after a write (see
+/// [`sync_one_calendar`] for why it must not be the full sync). It answers 0
+/// and records no sync time: one calendar brought up to date is not the
+/// "Synced 2 min ago" the header reports.
 #[tauri::command]
 async fn sync_now(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    calendar_id: Option<i64>,
 ) -> Result<u64, String> {
     // Checked here, at the command boundary, rather than inside `sync_all` —
     // Task 4's background sync loop is a second caller that needs its own
     // demo check, and burying this one inside `sync_all` would leave that
     // caller with no way to see it.
     demo_sync_guard(state.demo)?;
+    if let Some(calendar_id) = calendar_id {
+        sync_one_calendar(&state, calendar_id).await.map_err(|e| errors::user_facing(&e))?;
+        invites::after_sync(&app).await;
+        return Ok(0);
+    }
 
     let n = sync_all(&state).await.map_err(|e| errors::user_facing(&e))?;
     status::record_sync(&state.pool, now_ms()).await.map_err(|e| e.to_string())?;
@@ -1966,6 +2019,62 @@ mod tests {
         drop(running);
         let _ = second.await.unwrap();
         assert!(!server.received_requests().await.unwrap().is_empty(), "and ran once its turn came");
+    }
+
+    /// The sync after a write covers the calendar written, and only it: a
+    /// second account whose server is down fails a full sync (asserted, or
+    /// the fixture would prove nothing) but not this one. Before, the
+    /// post-write sync was the full one, so any failing account or feed left
+    /// every edit dimmed and locked until the app restarted.
+    #[tokio::test]
+    async fn the_sync_after_a_write_covers_the_calendar_written_and_only_it() {
+        use wiremock::{matchers::{header, method}, Mock, MockServer, ResponseTemplate};
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
+        let healthy = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cal/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&healthy).await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}></d:multistatus>"#)))
+            .mount(&healthy).await;
+        let down = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(500)).mount(&down).await;
+        crate::caldav_account::test_passwords::set("healthy@x.test", "p");
+        crate::caldav_account::test_passwords::set("down@x.test", "p");
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for (email, server) in [("healthy@x.test", &healthy), ("down@x.test", &down)] {
+            let account: i64 = sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+                 VALUES (?1, ?2, 0, 'caldav', ?3, ?2) RETURNING id",
+            )
+            .bind(format!("caldav:{email}")).bind(email).bind(server.uri())
+            .fetch_one(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (?1, ?2, 'Work', 'UTC', 'owner')",
+            )
+            .bind(account).bind(format!("{}/cal/", server.uri()))
+            .execute(&pool).await.unwrap();
+        }
+        let state = AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+        };
+        assert!(sync_all(&state).await.is_err(), "the fixture's premise: a full sync fails");
+        let written: i64 = sqlx::query_scalar("SELECT c.id FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE a.email = 'healthy@x.test'")
+            .fetch_one(&state.pool).await.unwrap();
+
+        sync_one_calendar(&state, written).await.unwrap();
+
+        let down_reached = down.received_requests().await.unwrap().len();
+        let _ = sync_one_calendar(&state, written).await;
+        assert_eq!(down.received_requests().await.unwrap().len(), down_reached, "the other account was not asked");
     }
 
     /// A CalDAV password the server rejects is marked under the CalDAV key,

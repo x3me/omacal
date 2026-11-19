@@ -1897,6 +1897,17 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseSync());
       });
 
+      /** The sync a write waits on is the written calendar's, not every
+       *  account's: a full sync fails when any account or feed does, and a
+       *  failed follow-up sync leaves the saved event dimmed and locked. The
+       *  backend half (only that calendar is asked) is `sync_one_calendar`'s
+       *  test; this is the wiring that asks for it. */
+      test("a write's follow-up sync names the written calendar", async ({ page }) => {
+        await writable(page);
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toEqual([{ calendarId: APP_PRIMARY_CALENDAR_ID }]);
+      });
+
       test('a background reload while the follow-up sync runs does not undo a move', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextSync());

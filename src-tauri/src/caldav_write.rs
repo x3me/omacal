@@ -223,7 +223,7 @@ fn friendly(e: CalDavError) -> anyhow::Error {
 
 /// Post-write reconciliation: one collection resynced through the read path,
 /// and the bar's feed refreshed.
-async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+pub(crate) async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
     let (client, collection_url) =
         crate::caldav_account::client_for_calendar(state, calendar_id).await?;
     let (supports_events, supports_tasks): (i64, i64) = sqlx::query_as(

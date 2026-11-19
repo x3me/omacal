@@ -2085,6 +2085,34 @@
     },
   };
 
+  /**
+   * `queuedRefresh` whose sync covers only the calendars a write touched.
+   *
+   * The full sync fails whenever any account or feed does, and a failed
+   * follow-up sync leaves the saved event dimmed and locked until a later
+   * one succeeds, so one broken WebCal feed froze every edit. The written
+   * calendar is the only one whose state the queue needs (backend:
+   * `sync_one_calendar`). A thunk, because a drop learns its calendar inside
+   * its own write. With none known it falls back to the full sync.
+   */
+  function refreshOf(written: () => (number | null | undefined)[]) {
+    return {
+      ...queuedRefresh,
+      sync: async () => {
+        const ids = [...new Set(written().filter((c): c is number => c != null))];
+        if (ids.length === 0) { await syncCalendar(true); }
+        else {
+          // After any sync already running, as `syncCalendar(true)` waits: it
+          // may have read the calendar before this write, so it is neither
+          // enough on its own nor something to overlap.
+          await syncInFlight?.catch(() => {});
+          for (const id of ids) await syncNow(id);
+        }
+        await refreshStatus();
+      },
+    };
+  }
+
   /** The banner's button for a refused create (part 3 spec §6): shown only
    *  while the banner still holds the message it was set with, so the next
    *  load (which clears the banner) or a later error takes it away. */
@@ -2130,7 +2158,7 @@
         await createEvent(result.calendarId, result.fields, result.notify);
         return true;
       }),
-      ...queuedRefresh,
+      ...refreshOf(() => [result.calendarId]),
       onfailure: (e) => {
         const message = `Could not create “${title}”: ${String(e)}`;
         error = message;
@@ -2187,7 +2215,8 @@
             request.id, result.scope, request.occurrenceStartMs, result.fields, result.notify,
             result.calendarId,
           ))),
-          ...queuedRefresh,
+          // Both ends of a move between calendars changed.
+          ...refreshOf(() => [result.calendarId, request.initial.calendarId]),
           onfailure: (e) => { error = `Could not save “${title}”: ${String(e)}`; },
         },
       );
@@ -2290,9 +2319,11 @@
     choice: { scope: Scope; sendUpdates: SendUpdates },
     hold: symbol,
   ) {
+    let written = event.calendar_id;
     void commitChange(hold, moveChange(event, span, choice.scope), {
       write: () => keptIfLanded(async () => {
         const detail = await getEventDetail(event.id);
+        written = detail.calendar_id;
         const value = valueFromDetail(detail, event.start_ms, event.end_ms);
         // The source instants are carried through untouched, and that is
         // deliberate rather than an oversight: `instantOf` passes one through
@@ -2319,7 +2350,7 @@
           choice.sendUpdates,
         ));
       }),
-      ...queuedRefresh,
+      ...refreshOf(() => [written]),
       // The drop is undone on screen the moment Google refuses it, and says
       // why: §6's "a drag that appears to have worked and silently did not is
       // worse than one that visibly refuses" still holds, it just holds now.
@@ -2351,7 +2382,7 @@
     const { detail, startMs } = target.occurrence;
     void queueChange({ kind: 'delete', id: detail.id, occurrenceStartMs: startMs, scope }, {
       write: () => keptIfLanded(() => deleteEvent(detail.id, scope, startMs)),
-      ...queuedRefresh,
+      ...refreshOf(() => [detail.calendar_id]),
       onfailure: (e) => { error = `Could not delete “${detail.title ?? 'this event'}”: ${String(e)}`; },
     });
   }
