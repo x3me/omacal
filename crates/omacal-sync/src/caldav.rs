@@ -299,6 +299,9 @@ pub async fn sync_caldav_calendar(
             tx.rollback().await.map_err(anyhow::Error::from)?;
             return Ok(SyncOutcome::default());
         }
+        // Read before this sync writes its own cursor below: a first sync
+        // is the baseline, not news (`forget_baseline_changes`).
+        let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
 
         for (row, src) in &rows {
             let id = omacal_store::upsert_event(&mut *tx, row).await?;
@@ -346,6 +349,9 @@ pub async fn sync_caldav_calendar(
         .execute(&mut *tx)
         .await
         .map_err(anyhow::Error::from)?;
+        if first_sync {
+            omacal_store::forget_baseline_changes(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
+        }
         tx.commit().await.map_err(anyhow::Error::from)?;
     }
 
@@ -716,6 +722,64 @@ mod tests {
     /// #145: what a task list's server sends and OmaCal cannot store is
     /// counted, not dropped without a word. One good VTODO, one resource that
     /// is not iCalendar, one VTODO with no UID: one stored, two skipped.
+    /// A collection's first sync is the baseline, as a Google calendar's
+    /// is: the moved occurrences it brings in were never news to the user.
+    /// A move after it is.
+    #[tokio::test]
+    async fn a_collections_first_sync_is_a_baseline_and_later_moves_are_news() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        fn ics(moved_to: &str) -> String {
+            format!(
+                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
+                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\n\
+                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:20260810T060000Z&#13;\nDTSTART:{moved_to}&#13;\n\
+                 DTEND:20260811T090000Z&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\nEND:VCALENDAR&#13;\n")
+        }
+        fn multistatus(body: String) -> String {
+            format!(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">{body}</d:multistatus>"#)
+        }
+        async fn serve(server: &MockServer, ctag: &str, moved_to: &str) {
+            server.reset().await;
+            Mock::given(method("PROPFIND"))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
+                    "<d:response><d:href>/cal/</d:href><d:propstat><d:prop><cs:getctag>{ctag}</cs:getctag></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"))))
+                .mount(server).await;
+            Mock::given(method("REPORT"))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
+                    "<d:response><d:href>/cal/s1.ics</d:href><d:propstat><d:prop><d:getetag>\"{ctag}\"</d:getetag>\
+                     <c:calendar-data>{}</c:calendar-data></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(moved_to)))))
+                .mount(server).await;
+        }
+        let server = MockServer::start().await;
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider) VALUES ('caldav:e@x','e@x',0,'caldav')")
+            .execute(&pool).await.unwrap();
+        let url = format!("{}/cal/", server.uri());
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, ?1, 'Work', 'UTC', 'owner')")
+            .bind(&url).execute(&pool).await.unwrap();
+        let client = omacal_caldav::CalDavClient::new(&server.uri(), "e@x", "p").unwrap();
+        let ledger = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM event_changes").fetch_one(&pool).await.unwrap()
+        };
+        let far = 4_102_444_800_000; // 2100
+
+        serve(&server, "c1", "20260811T080000Z").await;
+        sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
+        let exceptions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE recurring_event_id IS NOT NULL")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(exceptions, 1, "the fixture's premise: the moved occurrence was stored");
+        assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
+
+        serve(&server, "c2", "20260811T083000Z").await;
+        sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
+        assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
+    }
+
     #[tokio::test]
     async fn a_task_resource_that_cannot_be_read_is_counted_not_silently_dropped() {
         use wiremock::matchers::method;
