@@ -3331,6 +3331,25 @@ test.describe('App', () => {
     await expect(page.locator('.vswitch button.active')).toHaveText('Month');
   });
 
+  /** A launch fetches the view it will show, once. The app used to start on
+   *  Week, fetch that week, and then switch to the stored default when the
+   *  settings arrived: a flash of the wrong view, and a fetch thrown away.
+   *  The first fetch now waits for the settings. */
+  test('a launch on a stored Month view fetches no week first', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.locator('#default-view').selectOption('month');
+    await page.keyboard.press('Escape');
+
+    await page.reload();
+    await expect(page.locator('.vswitch button.active')).toHaveText('Month');
+    await expect.poll(() => callsTo(page, 'get_month').then((c) => c.length)).toBeGreaterThan(0);
+    expect(await callsTo(page, 'get_week'), 'no week fetched on the way to Month').toHaveLength(0);
+  });
+
   /**
    * `tray::open_plain`'s reason: closing the window only hides it, and
    * hiding never remounts `App`, so nothing re-read `defaultView` on the way

@@ -880,6 +880,16 @@
    *  not be undone once that slow read lands — bumped by `pick`, the one
    *  chokepoint every way of changing `view` already goes through. */
   let viewChoices = 0;
+  /** Whether the stored settings have been read once (or failed to be), so
+   *  the view they name is known. The first fetch waits for it: the app
+   *  started on Week, fetched that week, and then switched to the stored
+   *  default when the settings arrived, a flash of the wrong view and a
+   *  fetch thrown away. */
+  let settingsSeeded = $state(false);
+  // Not a wait without end: a view or list chosen before the settings land
+  // is the user's own answer to "what to show" (see `viewChoices`), and a
+  // read that never lands must not leave the grid empty.
+  setTimeout(() => { settingsSeeded = true; }, 1500);
 
   /** The stored default for new events, or `null` for the old rule. Seeded
    *  below and kept fresh by `SettingsModal`'s `onsettingschange` — without
@@ -962,7 +972,8 @@
         if (listModeChoices !== before) return; // superseded by the user's own choice
         listMode = s.listMode;
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { settingsSeeded = true; });
   });
 
   async function toggleList() {
@@ -971,6 +982,7 @@
     // way to see or undo it.
     if (!listable(view)) return;
     listModeChoices += 1;
+    settingsSeeded = true;
     listMode = !listMode;
     try {
       await setSetting('listMode', listMode);
@@ -1218,6 +1230,7 @@
     // Reading it here, synchronously, is what makes this effect depend on
     // `fetchPlan` — and, transitively, on `view` and `anchorMs`.
     const plan = fetchPlan;
+    if (!settingsSeeded) return;
     // A new view or a new date is a new attempt: a stale failure must not
     // outlive the switch.
     error = null;
@@ -1398,6 +1411,7 @@
     // `listModeChoices`'s reason: a settings read still in flight when this
     // runs must not later overwrite whatever the switcher just chose.
     viewChoices += 1;
+    settingsSeeded = true;
     // Spec §5 and the DoD: the anchor survives every switch, and Year is a
     // switch like any other. `yearNum` starts on the real current year, so
     // without this an anchor on 28 Dec 2022 opened Year on the current year
