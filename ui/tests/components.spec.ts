@@ -5458,6 +5458,26 @@ test.describe('EventForm', () => {
     expect(saved.fields.guests).toHaveLength(6);
   });
 
+  /** An address typed and left in the field is a guest, not a draft to
+   *  throw away: Save adds it, as Return or Add would, before saving. It
+   *  used to be dropped without a word, and the meeting saved without the
+   *  person the user had just typed. An address that is not one stops the
+   *  save, with the field marked. */
+  test('an address left in the field when Save is clicked is added, not dropped', async ({ page }) => {
+    await open(page, 'with-guests');
+    await page.getByLabel('Add guest', { exact: true }).fill('dan@x.com');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await answerNotify(page, 'Save without notifying');
+    const [saved] = await saves(page);
+    expect(saved.fields.guests.map((g: any) => g.email)).toContain('dan@x.com');
+
+    await open(page, 'with-guests');
+    await page.getByLabel('Add guest', { exact: true }).fill('not an address');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByText('not an address is not an email address.')).toBeVisible();
+    expect(await saves(page)).toHaveLength(0);
+  });
+
   test('Return in the address field adds a guest rather than saving', async ({ page }) => {
     // The field lives inside the `<form>`, so an unhandled Return submits it —
     // saving an event with a half-typed guest list and, on an event with

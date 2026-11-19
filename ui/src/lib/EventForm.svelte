@@ -511,6 +511,13 @@
   function save() {
     error = null;
     invalidField = null;
+    // An address typed and not yet added is a guest the user meant: add it
+    // the way Return and Add do, and stop on one that is not an address.
+    // It used to be dropped, and the meeting saved without that person.
+    if (draft.trim() !== '') {
+      addTyped();
+      if (invalidField === 'guest') return;
+    }
     if (value.calendarId === null) {
       error = 'There is no calendar here you can write to.';
       return;
