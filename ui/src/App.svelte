@@ -36,7 +36,7 @@
   import { calendarColor, getCalendars, offerableCalendarId, setCalendarSelected, type Calendar } from './lib/calendars';
   import { applyCalendarGroup, groupIndexForCode, saveCalendarGroups, type CalendarGroup } from './lib/calendargroups';
   import {
-    createEvent, deleteEvent, getEventDetail, updateEvent,
+    createEvent, deleteEvent, getEventDetail, refreshEvent, updateEvent,
     type EventDetail, type Occurrence, type SendUpdates,
   } from './lib/eventdetail';
   import {
@@ -773,6 +773,9 @@
       event.start_ms,
       event.end_ms,
       r ? { top: r.top, left: r.left, width: r.width, height: r.height } : keyboardAnchor(),
+      // A combined event's copies, as a click passes them: without them the
+      // card has no copy chooser.
+      event.copies ?? [],
     );
   }
 
@@ -1742,6 +1745,11 @@
         return;
       }
       gridDetail = d;
+      // Then the fresh copy, as a click on the grid asks for one: an answer
+      // or a move made elsewhere since the last sync. The keyboard's and
+      // search's opens used to keep the store's copy. A failure leaves the
+      // card as drawn, which is still true.
+      void refreshEvent(id).then((fresh) => { if (mine() && gridDetail?.id === id) gridDetail = fresh; }).catch(() => {});
     } catch (e) {
       // Same rule as `WeekGrid.openPopover`: close, but never in silence.
       // A click that opens nothing and says nothing reads as a dead

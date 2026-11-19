@@ -6084,6 +6084,19 @@ test.describe('App: keyboard event navigation', () => {
     expect(await deleteCalls(page)).toEqual([]);
   });
 
+  /** An event opened from the keyboard gets the fresh copy a click gets:
+   *  the popover is drawn from the store at once and then refreshed, so an
+   *  answer or a move made elsewhere since the last sync shows. Opened from
+   *  the keyboard (or search), it used to stay as the store had it. */
+  test('an event opened from the keyboard is refreshed like a clicked one', async ({ page }) => {
+    await page.keyboard.press('j');
+    await page.keyboard.press('j');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Review notes' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      window.__harness.calls.filter((c) => c.cmd === 'refresh_event').length)).toBe(1);
+  });
+
   test('Backspace on an open event asks before deleting', async ({ page }) => {
     await page.keyboard.press('j');
     await page.keyboard.press('j');
