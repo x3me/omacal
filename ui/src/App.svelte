@@ -225,6 +225,19 @@
   }
   let signingIn = $state(false);
   let error = $state<string | null>(null);
+  /** A write the server refused, or took but could not be recorded: news
+   *  about something the user did. Apart from `error` because a load clears
+   *  `error` (a stale "could not load" has no business outliving the next
+   *  load), and that clearing is what used to erase the only record that a
+   *  change was lost, on the first week step after it. This stays until the
+   *  user dismisses it or makes another write. */
+  let writeError = $state<string | null>(null);
+  /** A `writeError` that is not a loss: the server took the write and only
+   *  the local half failed (`keptIfLanded`). The follow-up sync brings the
+   *  change in, and the reload after it is the report, so it clears this
+   *  one; a standing "do not create it again" beside the visible event would
+   *  only confuse. */
+  let healing: string | null = null;
   // Opened right after every sign-in (Task 7) — see `handleSignIn` — so a
   // freshly imported set of calendars, all switched on by default, is never
   // left silently syncing without the user having seen the list.
@@ -2079,9 +2092,14 @@
    */
   const queuedRefresh = {
     sync: async () => { await syncCalendar(true); await refreshStatus(); },
-    reload: async () => { await reload(); await refreshInvites(); },
+    reload: async () => {
+      await reload();
+      await refreshInvites();
+      if (healing !== null && writeError === healing) writeError = null;
+      healing = null;
+    },
     onsyncfailure: (e: unknown) => {
-      error = `The change was made, but OmaCal could not refresh from Google: ${e}`;
+      writeError = `The change was made, but OmaCal could not refresh from Google: ${e}`;
     },
   };
 
@@ -2131,7 +2149,8 @@
       return await write();
     } catch (e) {
       if (!landedButNotStored(e)) throw e;
-      error = String(e);
+      writeError = String(e);
+      healing = writeError;
       return false;
     }
   }
@@ -2151,7 +2170,7 @@
    * sentence, and the follow-up sync fetches it like any other.
    */
   function queueCreate(result: EventFormResult) {
-    error = null;
+    error = null; writeError = null;
     const title = result.fields.summary ?? '(no title)';
     void queueChange(createChange(result, calendars, ymdMs, unsavedId()), {
       write: () => keptIfLanded(async () => {
@@ -2161,11 +2180,11 @@
       ...refreshOf(() => [result.calendarId]),
       onfailure: (e) => {
         const message = `Could not create “${title}”: ${String(e)}`;
-        error = message;
+        writeError = message;
         retry = {
           forError: message, label: 'Reopen',
           run: () => {
-            error = null;
+            writeError = null;
             retry = null;
             form = { mode: 'create', anchor: keyboardAnchor(), initial: result.value };
           },
@@ -2181,7 +2200,7 @@
     if (request.mode === 'edit') {
       // Drawn as saved at once (part 2 spec, 2026-10-09); the write runs in
       // the queue behind it, and a refusal puts the meeting back.
-      error = null;
+      error = null; writeError = null;
       const title = result.fields.summary ?? '(no title)';
       void queueChange(
         editChange({
@@ -2217,7 +2236,19 @@
           ))),
           // Both ends of a move between calendars changed.
           ...refreshOf(() => [result.calendarId, request.initial.calendarId]),
-          onfailure: (e) => { error = `Could not save “${title}”: ${String(e)}`; },
+          // Reopen, as a refused create offers: the typing was as much.
+          onfailure: (e) => {
+            const message = `Could not save “${title}”: ${String(e)}`;
+            writeError = message;
+            retry = {
+              forError: message, label: 'Reopen',
+              run: () => {
+                writeError = null;
+                retry = null;
+                form = { ...request, anchor: keyboardAnchor(), initial: result.value };
+              },
+            };
+          },
         },
       );
       return;
@@ -2354,7 +2385,7 @@
       // The drop is undone on screen the moment Google refuses it, and says
       // why: §6's "a drag that appears to have worked and silently did not is
       // worse than one that visibly refuses" still holds, it just holds now.
-      onfailure: (e) => { error = `Could not move “${event.title}”: ${String(e)}`; },
+      onfailure: (e) => { writeError = `Could not move “${event.title}”: ${String(e)}`; },
     });
   }
 
@@ -2378,12 +2409,12 @@
     const target = pendingDelete;
     if (!target) return;
     pendingDelete = null;
-    error = null;
+    error = null; writeError = null;
     const { detail, startMs } = target.occurrence;
     void queueChange({ kind: 'delete', id: detail.id, occurrenceStartMs: startMs, scope }, {
       write: () => keptIfLanded(() => deleteEvent(detail.id, scope, startMs)),
       ...refreshOf(() => [detail.calendar_id]),
-      onfailure: (e) => { error = `Could not delete “${detail.title ?? 'this event'}”: ${String(e)}`; },
+      onfailure: (e) => { writeError = `Could not delete “${detail.title ?? 'this event'}”: ${String(e)}`; },
     });
   }
 
@@ -2585,8 +2616,9 @@
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
-    {busy} {error} {calendars} {view} {listMode}
-    errorAction={retry && retry.forError === error ? retry : null}
+    {busy} error={writeError ?? error} {calendars} {view} {listMode}
+    errorAction={retry && retry.forError === (writeError ?? error) ? retry : null}
+    onDismissError={() => { writeError = null; error = null; retry = null; }}
     onToggleList={toggleList}
     groups={calendarGroups}
     onapplygroup={applyGroup}

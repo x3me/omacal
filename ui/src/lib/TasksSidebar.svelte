@@ -379,7 +379,24 @@
     }
   }
 
+  /** The task whose × was pressed once and now asks "Delete?". A delete goes
+   *  to the server at once and has no undo, so one stray click on a 14px
+   *  target must not be enough. */
+  let askingDelete = $state<number | null>(null);
+
+  /** The first press: the × becomes "Delete?", focused, so Enter or a
+   *  second click confirms, and Escape or the pointer leaving it does not.
+   *  Not on blur: WebKit blurs a focused button on the mousedown of a click
+   *  on that same button, which cancelled the confirmation under the click
+   *  meant to give it. */
+  function askToDelete(task: Task, button: HTMLElement) {
+    const row = button.parentElement;
+    askingDelete = task.id;
+    void tick().then(() => row?.querySelector<HTMLButtonElement>('.del.confirm')?.focus());
+  }
+
   async function remove(task: Task) {
+    askingDelete = null;
     note = null;
     try {
       if (editingId === task.id) editingId = null;
@@ -806,7 +823,15 @@
                 </span>
               {/if}
               {#if t.canWrite}
-                <button class="del" aria-label="Delete {t.summary}" onclick={() => remove(t)}>×</button>
+                {#if askingDelete === t.id}
+                  <button class="del confirm" aria-label="Confirm delete {t.summary}"
+                          onclick={() => remove(t)}
+                          onpointerleave={() => { if (askingDelete === t.id) askingDelete = null; }}
+                          onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); askingDelete = null; } }}>Delete?</button>
+                {:else}
+                  <button class="del" aria-label="Delete {t.summary}"
+                          onclick={(e) => askToDelete(t, e.currentTarget)}>×</button>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -1068,6 +1093,7 @@
          padding: 0 2px; visibility: hidden; }
   .row:hover .del { visibility: visible; }
   .del:hover { color: var(--text); }
+  .del.confirm { visibility: visible; color: var(--danger, #d14343); font-size: 12px; }
   .row.done .title { color: var(--muted); text-decoration: line-through; }
 
   .editor { background: var(--surface); border-radius: 8px; padding: 9px;

@@ -19,7 +19,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, syncing = false, error, errorAction = null, calendars, view, onpick,
+    busy, syncing = false, error, errorAction = null, onDismissError, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     groups = [], onapplygroup = () => {}, onsavegroups = async () => {},
@@ -56,6 +56,9 @@
     /** A button beside the error, for a failure with a next step (a refused
      *  create's Reopen, part 3 spec §6). */
     errorAction?: { label: string; run: () => void } | null;
+    /** Clears the error banner. A write's failure stays until this runs:
+     *  nothing else on screen answers it. */
+    onDismissError?: () => void;
     calendars: Calendar[];
     /** The view the switcher shows as current — `App`'s own `view` state,
      *  passed straight through. */
@@ -518,9 +521,10 @@
   </p>
 {/if}
 {#if error}
-  <p class="err" class:with-action={!!errorAction}>
+  <p class="err" class:with-action={!!errorAction || !!onDismissError}>
     <span>{error}</span>
     {#if errorAction}<button type="button" onclick={errorAction.run}>{errorAction.label}</button>{/if}
+    {#if onDismissError}<button type="button" class="dismiss" aria-label="Dismiss" onclick={onDismissError}>×</button>{/if}
   </p>
 {/if}
 
@@ -738,6 +742,8 @@
             gap: 12px; flex-wrap: wrap; }
   .reauth button, .with-action button { border: none; border-radius: 6px; padding: 5px 12px;
                    font-size: 12.5px; cursor: pointer; }
+  /* The dismiss ×: quieter than the banner's one action. */
+  .with-action button.dismiss { background: transparent; color: inherit; padding: 2px 8px; font-size: 15px; }
   /* The .err shape in the accent's clothes: same box, calmer colours,
      because this banner reports an option rather than a problem. */
   .notice { color: var(--text); font-size: 12.5px; line-height: 1.45;
