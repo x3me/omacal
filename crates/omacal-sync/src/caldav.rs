@@ -479,6 +479,7 @@ fn log_kind(e: &CalDavError) -> String {
     match e {
         CalDavError::Http(status) => status.as_u16().to_string(),
         CalDavError::Unauthorized => "unauthorized".into(),
+        CalDavError::Forbidden => "forbidden".into(),
         CalDavError::PreconditionFailed => "precondition failed".into(),
         CalDavError::Other(_) => "request failed".into(),
     }
@@ -522,6 +523,10 @@ pub async fn refresh_collections(
     let listed = match client.discover().await {
         Ok(l) => l,
         Err(e) if e.needs_reauth() => return Err(e),
+        // The account's own principal or calendar home refused: that is the
+        // account refused, which only a reconnect can change. Per collection
+        // a 403 is no such thing (`sync_account` skips that one collection).
+        Err(CalDavError::Forbidden) => return Err(CalDavError::Unauthorized),
         Err(e) => {
             tracing::warn!(account_id, error = %log_kind(&e), "collection discovery failed; calendar list unchanged");
             return Ok(CollectionsRefresh::default());
@@ -970,13 +975,19 @@ mod tests {
                 assert_eq!(ids(&pool).await, vec![work, deleted]);
             }
 
-            let server = server(ResponseTemplate::new(401)).await;
-            let (pool, _) = connected(&server).await;
-            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
-            assert!(matches!(
-                refresh_collections(&pool, 1, &client, "UTC").await,
-                Err(CalDavError::Unauthorized)
-            ));
+            // A refusal of the account's own calendar home is a refusal of the
+            // account, not of one collection: it asks for a reconnect, as a
+            // wrong password does. Anything quieter and every collection
+            // would go stale with nothing on screen to say why.
+            for refused in [401, 403] {
+                let server = server(ResponseTemplate::new(refused)).await;
+                let (pool, _) = connected(&server).await;
+                let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+                assert!(
+                    matches!(refresh_collections(&pool, 1, &client, "UTC").await, Err(CalDavError::Unauthorized)),
+                    "{refused}"
+                );
+            }
         }
     }
 }

@@ -159,7 +159,10 @@ fn fallback_tz() -> String {
 /// Maps a CalDAV error to something the connect form can show.
 fn user_facing_caldav(e: CalDavError) -> String {
     match e {
-        CalDavError::Unauthorized => {
+        // At connect, discovery is the credential check, and a server that
+        // refuses the account's own principal has refused the account: the
+        // same advice as a wrong password.
+        CalDavError::Unauthorized | CalDavError::Forbidden => {
             "The server rejected the credentials. For iCloud, use an app-specific password from appleid.apple.com, not your Apple ID password.".to_string()
         }
         CalDavError::PreconditionFailed => e.to_string(),
@@ -211,7 +214,8 @@ pub(crate) async fn client_for_calendar(
 
 /// Syncs every enabled calendar of one CalDAV account. Returns rows written;
 /// an `Unauthorized` anywhere marks the whole account dead (one password
-/// covers every collection).
+/// covers every collection). A collection that answers 403 is skipped, not
+/// failed: it is one refusal, not a dead password.
 ///
 /// The calendar list is refreshed first, so a collection made on another
 /// device is synced in the same pass that finds it — see
@@ -239,7 +243,7 @@ pub(crate) async fn sync_account(
 
     let mut total = 0u64;
     for (cal_id, url, ev, tasks) in cals {
-        let outcome = omacal_sync::caldav::sync_caldav_calendar(
+        let outcome = match omacal_sync::caldav::sync_caldav_calendar(
             pool,
             client,
             cal_id,
@@ -250,7 +254,19 @@ pub(crate) async fn sync_account(
             window_end_ms,
             crate::now_ms(),
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            // One collection refusing (shared without read access, a REPORT
+            // it will not run) keeps what it has and lets the rest sync. The
+            // account's own refusal arrives from discovery above, as
+            // `Unauthorized`.
+            Err(CalDavError::Forbidden) => {
+                tracing::warn!(calendar_id = cal_id, "the server refused this collection; skipped this sync");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         total += outcome.upserted as u64;
     }
     Ok(total)
@@ -414,5 +430,75 @@ END:VCALENDAR&#13;
         let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(tasks, vec!["Take the bins out".to_string()], "fetched in the same pass");
+    }
+
+    /// One collection that refuses (a calendar shared without read access)
+    /// does not stop the rest of the account syncing, and is not a dead
+    /// password. The refusing one comes first, so a sync that gave up there
+    /// would never reach the other.
+    #[tokio::test]
+    async fn a_collection_that_refuses_leaves_the_others_syncing() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/</d:href><d:propstat><d:prop>
+                <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/principals/p/</d:href><d:propstat><d:prop>
+                <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        let list = |name: &str| format!(
+            r#"<d:response><d:href>/cals/p/{name}/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+            <d:displayname>{name}</d:displayname>
+            <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+            </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#);
+        Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}>{}{}</d:multistatus>"#, list("refusing"), list("open"))))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/refusing/"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/open/")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/open/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("REPORT")).and(path("/cals/p/open/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/open/t.ics</d:href>
+                <d:propstat><d:prop><d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:t-1&#13;
+SUMMARY:Water the plants&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+        let out = sync_account(&pool, 1, &client, 0, 1).await;
+
+        assert!(out.is_ok(), "one refusing collection is not the account's failure: {out:?}");
+        let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(tasks, vec!["Water the plants".to_string()], "the open list still synced");
     }
 }

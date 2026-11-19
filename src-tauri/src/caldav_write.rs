@@ -212,6 +212,11 @@ pub(crate) const EVENT_NOT_SYNCED_YET: &str =
 fn friendly(e: CalDavError) -> anyhow::Error {
     match e {
         CalDavError::PreconditionFailed => anyhow::anyhow!(EVENT_CHANGED_ON_SERVER),
+        // In the allowlisted words any other status gets: the user learns the
+        // server said no, rather than reading "Sync failed".
+        CalDavError::Forbidden => {
+            anyhow::anyhow!(crate::errors::server_answered(reqwest::StatusCode::FORBIDDEN))
+        }
         other => anyhow::Error::from(other),
     }
 }
@@ -1311,6 +1316,21 @@ mod tests {
 
             let until = master_until(&server).await;
             assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
+        }
+
+        /// A server that refuses a change (a calendar shared read-only that
+        /// still lists write access, say) says so in the words every other
+        /// status gets, rather than "Sync failed".
+        #[tokio::test]
+        async fn a_refused_change_says_the_server_refused_it() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+            let (state, ids) = seeded(&server, "refused-put@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+            let at = ms("2026-11-02T08:00:00Z");
+
+            let err = update(&state, ids["series-1"], "all", at, retitled(at, at + 3_600_000)).await.unwrap_err();
+
+            assert_eq!(crate::errors::user_facing(&err), "The server answered 403 Forbidden");
         }
 
         /// A moved event gets a file name of its own making. A UID is the
