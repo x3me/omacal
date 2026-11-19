@@ -1038,7 +1038,7 @@ async fn create_impl(
     // and the form never asks one on these calendars.
     if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
         if fields.conference.is_some() {
-            anyhow::bail!("Google Meet can only be added to a Google calendar");
+            anyhow::bail!(MEET_ONLY_ON_GOOGLE);
         }
         return crate::caldav_write::create(state, calendar_id, fields, uid).await;
     }
@@ -1226,6 +1226,10 @@ pub(crate) const CREATED_NOT_STORED: &str =
 pub(crate) const SAVED_NOT_STORED: &str =
     "The change was saved, but OmaCal could not record it locally. \
      The next sync will bring it in.";
+
+/// A Meet link asked for on a calendar that is not Google's, which cannot
+/// make one. Raised before anything is sent; allowlisted in `errors.rs`.
+pub(crate) const MEET_ONLY_ON_GOOGLE: &str = "Google Meet can only be added to a Google calendar";
 
 /// A "this and following" split refused because the series ends after a set
 /// number of times: the rest would need the original's count minus what the
@@ -1715,7 +1719,7 @@ async fn update_impl(
         if let Some(cal_id) = cal_id {
             if crate::caldav_write::is_caldav_calendar(&state.pool, cal_id).await? {
                 if fields.conference.is_some() {
-                    anyhow::bail!("Google Meet can only be added to a Google calendar");
+                    anyhow::bail!(MEET_ONLY_ON_GOOGLE);
                 }
                 let detail =
                     crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields)

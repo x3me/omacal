@@ -197,6 +197,12 @@ fn now_ts() -> jiff::Timestamp {
     jiff::Timestamp::from_millisecond(crate::now_ms()).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
 }
 
+/// An RSVP on a CalDAV event whose copy on the server has no ATTENDEE line
+/// for this account: nothing to answer. Raised before any write;
+/// allowlisted in `errors.rs`.
+pub(crate) const NOT_A_GUEST_HERE: &str =
+    "this event's copy on the server does not list you as a guest, so there is no invitation here to answer";
+
 /// The 412 an etag-guarded write answers with, worded as its task twin
 /// `tasks::TASK_CHANGED_ON_SERVER` is. Both name the one fix there is —
 /// sync, then save again — and until 2026-09-23 only the task one was
@@ -626,12 +632,7 @@ pub(crate) async fn respond(
             format!("{uid}#{rid_ms}"),
         )
     };
-    let new_raw = new_raw.ok_or_else(|| {
-        anyhow::anyhow!(
-            "this event's copy on the server does not list you as a guest, \
-             so there is no invitation here to answer"
-        )
-    })?;
+    let new_raw = new_raw.ok_or_else(|| anyhow::anyhow!(NOT_A_GUEST_HERE))?;
 
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
     resync(state, master.calendar_id).await?;
