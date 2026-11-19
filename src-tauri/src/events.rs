@@ -1206,6 +1206,29 @@ pub(crate) const SAVED_NOT_STORED: &str =
     "The change was saved, but OmaCal could not record it locally. \
      The next sync will bring it in.";
 
+/// A "this and following" split refused because the series ends after a set
+/// number of times: the rest would need the original's count minus what the
+/// first half used, a number only a full expansion knows. Shared by the
+/// Google and CalDAV splits so both refuse in the same words. Raised by
+/// `bail!` before either write; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_REFUSES_COUNT: &str =
+    "OmaCal cannot split a series that ends after a set number of times — \
+     edit all events instead";
+
+/// A split refused because later occurrences were changed on their own and
+/// would be lost; the count follows. Shared by both splits; a prefix in
+/// `errors.rs`'s `SAFE_PREFIXES`.
+pub(crate) const SPLIT_STRANDS_PREFIX: &str =
+    "some later occurrences of this series were moved or deleted on their own, and a \
+     split cannot carry them across — edit all events instead, or re-create them \
+     afterwards. Occurrences affected: ";
+
+/// A split whose new series landed but whose original would not shorten.
+/// Shared by both splits; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_LEFT_TWO_SERIES: &str =
+    "the new series was created but the original could not be shortened — \
+     you now have two overlapping series and should delete one";
+
 /// What a CalDAV move reports when the copy landed and the original would not
 /// go — the one partial outcome the PUT-then-DELETE order can produce.
 ///
@@ -2272,10 +2295,7 @@ async fn split_series(
     // not valid iCalendar and Google does not emit it, but checking one and
     // truncating both is the shape a real bug hides in.
     if rules.iter().any(|r| crate::write::has_count(r)) {
-        anyhow::bail!(
-            "OmaCal cannot split a series that ends after a set number of times — \
-             edit all events instead"
-        );
+        anyhow::bail!(SPLIT_REFUSES_COUNT);
     }
 
     // Occurrences in the tail that somebody has already changed on their own.
@@ -2314,11 +2334,7 @@ async fn split_series(
     )
     .await?;
     if stranded > 0 {
-        anyhow::bail!(
-            "some later occurrences of this series were moved or deleted on their own, and a \
-             split cannot carry them across — edit all events instead, or re-create them \
-             afterwards. Occurrences affected: {stranded}"
-        );
+        anyhow::bail!("{SPLIT_STRANDS_PREFIX}{stranded}");
     }
 
     // ---- 1. The tail. -----------------------------------------------------
@@ -2471,10 +2487,7 @@ async fn split_series(
         .map_err(|e| {
             tracing::error!(master = %master.id, created = %created.id, %e,
                 "series split created the new series but could not shorten the original");
-            anyhow::anyhow!(
-                "the new series was created but the original could not be shortened — \
-                 you now have two overlapping series and should delete one"
-            )
+            anyhow::anyhow!(SPLIT_LEFT_TWO_SERIES)
         })?;
 
     // ---- 3. Only now, the local store. ------------------------------------
