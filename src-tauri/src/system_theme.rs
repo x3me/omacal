@@ -19,7 +19,19 @@ use tauri::{AppHandle, Emitter, Manager};
 /// A new system setting: remember it, and repaint if the app is following it
 /// — `Auto`, and no Omarchy theme taking precedence. A pinned palette is not
 /// following anything, so the flip is not news to it.
+///
+/// For a caller outside the async runtime: macOS's window-event callback, on
+/// the main thread. The Linux portal watcher runs *inside* the runtime and
+/// awaits [`changed_async`] instead, because `block_on` from a runtime
+/// worker panics ("Cannot start a runtime from within a runtime"). That
+/// panic killed live theme-following on the first dark/light flip.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn changed(app: &AppHandle, scheme: SystemScheme) {
+    tauri::async_runtime::block_on(changed_async(app, scheme));
+}
+
+/// [`changed`] for a caller already on the async runtime.
+pub async fn changed_async(app: &AppHandle, scheme: SystemScheme) {
     if theme::system_scheme() == scheme {
         return;
     }
@@ -27,8 +39,8 @@ pub fn changed(app: &AppHandle, scheme: SystemScheme) {
     if theme::omarchy_theme_dir().is_some() {
         return;
     }
-    let appearance =
-        tauri::async_runtime::block_on(crate::settings::appearance(&app.state::<crate::AppState>().pool));
+    let pool = app.state::<crate::AppState>().pool.clone();
+    let appearance = crate::settings::appearance(&pool).await;
     if appearance.is_pinned() {
         return;
     }
@@ -138,7 +150,9 @@ mod portal {
             };
             if namespace == NAMESPACE && key == KEY {
                 if let Some(scheme) = scheme_of(&value) {
-                    changed(&app, scheme);
+                    // Awaited: this runs on a runtime worker, where the
+                    // blocking `changed` would panic.
+                    changed_async(&app, scheme).await;
                 }
             }
         }
