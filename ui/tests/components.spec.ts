@@ -1585,6 +1585,20 @@ test.describe('Header', () => {
     expect(values[0]).toBe(true);
   });
 
+  /** The daily update check asks GitHub, a third party, so turning it off is
+   *  the user's to do. On by default (the backend starts it off inside a
+   *  Flatpak, whose package manager brings the updates). */
+  test('About carries the update check, on by default and saved off', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'About');
+    const toggle = modal.getByRole('checkbox', { name: 'Check for updates' });
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect(toggle).not.toBeChecked();
+    const values = await page.evaluate(() => (window as any).__harness.settingValues('updateCheck'));
+    expect(values[0]).toBe(false);
+  });
+
   /**
    * Start-on-login (issue #22, and the background mode asked for alongside
    * it): the app used to register its launch entry on every single start, so

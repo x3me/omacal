@@ -609,6 +609,17 @@
     }
   }
 
+  async function toggleUpdateCheck(on: boolean) {
+    aboutNote = null;
+    try {
+      settings = await setSetting('updateCheck', on);
+      if (settings) onsettingschange?.(settings);
+    } catch (e) {
+      aboutNote = String(e);
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function togglePhotonPlaces(on: boolean) {
     note = null;
     try {
@@ -1985,6 +1996,19 @@
           <a href="https://github.com/x3me/omacal" onclick={e => { e.preventDefault(); openLink('repository'); }}>GitHub repository</a>
           <a href="https://omacal.app" onclick={e => { e.preventDefault(); openLink('site'); }}>omacal.app</a>
         </div>
+        <label class="check section-start">
+          <input
+            type="checkbox"
+            checked={settings?.updateCheck ?? true}
+            disabled={!settings}
+            onchange={(e) => toggleUpdateCheck(e.currentTarget.checked)}
+          />
+          Check for updates
+        </label>
+        <p class="hint">
+          Once a day, asks GitHub's public release list whether a newer
+          version is out. GitHub sees the version and your IP address.
+        </p>
         {#if aboutNote}<p class="note err" role="alert" data-testid="about-note">{aboutNote}</p>{/if}
       </div>
 
