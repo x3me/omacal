@@ -481,10 +481,15 @@ fn read_event(c: &Component) -> Option<CalEvent> {
         organizer_email: c.prop_value("ORGANIZER").map(|v| {
             v.trim().strip_prefix("mailto:").unwrap_or(v.trim()).to_string()
         }),
-        conference_uri: c
-            .prop_value("URL")
+        // RFC 7986 `CONFERENCE` is the property that says "join here", and
+        // the one the export writes; `URL` is the older place servers put the
+        // link. Only a web link becomes the Join button — a `tel:` dial-in
+        // in either is not one.
+        conference_uri: ["CONFERENCE", "URL"]
+            .iter()
+            .filter_map(|name| c.prop_value(name))
             .map(str::trim)
-            .filter(|v| v.starts_with("http"))
+            .find(|v| v.starts_with("http"))
             .map(str::to_string),
         last_modified_ms: c
             .prop("LAST-MODIFIED")
@@ -1449,7 +1454,12 @@ fn vevent_lines(ev: &EventWrite, now: Timestamp) -> Vec<String> {
         // RFC 7986 §5.11, the property every modern client reads for this —
         // rather than a line appended to the description, which would put a
         // link in prose and call it data.
-        lines.push(format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{}", escape(uri)));
+        // A URI value, not TEXT (RFC 5545 §3.3.13): written verbatim, since
+        // backslashing a `;` or `,` in it would hand clients a different link.
+        // A line break is the one thing still taken out: it would end the
+        // property and start a line of the caller's choosing.
+        let uri: String = uri.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        lines.push(format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{uri}"));
     }
     for r in &ev.recurrence {
         lines.push(r.clone());
@@ -2691,6 +2701,52 @@ END:VEVENT\r\nEND:VCALENDAR";
     }
 
     const NOW: i64 = 1_786_352_400_000;
+
+    /// A join link written as RFC 7986 `CONFERENCE` reads back as the
+    /// event's conference: what the export writes, and what other clients
+    /// put on a CalDAV event, is the link the popover offers to join. The
+    /// URI carries a `;` and a `,` because escaping them is what a URI value
+    /// must not do (RFC 5545 §3.3.13: a URI is not TEXT), so a link holding
+    /// neither could not tell an escaped write from a verbatim one.
+    #[test]
+    fn a_conference_link_round_trips_verbatim() {
+        let uri = "https://meet.example.com/j/123;type=video?pwd=a,b";
+        let ev = EventWrite { conference: Some(uri.into()), ..write_sample("conf-1") };
+        let raw = new_event_ics(&ev, Timestamp::from_millisecond(NOW).unwrap());
+        assert!(
+            raw.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{uri}")),
+            "written verbatim:\n{raw}"
+        );
+        let read = events_in(&parse(&raw).unwrap()).remove(0);
+        assert_eq!(read.conference_uri.as_deref(), Some(uri));
+
+        let smuggled = EventWrite {
+            conference: Some("https://meet.example.com/x\r\nATTENDEE:mailto:eve@example.com".into()),
+            ..write_sample("conf-2")
+        };
+        let raw = new_event_ics(&smuggled, Timestamp::from_millisecond(NOW).unwrap());
+        assert!(!raw.lines().any(|l| l.starts_with("ATTENDEE")), "a line break cannot start a property:\n{raw}");
+    }
+
+    /// `URL` stays the fallback, for the servers that put the link there, and
+    /// `CONFERENCE` wins when both are present — it is the property that says
+    /// "join here", where `URL` is only "more about this event".
+    #[test]
+    fn conference_wins_over_url_and_url_is_the_fallback() {
+        let with = |props: &str| {
+            format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTART:20260820T100000Z\r\n\
+                 DTEND:20260820T110000Z\r\n{props}END:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+        };
+        let read = |props: &str| events_in(&parse(&with(props)).unwrap()).remove(0).conference_uri;
+        assert_eq!(
+            read("URL:https://example.com/about\r\nCONFERENCE;VALUE=URI:https://meet.example.com/x\r\n").as_deref(),
+            Some("https://meet.example.com/x")
+        );
+        assert_eq!(read("URL:https://meet.example.com/y\r\n").as_deref(), Some("https://meet.example.com/y"));
+        assert_eq!(read("CONFERENCE;VALUE=URI:tel:+15551234\r\n"), None, "a dial-in is not a join link");
+    }
 
     #[test]
     fn a_new_event_serializes_and_reparses() {
