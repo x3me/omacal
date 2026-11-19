@@ -4414,6 +4414,18 @@ test.describe('App', () => {
     await expect(page.getByRole('dialog', { name: 'Client call' })).toBeVisible();
   });
 
+  /** An all-day result is named by its own date, in its calendar's zone.
+   *  Read from its instant in this webview's zone, an Auckland all-day event
+   *  was listed as the day before. */
+  test('an all-day result shows its own date', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('valentines');
+    await expect(results(page)).toHaveCount(1);
+    await expect(results(page).first()).toContainText('14');
+    await expect(results(page).first()).not.toContainText('13');
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');

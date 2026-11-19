@@ -2171,9 +2171,9 @@ export const EXPORT_OCCURRENCE_START = MON + 3 * 24 * H + 9 * H;
 
 export const IMPORT_PLANS: Record<string, any[]> = {
   mixed: [
-    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false,
+    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false, date: null,
       repeat: null, dropped_guests: 2 },
-    { kind: 'import', summary: 'Standup', start_ms: 1788910200000, all_day: false,
+    { kind: 'import', summary: 'Standup', start_ms: 1788910200000, all_day: false, date: null,
       repeat: 'weekdays', dropped_guests: 0 },
     { kind: 'skip', summary: 'Third Thursday',
       reason: 'repeats in a way this version cannot store; import it from the app that wrote it' },
@@ -2184,9 +2184,11 @@ export const IMPORT_PLANS: Record<string, any[]> = {
    *  it. Its own plan rather than an addition to `mixed`, whose counts three
    *  specs already assert. */
   allday: [
-    { kind: 'import', summary: 'Berlin trip', start_ms: 1788825600000, all_day: true,
-      repeat: null, dropped_guests: 0 },
-    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false,
+    // Its day as the file states it, 8 September, held by a calendar ahead
+    // of the suite's UTC: Auckland's midnight is the 7th, 12:00 UTC.
+    { kind: 'import', summary: 'Berlin trip', start_ms: Date.UTC(2026, 8, 7, 12), all_day: true,
+      date: '2026-09-08', repeat: null, dropped_guests: 0 },
+    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false, date: null,
       repeat: null, dropped_guests: 0 },
   ],
 };

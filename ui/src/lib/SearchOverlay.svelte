@@ -106,6 +106,15 @@
   const sectioned = $derived(hasEvents && hasTasks);
   const empty = $derived(query.trim() !== '' && !hasEvents && !hasTasks);
 
+  /** The day a result names: an all-day one's own date, read in its
+   *  calendar's zone by the backend (`allDayDate`), as local midnight here;
+   *  a timed one's instant. */
+  function hitDayMs(h: { startMs: number; allDayDate: string | null }): number {
+    if (!h.allDayDate) return h.startMs;
+    const [y, m, d] = h.allDayDate.split('-').map(Number);
+    return new Date(y, m - 1, d).getTime();
+  }
+
   /** The day a result sits on, for the line under its title. */
   const when = (ms: number) =>
     formatDate(new Date(ms).getTime(), dateFormat(), {
@@ -157,7 +166,7 @@
                       class:active={active === i}
                       onclick={() => onpick({ kind: 'event', hit: h })}>
                 <b>{h.title}</b>
-                <em>{when(h.startMs)}</em>
+                <em>{when(hitDayMs(h))}</em>
               </button>
             </li>
           {/each}

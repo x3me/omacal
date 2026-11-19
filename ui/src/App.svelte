@@ -1619,9 +1619,12 @@
    * popover; the anchor moves before the popover opens so the block the
    * popover is about is the one on screen.
    */
-  async function goToHit(hit: { eventId: number; startMs: number; endMs: number }) {
+  async function goToHit(hit: { eventId: number; startMs: number; endMs: number; allDayDate?: string | null }) {
     searchOpen = false;
-    anchorMs = dayStart(hit.startMs);
+    // An all-day hit lands on its own date (its calendar's, from the
+    // backend), not on whichever day its instant falls in this zone.
+    const civil = hit.allDayDate?.split('-').map(Number);
+    anchorMs = civil ? new Date(civil[0], civil[1] - 1, civil[2]).getTime() : dayStart(hit.startMs);
     // The jump lands on the hit itself: a week panned off its alignment, or
     // a Year view on another year, kept its old offset and could show a
     // window without the hit's day in it.

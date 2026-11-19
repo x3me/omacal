@@ -926,15 +926,15 @@ function saveSettings(s: StubSettings): StubSettings {
 const SEARCHABLE = [
   {
     eventId: APP_SERIES_ID, title: 'Standup',
-    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000,
+    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_ONE_OFF_ID, title: 'Board prep',
-    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000,
+    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_GUESTS_ID, title: 'Standup review',
-    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000,
+    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000, allDayDate: null,
   },
   // **A different month from the one the app opens on**, which is what makes
   // "the calendar moves to that date" witnessable at all: every other entry
@@ -942,7 +942,16 @@ const SEARCHABLE = [
   // one moves nothing and a version that never moved would pass.
   {
     eventId: APP_SOLO_SERIES_ID, title: 'Dentist',
-    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000,
+    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000, allDayDate: null,
+  },
+  // An all-day event on an Auckland calendar: its 14 February is 13 February
+  // 11:00 UTC, and the suite runs in UTC, so a result dated from `startMs`
+  // reads the 13th. `allDayDate` is the backend's own reading of the day.
+  {
+    // Its own id: a query matching it and Dentist ("e") would otherwise
+    // hand the overlay's keyed list two equal keys.
+    eventId: 9_901, title: 'Valentines dinner',
+    startMs: Date.UTC(2024, 1, 13, 11), endMs: Date.UTC(2024, 1, 14, 11), allDayDate: '2024-02-14',
   },
 ];
 
