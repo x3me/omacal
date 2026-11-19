@@ -19,9 +19,14 @@
 //!
 //! Split as ever: which changes deserve the banner is pure and tested; the
 //! inotify plumbing is the untested OS half, like `theme_watch::spawn`.
+//!
+//! macOS too, since 2026-11-19: `/etc/localtime` is a symlink there as well
+//! (into `/var/db/timezone/zoneinfo/`), re-pointed when the user travels with
+//! automatic time zone on, and the app had no banner at all. The same watch,
+//! through FSEvents, on `/etc`'s real path.
 
 /// The event a moved zone emits, carrying the new IANA name.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) const EVENT: &str = "system-tz-changed";
 
 /// Whether a `/etc/localtime` transition deserves the banner. Only asked of
@@ -33,7 +38,7 @@ pub(crate) const EVENT: &str = "system-tz-changed";
 /// distro swapping a copied file for a symlink lands here — and a banner
 /// that cries wolf once has taught the user to dismiss the one that
 /// matters.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) fn should_announce(last: Option<&str>, next: Option<&str>) -> bool {
     matches!((last, next), (Some(a), Some(b)) if a != b)
 }
@@ -43,7 +48,7 @@ pub(crate) fn should_announce(last: Option<&str>, next: Option<&str>) -> bool {
 /// `right/` trees are the same zones filed twice, so their prefix is not
 /// part of the name; without stripping it, `zoneinfo/Europe/Sofia` →
 /// `zoneinfo/posix/Europe/Sofia` would banner a move that never happened.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) fn zone_name_of(target: &str) -> Option<String> {
     let (_, name) = target.rsplit_once("zoneinfo/")?;
     let name = name
@@ -56,7 +61,7 @@ pub(crate) fn zone_name_of(target: &str) -> Option<String> {
 /// The system zone's current name. The symlink is the rule; `/etc/timezone`
 /// is the fallback for distros that copy the zoneinfo file instead of
 /// linking it, where the link read fails but the name is written down.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_system_zone() -> Option<String> {
     if let Ok(target) = std::fs::read_link("/etc/localtime") {
         if let Some(name) = zone_name_of(&target.to_string_lossy()) {
@@ -72,7 +77,7 @@ fn read_system_zone() -> Option<String> {
 /// Starts the watcher. Never fatal — a box where `/etc` cannot be watched
 /// just goes without the banner, exactly as every install did before this
 /// module existed.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn spawn(app: tauri::AppHandle) {
     use notify::{RecursiveMode, Watcher};
     use tauri::{Emitter, Manager};
@@ -97,7 +102,10 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
                 return;
             }
         };
-        if let Err(e) = watcher.watch(std::path::Path::new("/etc"), RecursiveMode::NonRecursive) {
+        // `/etc` by its real path: on macOS it is a symlink to `/private/etc`,
+        // and FSEvents reports what happens at the real one.
+        let etc = std::fs::canonicalize("/etc").unwrap_or_else(|_| "/etc".into());
+        if let Err(e) = watcher.watch(&etc, RecursiveMode::NonRecursive) {
             tracing::warn!(%e, "could not watch /etc for timezone changes");
             return;
         }
@@ -167,6 +175,8 @@ mod tests {
     #[test]
     fn the_zone_name_survives_every_symlink_shape() {
         for target in [
+            // macOS: `/etc/localtime` points into `/var/db/timezone`.
+            "/var/db/timezone/zoneinfo/Europe/Sofia",
             "/usr/share/zoneinfo/Europe/Sofia",
             "../usr/share/zoneinfo/Europe/Sofia",
             "/usr/share/zoneinfo/posix/Europe/Sofia",

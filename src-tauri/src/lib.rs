@@ -1714,7 +1714,7 @@ pub fn run() {
                 .is_dark,
             );
             theme_watch::spawn(app.handle().clone());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             tz_watch::spawn(app.handle().clone());
             // Seed the upcoming feed from whatever is already in the store,
             // so a bar widget has an answer before the first sync completes.
