@@ -434,7 +434,11 @@ pub(crate) async fn update(
                 .ok_or_else(|| anyhow::anyhow!("could not rewrite the event's resource"))?;
             (out, None, uid.clone())
         } else if scope == "following" {
-            if occurrence_start_ms <= master.start_utc {
+            // Cut at the slot the series put the occurrence in, as a Google
+            // split does: cut where a moved occurrence sits now and the old
+            // series keeps it while the new one starts on it too.
+            let split_at_ms = occurrence_identity(&viewed, occurrence_start_ms);
+            if split_at_ms <= master.start_utc {
                 // "This and following" from the first occurrence is the
                 // whole series; recurse as an "all" edit.
                 return Box::pin(update(state, id, "all", occurrence_start_ms, fields)).await;
@@ -451,16 +455,16 @@ pub(crate) async fn update(
                 &state.pool,
                 master.calendar_id,
                 &uid,
-                occurrence_start_ms,
+                split_at_ms,
                 &viewed.google_id,
             )
             .await?;
             if stranded > 0 {
                 anyhow::bail!("{}{stranded}", crate::events::SPLIT_STRANDS_PREFIX);
             }
-            let cut = occurrence_time(&master, occurrence_start_ms)?;
+            let cut = occurrence_time(&master, split_at_ms)?;
             let until = crate::write::until_value(
-                occurrence_start_ms,
+                split_at_ms,
                 master.is_all_day,
                 &master.calendar_timezone,
             );
@@ -727,12 +731,14 @@ pub(crate) async fn delete(
     if !is_series || scope == "all" {
         client.delete(&href, master.etag.as_deref()).await.map_err(friendly)?;
     } else if scope == "following" {
-        if occurrence_start_ms <= master.start_utc {
+        // The slot the series put the occurrence in, as for an edit.
+        let split_at_ms = occurrence_identity(&viewed, occurrence_start_ms);
+        if split_at_ms <= master.start_utc {
             client.delete(&href, master.etag.as_deref()).await.map_err(friendly)?;
         } else {
-            let cut = occurrence_time(&master, occurrence_start_ms)?;
+            let cut = occurrence_time(&master, split_at_ms)?;
             let until = crate::write::until_value(
-                occurrence_start_ms,
+                split_at_ms,
                 master.is_all_day,
                 &master.calendar_timezone,
             );
@@ -1257,6 +1263,54 @@ mod tests {
                 format!("{}1", crate::events::SPLIT_STRANDS_PREFIX)
             );
             assert!(server.received_requests().await.unwrap().is_empty(), "nothing sent at all");
+        }
+
+        /// The UNTIL a shortened series ends at, read off the PUT to its own
+        /// resource.
+        async fn master_until(server: &MockServer) -> String {
+            let body = server.received_requests().await.unwrap().into_iter()
+                .filter(|r| r.method.as_str() == "PUT" && r.url.path() == "/cal/series-1.ics")
+                .map(|r| String::from_utf8(r.body).unwrap())
+                .next_back()
+                .expect("the original was shortened");
+            assert!(lines_starting(&body, "RECURRENCE-ID").is_empty(), "the moved occurrence left with the cut:\n{body}");
+            let rule = lines_starting(&body, "RRULE").pop().expect("still a series").to_string();
+            rule.split(';').find_map(|p| p.strip_prefix("UNTIL=")).expect("an UNTIL").to_string()
+        }
+
+        /// "This and following" from an occurrence that was moved on its own
+        /// cuts the series at the slot the series put it in, as a Google split
+        /// does. Cut where it sits now, the old series would keep it and the
+        /// new one would start on it too: the occurrence twice.
+        #[tokio::test]
+        async fn splitting_from_a_moved_occurrence_cuts_at_its_original_slot() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-moved@x.test", MOVED).await;
+            let exception = ids[&format!("series-1#{}", ms("2026-11-09T08:00:00Z"))];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            update(&state, exception, "following", moved, retitled(moved, moved + 3_600_000)).await.ok();
+
+            let until = master_until(&server).await;
+            assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
+            assert!(until.as_str() >= "20261102T080000Z", "and keeps 2 November: {until}");
+        }
+
+        /// And deleting "this and following" from it removes the slot it was
+        /// moved from, rather than ending the series after it and leaving the
+        /// moved occurrence standing.
+        #[tokio::test]
+        async fn deleting_following_from_a_moved_occurrence_cuts_at_its_original_slot() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "delete-following-moved@x.test", MOVED).await;
+            let exception = ids[&format!("series-1#{}", ms("2026-11-09T08:00:00Z"))];
+
+            delete(&state, exception, "following", ms("2026-11-10T08:00:00Z")).await.ok();
+
+            let until = master_until(&server).await;
+            assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
         }
 
         /// A moved event gets a file name of its own making. A UID is the
