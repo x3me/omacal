@@ -1219,6 +1219,27 @@ test.describe('App', () => {
       return { cx, cy };
     };
 
+    /** A drag the window loses mid-gesture (Alt-Tab, a notification taking
+     *  focus, a touchpad palm-rejected) is abandoned, as Escape abandons it.
+     *  It used to stay armed until the next release anywhere, which then
+     *  committed a move the user never finished. */
+    test('a drag the window loses is abandoned, not dropped on the next release', async ({ page }) => {
+      await writable(page);
+      const b = block(page, 'Board prep').first();
+      await b.scrollIntoViewIfNeeded();
+      const box = (await b.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx, cy + 60, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await page.mouse.move(cx, cy + 120, { steps: 4 });
+      await page.mouse.up();
+      await page.waitForTimeout(300);
+      expect(await callsTo(page, 'update_event'), 'nothing was moved').toHaveLength(0);
+    });
+
     /**
      * **A dragged block is drawn as it would land, not as it was packed.**
      * Its lane — second of two, say, beside a meeting it overlapped — belongs

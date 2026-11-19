@@ -1060,6 +1060,8 @@
     window.addEventListener('pointermove', onTaskDragMove);
     window.addEventListener('pointerup', onTaskDragEnd);
     window.addEventListener('keydown', onTaskDragKey);
+    window.addEventListener('pointercancel', onTaskDragLost);
+    window.addEventListener('blur', onTaskDragLost);
   }
 
   function onTaskDragMove(e: PointerEvent) {
@@ -1076,6 +1078,8 @@
     window.removeEventListener('pointermove', onTaskDragMove);
     window.removeEventListener('pointerup', onTaskDragEnd);
     window.removeEventListener('keydown', onTaskDragKey);
+    window.removeEventListener('pointercancel', onTaskDragLost);
+    window.removeEventListener('blur', onTaskDragLost);
     if (!d || !d.moving || !commit || d.cols === 0) return;
     const days = renderedDays.map((x) => x.start_ms);
     const i = days.indexOf(d.fromMs);
@@ -1085,6 +1089,10 @@
   }
 
   const onTaskDragEnd = () => endTaskDrag(true);
+  /** The pointer or the window was lost mid-drag (Alt-Tab, palm rejection):
+   *  abandoned as Escape abandons it, never dropped on a later release. The
+   *  same rule for every drag here; the sweep already had it. */
+  const onTaskDragLost = () => endTaskDrag(false);
   /** Escape puts it back, the same escape the event drag honours. */
   const onTaskDragKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') endTaskDrag(false);
@@ -1122,6 +1130,8 @@
     window.addEventListener('pointermove', onPinDragMove);
     window.addEventListener('pointerup', onPinDragEnd);
     window.addEventListener('keydown', onPinDragKey);
+    window.addEventListener('pointercancel', onPinDragLost);
+    window.addEventListener('blur', onPinDragLost);
   }
 
   function onPinDragMove(e: PointerEvent) {
@@ -1147,10 +1157,13 @@
     window.removeEventListener('pointermove', onPinDragMove);
     window.removeEventListener('pointerup', onPinDragEnd);
     window.removeEventListener('keydown', onPinDragKey);
+    window.removeEventListener('pointercancel', onPinDragLost);
+    window.removeEventListener('blur', onPinDragLost);
     if (d && d.moving && commit && d.landedMs !== d.dueMs) ontaskdue?.(d.id, d.landedMs);
   }
 
   const onPinDragEnd = () => endPinDrag(true);
+  const onPinDragLost = () => endPinDrag(false);
   const onPinDragKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') endPinDrag(false);
   };
@@ -1200,6 +1213,8 @@
     window.addEventListener('pointermove', onDragMove);
     window.addEventListener('pointerup', onDragEnd);
     window.addEventListener('keydown', onDragKey);
+    window.addEventListener('pointercancel', onDragLost);
+    window.addEventListener('blur', onDragLost);
   }
 
   function onDragMove(e: PointerEvent) {
@@ -1300,6 +1315,8 @@
     window.addEventListener('pointermove', onDraftMove);
     window.addEventListener('pointerup', endDraftDrag);
     window.addEventListener('keydown', onDraftKey);
+    window.addEventListener('pointercancel', onDraftLost);
+    window.addEventListener('blur', onDraftLost);
   }
 
   function onDraftMove(e: PointerEvent) {
@@ -1336,6 +1353,17 @@
     window.removeEventListener('pointermove', onDraftMove);
     window.removeEventListener('pointerup', endDraftDrag);
     window.removeEventListener('keydown', onDraftKey);
+    window.removeEventListener('pointercancel', onDraftLost);
+    window.removeEventListener('blur', onDraftLost);
+  }
+
+  /** Lost mid-drag: the draft goes back where the gesture found it, as
+   *  Escape puts it. */
+  function onDraftLost() {
+    if (!draftDrag) return;
+    const origin = draftDrag.origin;
+    endDraftDrag();
+    ondraftmove?.(origin);
   }
 
   function onDragEnd() {
@@ -1381,6 +1409,16 @@
     window.removeEventListener('pointermove', onDragMove);
     window.removeEventListener('pointerup', onDragEnd);
     window.removeEventListener('keydown', onDragKey);
+    window.removeEventListener('pointercancel', onDragLost);
+    window.removeEventListener('blur', onDragLost);
+  }
+
+  /** Lost mid-drag: back to its origin, as Escape does, and the release
+   *  that follows is no drop. */
+  function onDragLost() {
+    if (!drag) return;
+    draggedNotClicked = drag.moving;
+    endDrag();
   }
 
   /**
@@ -1805,7 +1843,10 @@
    * up. The drag half of this has been true since Task 3; it is fixed here
    * rather than left because the sweep was about to be a second copy of it.
    */
-  $effect(() => () => { endDrag(); endSweep(); });
+  // Every gesture's window listeners, not two of them: an unmount mid-drag
+  // (a view switch from the keyboard) left the task, pin and draft drags
+  // listening to a window they no longer belonged to.
+  $effect(() => () => { endDrag(); endSweep(); endTaskDrag(false); endPinDrag(false); endDraftDrag(); });
 
   /**
    * The inline style for the ghost drawn over `day` while it is being swept,
