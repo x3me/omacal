@@ -454,7 +454,7 @@
         </button>
         {#if connectOpen}
           <button class="scrim" aria-label="Close" tabindex="-1" onclick={() => (connectOpen = false)}></button>
-          <div class="connectmenu" role="menu" aria-label="Connect a calendar">
+          <div class="connectmenu" role="menu" aria-label="Connect a calendar" data-overlay>
             <button role="menuitem" onclick={() => { connectOpen = false; onSignIn(); }}>Google Calendar</button>
             <button role="menuitem" onclick={() => connectWith('icloud')}>iCloud</button>
             <button role="menuitem" onclick={() => connectWith('caldav')}>CalDAV server</button>
@@ -489,7 +489,7 @@
              which is the honest behaviour for two nested layers. -->
         <button class="scrim" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
 
-        <div class="menu" role="group" aria-label="Menu">
+        <div class="menu" role="group" aria-label="Menu" data-overlay>
           {#if calendars.length > 0}
             <!-- **Rehomed, not rewritten.** The whole component moves inside
                  the menu with its trigger, its panel and its `bind:open`

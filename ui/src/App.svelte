@@ -1622,6 +1622,14 @@
   async function goToHit(hit: { eventId: number; startMs: number; endMs: number }) {
     searchOpen = false;
     anchorMs = dayStart(hit.startMs);
+    // The jump lands on the hit itself: a week panned off its alignment, or
+    // a Year view on another year, kept its old offset and could show a
+    // window without the hit's day in it.
+    weekPanDays = 0;
+    const hitYear = new Date(hit.startMs).getFullYear();
+    yearNum = Math.min(Math.max(hitYear, YEAR_MIN), YEAR_MAX);
+    const thisYear = new Date().getFullYear();
+    if (hitYear >= thisYear && hitYear <= thisYear + 1) bigYearNum = hitYear;
     await openOccurrence(hit.eventId, hit.startMs, hit.endMs, keyboardAnchor());
   }
 
@@ -1908,6 +1916,9 @@
    * rather than failing.
    */
   function createDayMs(): number {
+    // The day the keyboard has selected, when it has one showing: `n` after
+    // `l` means "a new event on the day I moved to", not on the anchor.
+    if (keyboardActive && listable(view)) return keyboardCursor.dayStartMs;
     const shownYear = view === 'year' ? yearNum : view === 'bigyear' ? bigYearNum : null;
     if (shownYear === null) return anchorMs;
     const d = new Date(anchorMs);
@@ -2566,6 +2577,11 @@
     // keyboard. Escape is unaffected: each panel listens for it on `window`
     // itself.
     if (form || pendingDelete || searchOpen || quickAdd || helpOpen) return;
+    // Nor while a header panel is open (the menu, the calendar list, the
+    // invitation tray, the connect chooser): each marks itself
+    // `data-overlay`. They are not modal, so the dialog check above misses
+    // them, and `n` opened a form behind the open menu.
+    if (document.querySelector('[data-overlay]')) return;
 
     // Lowercased, which is what makes `H` step like `h` — the old `switch`
     // did the same, and digits and punctuation are unaffected (`'?'` and

@@ -6092,6 +6092,26 @@ test.describe('App: keyboard event navigation', () => {
 
   /* `h` and `l` are the keyboard's own arrows, so they page and keep it
      showing. Fails the moment the hide moves into `step`, which all four share. */
+  /** `n` and `q` create on the day the keyboard has selected, not on the
+   *  day the view is anchored to: moving the selection to Tuesday (`w`) and
+   *  pressing `n` used to open a form for Monday, the anchor. */
+  test('n and q create on the selected day', async ({ page }) => {
+    await page.keyboard.press('w'); // next day: Tuesday 30 January
+    await expect(page.locator('.kbd-status')).toContainText('Selected');
+    await page.keyboard.press('n');
+    const form = page.getByRole('dialog', { name: 'New event' });
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2024-01-30');
+  });
+
+  /** A shortcut does nothing while a menu or a panel of the header is open:
+   *  `n` opened a form behind the open menu, and the view keys moved the
+   *  calendar under an open invitation tray or calendar list. */
+  test('shortcuts wait while a header menu is open', async ({ page }) => {
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.keyboard.press('n');
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
+  });
+
   test('h and l keep the keyboard selection', async ({ page }) => {
     await page.keyboard.press('w');
     await page.keyboard.press('l');
