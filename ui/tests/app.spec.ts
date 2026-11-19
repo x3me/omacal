@@ -4355,6 +4355,39 @@ test.describe('App', () => {
     await expect(results(page)).toHaveCount(0);
   });
 
+  /** Search is keyboard-first like the rest of the app: Enter opens the top
+   *  result, and the arrows move a selection Enter then opens. Before, the
+   *  field took neither, so a result could be reached only by Tab or the
+   *  mouse. The second "standup" hit is the guests fixture, whose details
+   *  are titled "Client call", which is what tells the two picks apart. */
+  test('Enter opens the top result, and the arrows choose another', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    await page.keyboard.press('Enter');
+    await expect(search(page)).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'Standup' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    const hits = search(page).getByRole('option');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(1)).toHaveAttribute('aria-selected', 'true');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowDown'); // the last stays chosen
+    await page.keyboard.press('ArrowUp');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(field(page)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Client call' })).toBeVisible();
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');
@@ -4441,11 +4474,11 @@ test.describe('App', () => {
     await writable(page);
     await page.keyboard.press('/');
     await field(page).fill('board');
-    // The **button**, not the `<li>` around it. A list item is not focusable,
+    // The **result** (an option), not the `<li>` around it. A list item is not focusable,
     // so focusing one leaves focus in the field — where `isTypingTarget`
     // already spares the key, and the guard under test never runs. That is
     // what the first version of this spec did, and a mutation is what said so.
-    await results(page).first().getByRole('button').focus();
+    await results(page).first().getByRole('option').focus();
     await expect(field(page)).not.toBeFocused();
 
     await page.keyboard.press('4');
@@ -4494,7 +4527,7 @@ test.describe('App', () => {
     await field(page).fill('milk');
     await expect(results(page)).toHaveCount(1);
     await expect(results(page).first()).toContainText('Buy milk');
-    await results(page).first().getByRole('button').click();
+    await results(page).first().getByRole('option').click();
 
     await expect(search(page), 'search does not linger').toHaveCount(0);
     const side = page.getByRole('complementary', { name: 'Tasks' });
