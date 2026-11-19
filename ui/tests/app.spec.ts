@@ -446,7 +446,8 @@ test.describe('App', () => {
   // line threw away.
   test('the first-run config error is readable in full', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
 
     const err = page.locator('.err');
     await expect(err).toContainText('Create it with client_id and client_secret');
@@ -461,7 +462,8 @@ test.describe('App', () => {
 
   test('the error clears when the user moves to another week', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.err')).toContainText(NO_CONFIG_ERROR);
 
     await page.getByRole('button', { name: 'Next week' }).click();
@@ -496,7 +498,8 @@ test.describe('App', () => {
   // never left syncing behind the user's back without them having seen it.
   test('signing in opens the picker with the new calendars in it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await expect(page.locator('.acct')).toHaveCount(1);
   });
@@ -510,7 +513,8 @@ test.describe('App', () => {
   // true and unable to reopen the (by-then-closed) child.
   test('closing the picker then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('.panel')).toHaveCount(0);
@@ -527,7 +531,8 @@ test.describe('App', () => {
   // reviewer who found this confirmed both propagate up correctly.
   test('clicking away then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     // **The picker's own scrim**, named exactly: the menu it now sits inside
     // has one too, and clicking the wrong one would close the wrong layer.

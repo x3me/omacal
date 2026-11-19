@@ -1159,8 +1159,29 @@ test.describe('Header', () => {
 
   test('disconnected state offers to connect', async ({ page }) => {
     await page.goto(show('Header', 'disconnected'));
-    await expect(page.getByRole('button', { name: 'Connect Google Calendar' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await expect(page.locator('header')).toHaveScreenshot('header-disconnected.png');
+  });
+
+  /** A new user is offered every kind of calendar the app connects, not only
+   *  Google's: the site pitches Google, iCloud and any CalDAV server alike,
+   *  and the other three used to wait behind ☰ → Settings → Accounts.
+   *  Google starts its sign-in; the others open Accounts with their own
+   *  form already open. */
+  test('the empty state offers every kind of calendar, each to its own form', async ({ page }) => {
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    const menu = page.getByRole('menu', { name: 'Connect a calendar' });
+    await expect(menu.getByRole('menuitem')).toHaveText(['Google Calendar', 'iCloud', 'CalDAV server', 'WebCal feed']);
+
+    await menu.getByRole('menuitem', { name: 'iCloud' }).click();
+    await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('textbox', { name: 'Apple ID' })).toBeVisible();
+
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'WebCal feed' }).click();
+    await expect(page.getByRole('group', { name: 'Subscribe to a calendar URL' }).getByRole('textbox').first()).toBeVisible();
   });
 
   /**
@@ -1400,7 +1421,7 @@ test.describe('Header', () => {
     // Connect stays in the header rather than moving behind the hamburger: the
     // three controls §1 moves are all rare, and this is the one thing a new
     // user has to find.
-    await expect(page.getByRole('button', { name: /Connect Google Calendar/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await openMenu(page);
     await expect(page.getByRole('button', { name: 'Add Google account' })).toHaveCount(0);
   });

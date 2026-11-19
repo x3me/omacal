@@ -183,6 +183,19 @@
   const caldavReauth = $derived(status?.caldav_reauth ?? []);
   /** The pane Settings opens on: Accounts when a CalDAV banner opened it. */
   let settingsTab = $state<'General' | 'Accounts'>('General');
+  /** The connect form Accounts opens with, when the empty state's chooser
+   *  sent the user there for one. */
+  let settingsForm = $state<'icloud' | 'caldav' | 'webcal' | null>(null);
+  /** Whether the empty state's "Connect calendar…" menu is open. */
+  let connectOpen = $state(false);
+
+  function connectWith(kind: 'icloud' | 'caldav' | 'webcal') {
+    connectOpen = false;
+    menuOpen = false;
+    settingsTab = 'Accounts';
+    settingsForm = kind;
+    settingsOpen = true;
+  }
   /** The newer release, if the backend's daily check found one. */
   const update = $derived(status?.update ?? null);
   /** Dismissal is session-local on purpose: the notice returns on the next
@@ -255,6 +268,7 @@
   function openSettings() {
     menuOpen = false;
     settingsTab = 'General';
+    settingsForm = null;
     settingsOpen = true;
   }
 
@@ -429,9 +443,25 @@
       <!-- Stays in the header rather than moving behind the hamburger. The
            three controls §1 moves are all *rare*; this is the one thing a new
            user has to find, and it is the whole of the app until they do. -->
-      <button class="primary" onclick={onSignIn} disabled={busy}>
-        {busy ? 'Connecting…' : 'Connect Google Calendar'}
-      </button>
+      <!-- Every kind of calendar the app connects, not only Google's: the
+           other three used to wait behind ☰ → Settings → Accounts, which a new
+           user has no reason to look in. Google starts its sign-in here; the
+           others open Accounts with their own form already open. -->
+      <div class="connectwrap">
+        <button class="primary" aria-haspopup="menu" aria-expanded={connectOpen}
+                onclick={() => (connectOpen = !connectOpen)} disabled={busy}>
+          {busy ? 'Connecting…' : 'Connect calendar…'}
+        </button>
+        {#if connectOpen}
+          <button class="scrim" aria-label="Close" tabindex="-1" onclick={() => (connectOpen = false)}></button>
+          <div class="connectmenu" role="menu" aria-label="Connect a calendar">
+            <button role="menuitem" onclick={() => { connectOpen = false; onSignIn(); }}>Google Calendar</button>
+            <button role="menuitem" onclick={() => connectWith('icloud')}>iCloud</button>
+            <button role="menuitem" onclick={() => connectWith('caldav')}>CalDAV server</button>
+            <button role="menuitem" onclick={() => connectWith('webcal')}>WebCal feed</button>
+          </div>
+        {/if}
+      </div>
     {/if}
 
     <button class="quick" aria-label="Quick add event" title="Quick add (Q)" onclick={onQuickAdd}>＋</button>
@@ -502,6 +532,7 @@
     {onappearancechange}
     {onsettingschange}
     initialTab={settingsTab}
+    initialAccountForm={settingsForm}
     onSignIn={() => {
       settingsOpen = false;
       onSignIn();
@@ -547,7 +578,7 @@
 {#if caldavReauth.length > 0 && !status?.demo}
   <p class="err reauth" data-testid="caldav-reauth-banner">
     <span>{caldavReauthMessage(caldavReauth)}</span>
-    <button class="primary" onclick={() => { settingsTab = 'Accounts'; menuOpen = false; settingsOpen = true; }}>
+    <button class="primary" onclick={() => { settingsTab = 'Accounts'; settingsForm = null; menuOpen = false; settingsOpen = true; }}>
       Reconnect
     </button>
   </p>
@@ -757,4 +788,14 @@
                    background: color-mix(in srgb, var(--accent) 18%, transparent);
                    color: var(--text); }
   .notice button:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  /* The empty state's chooser: anchored under its button, above the grid. */
+  .connectwrap { position: relative; }
+  .connectmenu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 61; min-width: 170px;
+                 display: flex; flex-direction: column; padding: 4px; border-radius: 8px;
+                 background: var(--surface); border: 1px solid var(--hairline);
+                 box-shadow: 0 8px 24px rgba(0, 0, 0, .25); }
+  .connectmenu button { text-align: left; background: none; border: 0; color: var(--text);
+                        padding: 6px 10px; border-radius: 5px; font: inherit; cursor: pointer; }
+  .connectmenu button:hover, .connectmenu button:focus-visible { background: color-mix(in srgb, var(--text) 8%, transparent); }
+  .connectwrap .scrim { position: fixed; inset: 0; z-index: 60; background: none; border: 0; }
 </style>

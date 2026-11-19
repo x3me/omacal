@@ -67,6 +67,7 @@
     onappearancechange,
     onsettingschange,
     initialTab = 'General',
+    initialAccountForm = null,
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
      *  one through `onSignIn` and cannot remove one, because nothing can yet. */
@@ -89,6 +90,9 @@
     /** The pane the modal opens on. Accounts, when it is opened to enter a
      *  CalDAV server's password again; General otherwise. */
     initialTab?: 'General' | 'Appearance' | 'Menu bar' | 'Calendars' | 'Accounts' | 'Notifications' | 'About';
+    /** The connect form Accounts opens with, when the empty state's chooser
+     *  sent the user here for one; none otherwise. */
+    initialAccountForm?: 'icloud' | 'caldav' | 'webcal' | null;
     /** Live appearance preview. Separate from `onsettingschange`: dragging a
      *  range should repaint the calendar behind this modal without causing
      *  every unrelated settings reaction (including a weather cache read). */
@@ -774,6 +778,11 @@
     webcalName = '';
     webcalForm = true;
   }
+  onMount(() => {
+    if (initialAccountForm === 'webcal') openWebcalForm();
+    else if (initialAccountForm) openCaldavForm(initialAccountForm);
+  });
+
 
   async function submitWebcal() {
     if (!webcalForm || webcalBusy) return;
