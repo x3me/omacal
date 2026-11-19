@@ -3,6 +3,7 @@
   import { formatDate, type DateFormat } from './datefmt';
   import { zoneClock } from './timefmt';
   import { onMount } from 'svelte';
+  import { whileVisible } from './whilevisible';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
   import { applyPalette } from './theme';
@@ -76,11 +77,15 @@
   onMount(() => {
     void applyPalette(); void refresh();
     const changes = listen("menubar-changed", () => { initialScroll = false; void refresh(); });
-    const timer = setInterval(() => { void refresh(); }, 15000);
-    const clockTimer = setInterval(() => { now = Date.now(); }, 1000);
+    // Only while the popup can be seen: it is hidden, never closed, and a
+    // poll and a clock in a hidden window ran for the app's whole life.
+    const stopTimers = whileVisible(document, [
+      { ms: 15000, run: () => { void refresh(); } },
+      { ms: 1000, run: () => { now = Date.now(); } },
+    ], () => { now = Date.now(); void refresh(); });
     const focus = () => { initialScroll = false; void applyPalette(); void refresh(); };
     window.addEventListener('focus', focus);
-    return () => { void changes.then(unlisten => unlisten()); clearInterval(timer); clearInterval(clockTimer); window.removeEventListener('focus', focus); };
+    return () => { void changes.then(unlisten => unlisten()); stopTimers(); window.removeEventListener('focus', focus); };
   });
 </script>
 

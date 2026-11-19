@@ -4426,6 +4426,30 @@ test.describe('App', () => {
     await expect(results(page).first()).not.toContainText('13');
   });
 
+  /** A hidden window does not redraw for nobody. Closing the window only
+   *  hides it, and every background sync used to reload the week, the
+   *  calendars, the invitations and the tasks into a window nobody could
+   *  see. Now a sync that finishes while hidden marks it stale, and the
+   *  reload runs once, when the window is shown. */
+  test('a sync that finishes while the window is hidden reloads when it is shown', async ({ page }) => {
+    await writable(page);
+    const setHidden = (hidden: boolean) => page.evaluate((h) => {
+      Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+      Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+    const weeks = async () => (await callsTo(page, 'get_week')).length;
+
+    await setHidden(true);
+    const before = await weeks();
+    await page.evaluate(() => window.__harness.emit('sync-finished', null));
+    await page.waitForTimeout(300);
+    expect(await weeks(), 'no reload into a hidden window').toBe(before);
+
+    await setHidden(false);
+    await expect.poll(weeks).toBeGreaterThan(before);
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');

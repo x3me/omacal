@@ -1282,8 +1282,32 @@
     await runFetchPlan(fetchPlan);
   }
 
+  /** A sync finished while the window was hidden, and its reload is owed for
+   *  when it is shown. Closing the window only hides it, so every background
+   *  sync reloaded the week, the calendars, the invitations and the tasks
+   *  into a window nobody could see. */
+  let staleWhileHidden = false;
+  $effect(() => {
+    const shown = () => {
+      if (document.hidden || !staleWhileHidden) return;
+      staleWhileHidden = false;
+      void afterSync();
+    };
+    document.addEventListener('visibilitychange', shown);
+    return () => document.removeEventListener('visibilitychange', shown);
+  });
+
   $effect(() => {
     const un = listen('sync-finished', async () => {
+      if (document.hidden) { staleWhileHidden = true; return; }
+      await afterSync();
+    });
+    return () => { un.then((f) => f()); };
+  });
+
+  /** What a finished sync owes the window: everything it may have changed. */
+  async function afterSync() {
+    {
       await refreshStatus();
       await refreshInvites();
       // A sync can also change *which* calendars exist: a CalDAV account
@@ -1300,9 +1324,8 @@
       // the server — and the grid and the sidebar would otherwise keep
       // showing the list as it was when the window opened.
       await reloadTasks();
-    });
-    return () => { un.then((f) => f()); };
-  });
+    }
+  }
 
   async function handleSignIn() {
     if (busy || signingIn) return;
