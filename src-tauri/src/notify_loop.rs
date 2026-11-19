@@ -219,13 +219,17 @@ pub(crate) fn may_notify(demo: bool, enabled: bool) -> bool {
 ///
 /// Recording follows posting, never precedes it. A crash in between re-posts
 /// one reminder on the next pass; the other order silently swallows it forever.
-pub(crate) async fn run_once(
+///
+/// `snoozes` is the queue of reminders the user snoozed (`snooze.rs`): the
+/// app's own from the loop, a fresh one from each test that needs one.
+pub(crate) async fn run_once_with(
     pool: &SqlitePool,
     demo: bool,
     now_ms: i64,
     horizon_ms: i64,
     tz: &str,
     notifier: &dyn crate::notify::Notifier,
+    snoozes: &crate::snooze::SnoozeQueue,
 ) -> anyhow::Result<Pass> {
     // Before any I/O, and the only place this is enforced. Guarding at `spawn`
     // instead would keep the loop from starting, which sounds stronger and is
@@ -243,7 +247,7 @@ pub(crate) async fn run_once(
 
     let mut pass = Pass::default();
     if may_notify(demo, settings.notifications_enabled) {
-        run_events(pool, now_ms, horizon_ms, tz, notifier, &settings, &mut pass).await?;
+        run_events(pool, now_ms, horizon_ms, tz, notifier, &settings, snoozes, &mut pass).await?;
     }
     if may_notify(demo, settings.task_notifications_enabled) {
         run_tasks(pool, now_ms, horizon_ms, tz, notifier, &settings, &mut pass).await?;
@@ -251,8 +255,24 @@ pub(crate) async fn run_once(
     Ok(pass)
 }
 
+/// [`run_once_with`] with nothing snoozed, for the tests whose subject is
+/// the ordinary pass.
+#[cfg(test)]
+pub(crate) async fn run_once(
+    pool: &SqlitePool,
+    demo: bool,
+    now_ms: i64,
+    horizon_ms: i64,
+    tz: &str,
+    notifier: &dyn crate::notify::Notifier,
+) -> anyhow::Result<Pass> {
+    run_once_with(pool, demo, now_ms, horizon_ms, tz, notifier, &crate::snooze::SnoozeQueue::default()).await
+}
+
 /// The event half of a pass, split out when tasks became the second half
-/// (#137). Its rules are unchanged, and are `due_reminders`'.
+/// (#137). Its rules are unchanged, and are `due_reminders`'; a snooze that
+/// has fallen due is posted again through them too.
+#[allow(clippy::too_many_arguments)]
 async fn run_events(
     pool: &SqlitePool,
     now_ms: i64,
@@ -260,6 +280,7 @@ async fn run_events(
     tz: &str,
     notifier: &dyn crate::notify::Notifier,
     settings: &crate::settings::AppSettings,
+    snoozes: &crate::snooze::SnoozeQueue,
     pass: &mut Pass,
 ) -> anyhow::Result<()> {
     // Popup by construction (fallback spec §3): the setting stores minutes
@@ -315,6 +336,27 @@ async fn run_events(
         .await?;
 
         pass.posted.push(d);
+    }
+
+    // Snoozed reminders whose five minutes are up, derived again from the
+    // calendar as it is now, so the rules above still apply: an event gone,
+    // declined, hidden or over since the click simply finds no match. With an
+    // empty fired set, because each of these was recorded when it first
+    // fired, and posting it again is the point. Nothing is recorded: that
+    // first record still holds.
+    let snoozed = snoozes.take_due(now_ms);
+    if !snoozed.is_empty() {
+        let again = due_reminders(&events, &Default::default(), now_ms, horizon_ms, &fallback);
+        for d in again.iter().filter(|d| snoozed.contains(&d.key) && d.fire_at_ms <= now_ms) {
+            let mut note = crate::notify::notification_for_format(d, tz, settings.time_format);
+            note.sticky = settings.keep_reminders_on_screen;
+            if let Err(e) = notifier.post(&note) {
+                tracing::warn!(%e, event_id = d.key.event_id, "could not post a snoozed reminder");
+            }
+        }
+    }
+    if let Some(at) = snoozes.next_at() {
+        pass.next_fire_ms = Some(pass.next_fire_ms.map_or(at, |n: i64| n.min(at)));
     }
 
     pass.pruned = omacal_store::prune_fired(pool, now_ms).await?;
@@ -409,7 +451,7 @@ pub(crate) fn spawn(app: tauri::AppHandle, notifier: std::sync::Arc<dyn crate::n
             let now = crate::now_ms();
             let tz = crate::display_tz(&pool);
             let next_fire =
-                match run_once(&pool, demo, now, HORIZON_MS, &tz, notifier.as_ref()).await {
+                match run_once_with(&pool, demo, now, HORIZON_MS, &tz, notifier.as_ref(), crate::snooze::queue()).await {
                 Ok(pass) => pass.next_fire_ms,
                 Err(e) => {
                     // Offline, a locked database, a malformed rule — all normal
@@ -419,8 +461,21 @@ pub(crate) fn spawn(app: tauri::AppHandle, notifier: std::sync::Arc<dyn crate::n
                 }
             };
 
-            let delay = next_wake_ms(next_fire, crate::now_ms(), interval);
-            tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+            let mut delay = next_wake_ms(next_fire, crate::now_ms(), interval);
+            // A snooze's deadline is wall-clock; this sleep is not, and on
+            // macOS it stops while the machine does. Short naps while one
+            // waits keep a snooze from running late by however long the lid
+            // was shut. See `snooze.rs`.
+            let snoozes = crate::snooze::queue();
+            if snoozes.next_at().is_some() {
+                delay = delay.min(crate::snooze::MAX_SLEEP_WHILE_SNOOZED_MS);
+            }
+            // And a click wakes the loop, which may be sleeping towards a
+            // sync minutes away.
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(delay as u64)) => {}
+                _ = snoozes.woken() => {}
+            }
         }
     });
 }
@@ -516,6 +571,66 @@ mod tests {
     /// reminders came out.
     async fn pass_at(pool: &SqlitePool, now_ms: i64) -> (Pass, Vec<(i64, i64)>) {
         pass_with(pool, now_ms, &crate::notify::RecordingNotifier::default()).await
+    }
+
+    /// A snoozed reminder comes back five minutes after the click, and not a
+    /// moment sooner, without a second record: the one written when it first
+    /// fired still stops the ordinary pass from posting it.
+    #[tokio::test]
+    async fn a_snoozed_reminder_is_posted_again_five_minutes_later() {
+        let pool = seeded("UTC", "[]").await;
+        omacal_store::upsert_event(&pool, &event("e1", T0900Z, T0900Z + HOUR, own(10)))
+            .await.unwrap();
+        let snoozes = crate::snooze::SnoozeQueue::default();
+        let fake = crate::notify::RecordingNotifier::default();
+        let fired_at = T0900Z - 10 * MINUTE;
+
+        run_once_with(&pool, false, fired_at, HORIZON_MS, SOFIA, &fake, &snoozes).await.unwrap();
+        assert_eq!(fake.posted().len(), 1, "the reminder itself");
+        snoozes.snooze(FiredKey { event_id: 1, occurrence_ms: T0900Z, minutes: 10 }, fired_at);
+
+        let early = run_once_with(&pool, false, fired_at + 5 * MINUTE - 1, HORIZON_MS, SOFIA, &fake, &snoozes)
+            .await.unwrap();
+        assert_eq!(fake.posted().len(), 1, "not before the five minutes are up");
+        assert_eq!(early.next_fire_ms, Some(fired_at + 5 * MINUTE), "the loop wakes for it");
+
+        run_once_with(&pool, false, fired_at + 5 * MINUTE, HORIZON_MS, SOFIA, &fake, &snoozes)
+            .await.unwrap();
+        let posted = fake.posted();
+        assert_eq!(posted.len(), 2, "posted again");
+        assert_eq!(posted[1].title, "Standup");
+        assert_eq!(posted[1].body, posted[0].body, "the same reminder, saying the same thing");
+
+        run_once_with(&pool, false, fired_at + 6 * MINUTE, HORIZON_MS, SOFIA, &fake, &snoozes)
+            .await.unwrap();
+        assert_eq!(fake.posted().len(), 2, "once, not on every pass after");
+        assert_eq!(omacal_store::fired_keys(&pool).await.unwrap(), vec![(1, T0900Z, 10)], "one record");
+    }
+
+    /// The snooze re-reads the calendar before it speaks. An event deleted in
+    /// the five minutes posts nothing, and neither does a reminder snoozed
+    /// past the end of its meeting.
+    #[tokio::test]
+    async fn a_snooze_whose_event_is_gone_or_over_posts_nothing() {
+        let pool = seeded("UTC", "[]").await;
+        omacal_store::upsert_event(&pool, &event("gone", T0900Z, T0900Z + HOUR, own(10)))
+            .await.unwrap();
+        omacal_store::upsert_event(&pool, &event("short", T0900Z, T0900Z + 3 * MINUTE, own(1)))
+            .await.unwrap();
+        let snoozes = crate::snooze::SnoozeQueue::default();
+        let fake = crate::notify::RecordingNotifier::default();
+        let now = T0900Z - MINUTE;
+        snoozes.snooze(FiredKey { event_id: 1, occurrence_ms: T0900Z, minutes: 10 }, now);
+        snoozes.snooze(FiredKey { event_id: 2, occurrence_ms: T0900Z, minutes: 1 }, now);
+        sqlx::query("DELETE FROM events WHERE google_id = 'gone'").execute(&pool).await.unwrap();
+        // Recorded as fired, the way they would be by the time anyone snoozed.
+        omacal_store::record_fired(&pool, 2, T0900Z, 1, T0900Z + 3 * MINUTE, now).await.unwrap();
+
+        let before = fake.posted().len();
+        run_once_with(&pool, false, now + 5 * MINUTE, HORIZON_MS, SOFIA, &fake, &snoozes).await.unwrap();
+
+        assert_eq!(fake.posted().len(), before, "nothing posted");
+        assert_eq!(snoozes.next_at(), None, "and nothing left waiting");
     }
 
     #[tokio::test]
