@@ -138,6 +138,16 @@ fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, 
 
 /// One occurrence's identity, rendered the way the resource's own DTSTART is
 /// — a bare date for all-day series, the master's zone otherwise.
+/// The instant that names one occurrence of a series: where the series put
+/// it, not where it sits now. For an occurrence that was moved on its own
+/// the two differ, and only the first matches its exception's
+/// `RECURRENCE-ID` — rendering the second would address a slot the series
+/// never had, so an edit would add a second exception and a delete would
+/// exclude the wrong slot and leave the moved occurrence on screen.
+fn occurrence_identity(viewed: &StoredEvent, occurrence_start_ms: i64) -> i64 {
+    viewed.original_start_utc.unwrap_or(occurrence_start_ms)
+}
+
 fn occurrence_time(master: &StoredEvent, occurrence_start_ms: i64) -> anyhow::Result<WriteTime> {
     let ts = jiff::Timestamp::from_millisecond(occurrence_start_ms)?;
     if master.is_all_day {
@@ -493,7 +503,8 @@ pub(crate) async fn update(
             (truncated, Some((new_href, ics)), new_uid)
         } else {
             // Scope "this": one occurrence becomes (or updates) an exception.
-            let rid = occurrence_time(&master, occurrence_start_ms)?;
+            let rid_ms = occurrence_identity(&viewed, occurrence_start_ms);
+            let rid = occurrence_time(&master, rid_ms)?;
             let ev = EventWrite {
                 uid: uid.clone(),
                 summary: fields.summary,
@@ -514,7 +525,7 @@ pub(crate) async fn update(
             };
             let out = omacal_caldav::upsert_exception(&raw, &ev, now)
                 .ok_or_else(|| anyhow::anyhow!("could not write the occurrence's exception"))?;
-            (out, None, format!("{uid}#{occurrence_start_ms}"))
+            (out, None, format!("{uid}#{rid_ms}"))
         };
 
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
@@ -584,7 +595,7 @@ pub(crate) async fn respond(
     let (new_raw, detail_uid) = if !is_series || scope == "all" {
         (omacal_caldav::respond_all(&raw, &uid, self_email, partstat), uid.clone())
     } else {
-        let rid_ms = viewed.original_start_utc.unwrap_or(occurrence_start_ms);
+        let rid_ms = occurrence_identity(&viewed, occurrence_start_ms);
         let rid = occurrence_time(&master, rid_ms)?;
         // The viewed row's own span: for a materialised exception the end is
         // unused (its block is answered in place), and for a bare occurrence
@@ -717,7 +728,7 @@ pub(crate) async fn delete(
             client.put(&href, &truncated, master.etag.as_deref()).await.map_err(friendly)?;
         }
     } else {
-        let occurrence = occurrence_time(&master, occurrence_start_ms)?;
+        let occurrence = occurrence_time(&master, occurrence_identity(&viewed, occurrence_start_ms))?;
         let excluded = omacal_caldav::exclude_occurrence(&raw, &uid, &occurrence)
             .ok_or_else(|| anyhow::anyhow!("could not remove the occurrence"))?;
         client.put(&href, &excluded, master.etag.as_deref()).await.map_err(friendly)?;
@@ -931,5 +942,182 @@ mod tests {
         assert_eq!(e, WriteTime::Date(jiff::civil::date(2026, 8, 21)));
         // Midnight Sofia = 21:00Z the day before.
         assert_eq!(ms % 86_400_000, 75_600_000);
+    }
+
+    /// The write path driven end to end against a wiremock CalDAV server:
+    /// rows seeded from a real resource the way a sync stores them, the
+    /// public `update`/`delete` called the way the commands call them, and
+    /// the bytes that reach the server read back off the mock.
+    mod against_a_server {
+        use super::super::*;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// A weekly 10:00 standup in Sofia, its 9 November occurrence moved
+        /// to Tuesday 10 November. The move crosses a day, so the moved start
+        /// and the original slot cannot render to the same RECURRENCE-ID.
+        const MOVED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n\
+            BEGIN:VEVENT\r\nUID:series-1\r\nDTSTAMP:20261101T000000Z\r\n\
+            DTSTART;TZID=Europe/Sofia:20261102T100000\r\nDTEND;TZID=Europe/Sofia:20261102T110000\r\n\
+            RRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:series-1\r\nDTSTAMP:20261101T000000Z\r\n\
+            RECURRENCE-ID;TZID=Europe/Sofia:20261109T100000\r\n\
+            DTSTART;TZID=Europe/Sofia:20261110T100000\r\nDTEND;TZID=Europe/Sofia:20261110T110000\r\n\
+            SUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        pub(super) fn ms(s: &str) -> i64 {
+            s.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+        }
+
+        /// A pool holding one CalDAV account on `server`, one writable
+        /// collection, and `raw` stored as that collection's resource.
+        /// Returns the state and the row id of every component, keyed by the
+        /// store's google_id (`series-1`, `series-1#<orig ms>`).
+        pub(super) async fn seeded(
+            server: &MockServer,
+            email: &str,
+            raw: &str,
+        ) -> (AppState, std::collections::HashMap<String, i64>) {
+            crate::caldav_account::test_passwords::set(email, "p");
+            let pool = omacal_store::connect_memory().await.unwrap();
+            let account: i64 = sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+                 VALUES (?1, ?2, 0, 'caldav', ?3, ?2) RETURNING id",
+            )
+            .bind(format!("caldav:{email}"))
+            .bind(email)
+            .bind(server.uri())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let calendar: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (?1, ?2, 'Work', 'Europe/Sofia', 'owner') RETURNING id",
+            )
+            .bind(account)
+            .bind(format!("{}/cal/", server.uri()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let href = format!("{}/cal/series-1.ics", server.uri());
+            let root = omacal_caldav::parse(raw).unwrap();
+            let mut ids = std::collections::HashMap::new();
+            for ev in omacal_caldav::events_in(&root) {
+                let row = omacal_sync::caldav::caldav_to_stored(&ev, calendar, "Europe/Sofia", Some("\"v1\""), email)
+                    .unwrap();
+                let id = omacal_store::upsert_event(&pool, &row).await.unwrap();
+                sqlx::query("UPDATE events SET caldav_href = ?1, raw_ics = ?2 WHERE id = ?3")
+                    .bind(&href)
+                    .bind(raw)
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                ids.insert(row.google_id.clone(), id);
+            }
+            let state = AppState {
+                pool,
+                demo: false,
+                tokens: Default::default(),
+                reauth: Default::default(),
+                update: Default::default(),
+                update_checked_at: Default::default(),
+                system_tz_change: Default::default(),
+                quit_on_close: Default::default(),
+                open_date: Default::default(),
+            };
+            (state, ids)
+        }
+
+        /// Every PUT body the server received, in order.
+        pub(super) async fn puts(server: &MockServer) -> Vec<String> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.method.as_str() == "PUT")
+                .map(|r| String::from_utf8(r.body).unwrap())
+                .collect()
+        }
+
+        pub(super) async fn accepting(server: &MockServer) {
+            Mock::given(method("PUT"))
+                .respond_with(ResponseTemplate::new(204).insert_header("ETag", "\"v2\""))
+                .mount(server)
+                .await;
+        }
+
+        fn retitled(start_ms: i64, end_ms: i64) -> EventFields {
+            EventFields {
+                summary: Some("Standup (moved)".into()),
+                location: None,
+                description: None,
+                when: When::Timed { start_ms, end_ms },
+                tz: "Europe/Sofia".into(),
+                recurrence: None,
+                guests: None,
+                reminders: None,
+                conference: None,
+                transparency: None,
+                visibility: None,
+            }
+        }
+
+        fn lines_starting<'a>(ics: &'a str, prefix: &str) -> Vec<&'a str> {
+            ics.lines().map(str::trim_end).filter(|l| l.starts_with(prefix)).collect()
+        }
+
+        /// Editing an occurrence that was already moved rewrites *its*
+        /// exception, named by the slot it was moved from. Naming it by where
+        /// it sits now would add a second exception for a slot the series
+        /// never had, and the occurrence would show twice.
+        #[tokio::test]
+        async fn editing_a_moved_occurrence_rewrites_its_own_exception() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "edit-moved@x.test", MOVED).await;
+            let original = ms("2026-11-09T08:00:00Z");
+            let exception = ids[&format!("series-1#{original}")];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            let _ = update(&state, exception, "this", moved, retitled(moved, moved + 3_600_000)).await;
+
+            let sent = puts(&server).await;
+            assert_eq!(sent.len(), 1, "one resource rewritten: {sent:?}");
+            assert_eq!(
+                lines_starting(&sent[0], "RECURRENCE-ID"),
+                vec!["RECURRENCE-ID;TZID=Europe/Sofia:20261109T100000"],
+                "one exception, still named by its original slot:\n{}",
+                sent[0]
+            );
+            assert!(sent[0].contains("SUMMARY:Standup (moved)"), "and it carries the edit:\n{}", sent[0]);
+        }
+
+        /// Deleting an occurrence that was already moved excludes the slot it
+        /// was moved from and takes its exception with it. Excluding where it
+        /// sits now would leave the exception standing, and the occurrence on
+        /// screen.
+        #[tokio::test]
+        async fn deleting_a_moved_occurrence_removes_its_exception() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "delete-moved@x.test", MOVED).await;
+            let original = ms("2026-11-09T08:00:00Z");
+            let exception = ids[&format!("series-1#{original}")];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            let _ = delete(&state, exception, "this", moved).await;
+
+            let sent = puts(&server).await;
+            assert_eq!(sent.len(), 1, "one resource rewritten: {sent:?}");
+            assert!(lines_starting(&sent[0], "RECURRENCE-ID").is_empty(), "the exception is gone:\n{}", sent[0]);
+            assert_eq!(
+                lines_starting(&sent[0], "EXDATE"),
+                vec!["EXDATE;TZID=Europe/Sofia:20261109T100000"],
+                "and its original slot is excluded:\n{}",
+                sent[0]
+            );
+        }
     }
 }

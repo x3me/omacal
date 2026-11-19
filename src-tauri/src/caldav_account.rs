@@ -33,7 +33,36 @@ fn store_password(email: &str, password: &str) -> anyhow::Result<()> {
 }
 
 fn password_for(email: &str) -> anyhow::Result<String> {
+    #[cfg(test)]
+    if let Some(p) = test_passwords::get(email) {
+        return Ok(p);
+    }
     Ok(keyring::Entry::new(crate::KEYRING_SERVICE, &keyring_key(email))?.get_password()?)
+}
+
+/// Passwords a test hands the write path in place of the OS keychain, so a
+/// CalDAV write can be driven end to end against a wiremock — through
+/// `client_for_calendar` and the post-write resync, the call shape the app
+/// actually makes — without touching the developer's real keychain. Keyed
+/// by account address; each test uses its own, so parallel tests cannot
+/// see each other's entries.
+#[cfg(test)]
+pub(crate) mod test_passwords {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn map() -> &'static Mutex<HashMap<String, String>> {
+        static MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        MAP.get_or_init(Default::default)
+    }
+
+    pub(crate) fn set(email: &str, password: &str) {
+        map().lock().unwrap().insert(email.to_string(), password.to_string());
+    }
+
+    pub(super) fn get(email: &str) -> Option<String> {
+        map().lock().unwrap().get(email).cloned()
+    }
 }
 
 /// What `connect_caldav` needs to know about the kind of server it is
