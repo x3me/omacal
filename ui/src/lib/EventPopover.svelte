@@ -5,7 +5,7 @@
   import { meetingUrl } from './location';
   import type { EventCopy } from './api';
   import { calendarInk, type Calendar } from './calendars';
-  import { exportEvent, openConference } from './api';
+  import { exportEvent, openConference, openLink } from './api';
   import { clockFormat } from './clock.svelte';
   import { formatClock } from './timefmt';
   import { onMount, tick } from 'svelte';
@@ -585,7 +585,8 @@
            carry an anchor with words in it. -->
       <p>{#each segments as s}{#if s.kind === 'link'}<a
               href={s.href} target="_blank" rel="noopener noreferrer"
-              data-copy-label="link" data-copy-value={s.href}>{s.value}</a
+              data-copy-label="link" data-copy-value={s.href}
+              onclick={(e) => { e.preventDefault(); void openLink(s.href).catch(() => {}); }}>{s.value}</a
           >{:else}{s.value}{/if}{/each}</p>
     </div>
   {/if}

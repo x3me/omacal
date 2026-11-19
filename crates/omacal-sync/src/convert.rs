@@ -88,6 +88,12 @@ fn conference_join_uri(ev: &Event) -> Option<String> {
         .iter()
         .find(|p| p.get("entryPointType").and_then(|t| t.as_str()) == Some("video"))
         .and_then(|p| p.get("uri")?.as_str())
+        // A web link, or no Join button at all: this URI is handed to the
+        // system opener, and the event's author chose it.
+        .filter(|u| {
+            let u = u.trim().to_ascii_lowercase();
+            u.starts_with("https://") || u.starts_with("http://")
+        })
         .map(str::to_string)
 }
 
@@ -431,6 +437,22 @@ mod tests {
         }));
         let s = to_stored(&ev, 1, "Europe/Sofia").unwrap();
         assert!(s.conference_uri.is_none());
+    }
+
+    /// A video entry point is only a Join button when it is a web link: the
+    /// button hands its URI to the system opener, and `file:`, `smb:` or an
+    /// app's custom scheme there would run whatever the event's author chose.
+    #[test]
+    fn a_video_entry_point_that_is_not_a_web_link_is_no_join_button() {
+        for uri in ["file:///Applications/Calculator.app", "smb://host/share", "zoommtg://zoom.us/join?confno=1"] {
+            let mut ev = timed("2026-08-03T09:00:00+03:00", "2026-08-03T09:30:00+03:00");
+            ev.hangout_link = None;
+            ev.conference_data = Some(serde_json::json!({
+                "entryPoints": [{ "entryPointType": "video", "uri": uri }]
+            }));
+            let s = to_stored(&ev, 1, "Europe/Sofia").unwrap();
+            assert!(s.conference_uri.is_none(), "{uri}");
+        }
     }
 
     #[test]

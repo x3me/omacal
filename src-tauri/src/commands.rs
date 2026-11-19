@@ -916,6 +916,19 @@ pub fn assemble_big_year_combining(
     BigYearPayload { year, rows, lane_cap: GRID_LANE_CAP }
 }
 
+/// Opens a link the user clicked in an event's description or form, through
+/// [`crate::browser::open_external`]: the same path as Join, so the
+/// AppImage's environment is scrubbed from the browser it starts (issue #1),
+/// and only a web link is opened at all. The webview used to open these
+/// itself, through the opener plugin's raw spawn, which skipped both.
+#[tauri::command]
+pub(crate) fn open_link(url: String) -> Result<(), String> {
+    crate::browser::open_external(&url).map_err(|e| {
+        tracing::warn!(%e, "could not open a link");
+        crate::BROWSER_FAILED.to_string()
+    })
+}
+
 /// Opens an event's meeting link with its preferred application — the Join
 /// control, moved backend-side.
 ///

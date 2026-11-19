@@ -1526,7 +1526,12 @@ pub fn run() {
         // `--quit`, which is how a surface outside this process (the Omarchy
         // bar widget) drives the app. See `tray::instance_action`.
         .plugin(single_instance_plugin())
-        .plugin(tauri_plugin_opener::init())
+        // No opener plugin. Every link the webview shows is opened by a
+        // backend command (`open_link`, `open_conference`, the About links)
+        // through `browser::open_external`, which opens web links only and
+        // scrubs the AppImage environment. The plugin's own spawn skipped
+        // both, and its default capability let the webview open any
+        // `http`, `mailto` or `tel` link it liked.
         // Only Rust calls it — the export's save dialog (#113) — so no
         // capability is granted to the webview and the frontend cannot
         // open a chooser of its own.
@@ -1894,6 +1899,7 @@ pub fn run() {
             update::open_latest_release,
             update::install_update,
             commands::open_conference,
+            commands::open_link,
             weather::get_weather,
             weather::set_weather_location,
             tasks::update_task,

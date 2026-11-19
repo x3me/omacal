@@ -20,7 +20,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 # One-click update, offered only when the process is an AppImage (update.rs):
 # the one channel where the running binary is a single user-writable file.

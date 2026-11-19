@@ -1038,6 +1038,7 @@ export function installTauriStub(scenario: string): Harness {
       // URL from its own store by id and spawns sanitized. The test's fact
       // is the call and its id, in `harness.calls`.
       case 'open_conference':
+      case 'open_link':
         return null;
       // The export's file chooser is the platform's, so a spec can only ever
       // assert the call and what the popover does with the answer. Both
