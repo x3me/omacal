@@ -244,16 +244,15 @@ fn take_open_date(state: tauri::State<'_, AppState>) -> Option<String> {
     state.open_date.lock().expect("open date poisoned").take()
 }
 
-/// The display zone: the user's setting if present, otherwise the system zone.
-/// Every day boundary in the week grid is computed against this.
+/// The display zone: every day boundary in the week grid is computed
+/// against this. The zone frozen at launch ([`effective_timezone`]), the
+/// same one every label and every written `TZID` come from. It used to read
+/// the system zone live, so after the machine's zone changed the grid's
+/// days moved to the new zone (within jiff's five-minute cache) while the
+/// labels, the writes and the webview's own clock stayed in the old one.
 fn display_tz(pool: &SqlitePool) -> String {
-    // `settings` is read on the sync task's runtime elsewhere; here we only
-    // need a cheap default, so fall back to the system zone.
     let _ = pool;
-    jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string()
+    effective_timezone()
 }
 
 /// `pad` on every day-grid command (2026-09-03): that many days either side
@@ -1385,7 +1384,7 @@ fn system_zone_name() -> String {
 /// survived (caught in the very first field test, 2026-08-19). Clearing must
 /// undo our export and only ours; a `TZ` the user launched us under is
 /// theirs to keep.
-const TZ_MARKER: &str = "OMACAL_SET_TZ";
+pub(crate) const TZ_MARKER: &str = "OMACAL_SET_TZ";
 
 #[derive(Debug, PartialEq)]
 enum TzAction {

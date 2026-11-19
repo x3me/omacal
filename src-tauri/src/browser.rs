@@ -197,6 +197,20 @@ pub(crate) fn is_zoom_host(host: &str) -> bool {
 /// The same launcher list and first-success-wins loop as `open::that`, which
 /// this replaces at every call site; the additions are [`sanitize`] and
 /// [`launch`]'s bounded wait.
+/// Keeps OmaCal's own display zone out of a browser it starts.
+///
+/// Choosing a display time zone in Settings exports `TZ` and restarts, so
+/// every process this one starts inherits it, and a browser opened from a
+/// Join button ran every page in the zone the user picked for their
+/// calendar. Removed only when the marker says OmaCal set it: a `TZ` the
+/// user launched OmaCal under is theirs and passes through.
+fn drop_own_tz(cmd: &mut Command, set_by_us: bool) {
+    if set_by_us {
+        cmd.env_remove("TZ");
+        cmd.env_remove(crate::TZ_MARKER);
+    }
+}
+
 fn open_one(url: &str) -> std::io::Result<()> {
     let appdir = std::env::var_os("APPDIR");
     let mut last_err = None;
@@ -204,6 +218,7 @@ fn open_one(url: &str) -> std::io::Result<()> {
         if let Some(dir) = appdir.as_deref() {
             sanitize(&mut cmd, dir);
         }
+        drop_own_tz(&mut cmd, std::env::var_os(crate::TZ_MARKER).is_some());
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         match launch(&mut cmd) {
             Ok(()) => return Ok(()),
@@ -281,6 +296,24 @@ fn open_external_with(url: &str, open: &dyn Fn(&str) -> std::io::Result<()>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser started from here does not inherit the display zone OmaCal
+    /// exported for itself (Settings → display time zone sets `TZ` and
+    /// restarts). Every page in that browser would otherwise run in the
+    /// zone the user picked for their calendar. A `TZ` the user launched
+    /// OmaCal under is theirs and passes through: only ours, which the
+    /// marker says we set, is removed.
+    #[test]
+    fn our_own_tz_is_not_handed_to_a_browser_and_the_users_is() {
+        let removed = |set_by_us: bool| {
+            let mut cmd = Command::new("true");
+            drop_own_tz(&mut cmd, set_by_us);
+            cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_owned()).collect::<Vec<_>>()
+        };
+        let ours = removed(true);
+        assert!(ours.iter().any(|k| k == "TZ") && ours.iter().any(|k| k == crate::TZ_MARKER), "{ours:?}");
+        assert!(removed(false).is_empty(), "the user's own TZ is kept");
+    }
 
     /// Only a web link leaves the app. Every link a user can click (a Join
     /// button, a link in a description, the form's "Open") ends here, and
