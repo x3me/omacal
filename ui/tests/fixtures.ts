@@ -399,8 +399,9 @@ const noop = () => {};
 // needing re-consent or a pending update is one fixture's story each, not
 // thirty fixtures' boilerplate.
 const header = (
-  status: Omit<AppStatus, 'needs_reauth' | 'update' | 'version' | 'system_tz_change' | 'self_update'> & {
+  status: Omit<AppStatus, 'needs_reauth' | 'caldav_reauth' | 'update' | 'version' | 'system_tz_change' | 'self_update'> & {
     needs_reauth?: string[];
+    caldav_reauth?: string[];
     update?: AppStatus['update'];
     version?: string;
     system_tz_change?: string | null;
@@ -412,7 +413,7 @@ const header = (
   // fail when the wiring breaks, not ride along on a hardcoded string that
   // happens to match the build.
   status: {
-    needs_reauth: [], update: null, version: '9.9.9', system_tz_change: null, self_update: false,
+    needs_reauth: [], caldav_reauth: [], update: null, version: '9.9.9', system_tz_change: null, self_update: false,
     ...status,
   } as AppStatus,
   anchorMs: MON, weekStartMs: MON, busy, error: null as string | null, calendars: [] as Calendar[],
@@ -2587,6 +2588,11 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // connected; its data is just going stale), also in `needs_reauth`.
     reauth: header({
       accounts: ['me@x.com'], needs_reauth: ['me@x.com'],
+      last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false,
+    }),
+    // A CalDAV account whose server stopped accepting the stored password.
+    caldavreauth: header({
+      accounts: ['me@icloud.com'], caldav_reauth: ['me@icloud.com'],
       last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false,
     }),
     demo: header({ accounts: [], last_sync_ms: null, demo: true, overlay_titlebar: false }),

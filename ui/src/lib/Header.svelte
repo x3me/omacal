@@ -1,6 +1,6 @@
 <!-- ui/src/lib/Header.svelte -->
 <script lang="ts">
-  import { reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
+  import { caldavReauthMessage, reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
   import { zoneName } from './zonename.svelte';
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
@@ -174,6 +174,12 @@
    *  them and re-consent is the only fix, so this is the one failure with a
    *  button on it. */
   const reauth = $derived(status?.needs_reauth ?? []);
+  /** CalDAV accounts whose server rejects the stored password. Their fix is
+   *  the password entered again under Settings → Accounts, so their banner
+   *  opens that pane rather than starting a Google sign-in. */
+  const caldavReauth = $derived(status?.caldav_reauth ?? []);
+  /** The pane Settings opens on: Accounts when a CalDAV banner opened it. */
+  let settingsTab = $state<'General' | 'Accounts'>('General');
   /** The newer release, if the backend's daily check found one. */
   const update = $derived(status?.update ?? null);
   /** Dismissal is session-local on purpose: the notice returns on the next
@@ -229,7 +235,7 @@
   const light = $derived(
     syncLight(
       {
-        connected, busy: busy || syncing, error, reauth: reauth.length > 0,
+        connected, busy: busy || syncing, error, reauth: reauth.length + caldavReauth.length > 0,
         lastSyncMs: status?.last_sync_ms ?? null,
       },
       now,
@@ -245,6 +251,7 @@
 
   function openSettings() {
     menuOpen = false;
+    settingsTab = 'General';
     settingsOpen = true;
   }
 
@@ -491,6 +498,7 @@
     {oncalendarchange}
     {onappearancechange}
     {onsettingschange}
+    initialTab={settingsTab}
     onSignIn={() => {
       settingsOpen = false;
       onSignIn();
@@ -527,6 +535,16 @@
     <span>{reauthMessage(reauth)}</span>
     <button class="primary" onclick={onSignIn} disabled={busy}>
       {busy ? 'Connecting…' : 'Reconnect'}
+    </button>
+  </p>
+{/if}
+<!-- Its CalDAV twin. Same rules, a different fix: the server's password,
+     entered again where the account was connected. -->
+{#if caldavReauth.length > 0 && !status?.demo}
+  <p class="err reauth" data-testid="caldav-reauth-banner">
+    <span>{caldavReauthMessage(caldavReauth)}</span>
+    <button class="primary" onclick={() => { settingsTab = 'Accounts'; menuOpen = false; settingsOpen = true; }}>
+      Reconnect
     </button>
   </p>
 {/if}

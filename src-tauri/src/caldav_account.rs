@@ -24,7 +24,19 @@ use crate::AppState;
 /// The keyring key for a CalDAV secret. Prefixed so the same address used
 /// as both a Google account and an Apple ID cannot collide on one entry.
 fn keyring_key(email: &str) -> String {
-    format!("caldav:{email}")
+    format!("{REAUTH_PREFIX}{email}")
+}
+
+/// What marks a CalDAV account in `AppState::reauth`, beside Google's bare
+/// addresses. The same prefix as the keyring's, for the same reason: one
+/// address can be both a Google account and a CalDAV one, and a dead
+/// password on one must neither stop the other syncing nor send the user to
+/// the wrong fix.
+pub(crate) const REAUTH_PREFIX: &str = "caldav:";
+
+/// The account's mark in `AppState::reauth`.
+pub(crate) fn reauth_key(email: &str) -> String {
+    keyring_key(email)
 }
 
 fn store_password(email: &str, password: &str) -> anyhow::Result<()> {
@@ -142,7 +154,7 @@ pub async fn connect_caldav(
 
     // A reconnect clears the account's dead-credential mark, same as the
     // Google path.
-    state.reauth.lock().expect("reauth mark poisoned").remove(&email);
+    state.reauth.lock().expect("reauth mark poisoned").remove(&reauth_key(&email));
     Ok(email)
 }
 

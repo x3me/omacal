@@ -1124,7 +1124,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
     for (account_id, email, _, server_url, username) in
         all.iter().filter(|(_, _, p, _, _)| p == "caldav")
     {
-        if marked.contains(email) {
+        if marked.contains(&caldav_account::reauth_key(email)) {
             continue; // dead credentials; the banner is already up
         }
         let client =
@@ -1143,7 +1143,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
             Err(e) if e.needs_reauth() => {
                 tracing::warn!(account = %email,
                     "the CalDAV password was rejected; the account needs to be reconnected");
-                dead.push(email.clone());
+                dead.push(caldav_account::reauth_key(email));
             }
             Err(e) => {
                 tracing::warn!(account = %email, %e, "CalDAV sync failed");
@@ -1966,6 +1966,35 @@ mod tests {
         drop(running);
         let _ = second.await.unwrap();
         assert!(!server.received_requests().await.unwrap().is_empty(), "and ran once its turn came");
+    }
+
+    /// A CalDAV password the server rejects is marked under the CalDAV key,
+    /// never the bare address: the same address may be a Google account too
+    /// (an Apple ID that is a Gmail address), and a bare mark would stop that
+    /// account syncing and tell the user to sign in with Google.
+    #[tokio::test]
+    async fn a_rejected_caldav_password_marks_the_caldav_account_alone() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(401)).mount(&server).await;
+        crate::caldav_account::test_passwords::set("both@x.test", "p");
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+             VALUES ('caldav:both@x.test', 'both@x.test', 0, 'caldav', ?1, 'both@x.test')",
+        )
+        .bind(server.uri())
+        .execute(&pool).await.unwrap();
+        let state = AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+        };
+
+        let _ = sync_all(&state).await;
+
+        let marked = state.reauth.lock().unwrap().clone();
+        assert_eq!(marked, std::collections::BTreeSet::from(["caldav:both@x.test".to_string()]));
     }
 
     /// **Not a test: the website's screenshot source.** Seeds the demo data
