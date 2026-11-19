@@ -5391,6 +5391,24 @@ test.describe('EventForm', () => {
     await expect(page.getByRole('button', { name: 'Save without notifying' })).toBeVisible();
   });
 
+  /** A new event with guests is an invitation: telling them is what
+   *  creating it is for, so notifying is the primary choice there (Plamen,
+   *  2026-11-19), as Quick Add's direct create already does. An edit keeps
+   *  "without notifying" primary: mailing everyone about a typo fix is the
+   *  outcome that choice exists to prevent. */
+  test('notifying is primary on a create, and not on an edit', async ({ page }) => {
+    await open(page, 'create-guests');
+    await addGuest(page, 'ana@x.com');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Create and notify guests' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Create without notifying' })).not.toHaveClass(/\bprimary\b/);
+
+    await open(page, 'with-guests');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Save without notifying' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Save and notify guests' })).not.toHaveClass(/\bprimary\b/);
+  });
+
   test('an address typed in is added, and reaches the save', async ({ page }) => {
     await open(page, 'with-guests');
     await addGuest(page, 'dan@x.com');
