@@ -126,7 +126,7 @@ pub fn spawn(app: AppHandle) {
             let now = crate::now_ms();
             let last = crate::status::last_sync_ms(&pool).await.ok().flatten();
 
-            if !should_sync(demo, last, now, interval_ms(&pool).await) {
+            if !should_sync(demo, last, now, interval_ms(&pool).await) || crate::sync_turn().try_lock().is_err() {
                 continue;
             }
 
@@ -152,7 +152,8 @@ pub fn request_now(app: &AppHandle) {
         }
 
         let last = crate::status::last_sync_ms(&pool).await.ok().flatten();
-        if !focus_should_sync(demo, last, crate::now_ms()) {
+        // A sync already running answers what this one would ask.
+        if !focus_should_sync(demo, last, crate::now_ms()) || crate::sync_turn().try_lock().is_err() {
             return;
         }
 

@@ -1047,12 +1047,27 @@ pub(crate) fn synced_window(now_ms: i64) -> (i64, i64) {
     (now_ms - 180 * DAY, now_ms + 365 * DAY)
 }
 
+/// The lock [`sync_all`] holds for its whole run. The background paths
+/// (`sync_loop`) check it first and skip rather than queue, because a sync
+/// already running answers what they would have asked.
+pub(crate) fn sync_turn() -> &'static tokio::sync::Mutex<()> {
+    static TURN: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    TURN.get_or_init(Default::default)
+}
+
 /// Refreshes the access token and syncs every calendar of every account.
 ///
 /// Pure sync work, with no demo check and no status bookkeeping of its own —
 /// shared by the `sync_now` command and the background loop (Task 4), each of
 /// which handles the demo gate and `record_sync` itself.
 pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
+    // One sync at a time. Three callers can start one (the ticker, a window
+    // focus, the sync command) and nothing else stopped them overlapping, so
+    // two passes over one calendar raced each other's transactions and
+    // reaps. A caller that finds one running waits its turn rather than being
+    // turned away: a sync asked for after a write must see that write, and
+    // the one already running may have read the calendar before it.
+    let _turn = sync_turn().lock().await;
     let pool = &state.pool;
     // `ORDER BY id`, so which account goes first is a decision rather than
     // whatever rowid order happens to be — it used to decide whose failure
@@ -1765,7 +1780,10 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
-            tauri::WindowEvent::Focused(true) => {
+            // The main window only: the menubar popup takes focus on every
+            // tray click, and syncing on each was a sync the user never asked
+            // for. Its own feed reads the store.
+            tauri::WindowEvent::Focused(true) if window.label() == "main" => {
                 sync_loop::request_now(window.app_handle());
                 // The update notice rides the same "the user is back" signal,
                 // behind its own four-hour floor: an instance launched 45
@@ -1907,6 +1925,48 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Syncs never overlap. Three callers can start one (the ticker, a
+    /// window focus, the sync command), and overlapping passes over one
+    /// calendar raced each other's transactions and reaps. Witnessed without
+    /// a stopwatch: while the lock a running sync holds is held, a second
+    /// sync sends nothing at all, and once it is released the second sync
+    /// runs. Without the lock it would have reached the server at once.
+    #[tokio::test]
+    async fn a_sync_waits_for_the_one_already_running() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        crate::caldav_account::test_passwords::set("serial@x.test", "p");
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+             VALUES ('caldav:serial@x.test', 'serial@x.test', 0, 'caldav', ?1, 'serial@x.test')",
+        )
+        .bind(server.uri())
+        .execute(&pool).await.unwrap();
+        let state = std::sync::Arc::new(AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+        });
+
+        let running = sync_turn().lock().await;
+        let second = tokio::spawn({
+            let state = state.clone();
+            async move { sync_all(&state).await }
+        });
+        // Long enough for an unguarded sync to have reached the server even
+        // on a cold first request (loading the OS root certificates alone
+        // can take a few hundred milliseconds).
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(server.received_requests().await.unwrap().is_empty(), "the second sync went ahead");
+        assert!(!second.is_finished());
+
+        drop(running);
+        let _ = second.await.unwrap();
+        assert!(!server.received_requests().await.unwrap().is_empty(), "and ran once its turn came");
+    }
 
     /// **Not a test: the website's screenshot source.** Seeds the demo data
     /// into a memory database at a fixed moment and writes what the read

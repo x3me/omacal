@@ -143,6 +143,9 @@ pub(crate) async fn fetch_latest(endpoint: &str) -> anyhow::Result<(String, Stri
     use anyhow::Context;
     let resp = reqwest::Client::builder()
         .user_agent(concat!("omacal/", env!("CARGO_PKG_VERSION")))
+        // A background notice; a GitHub that hangs must not hold a task.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(endpoint)
         .send()

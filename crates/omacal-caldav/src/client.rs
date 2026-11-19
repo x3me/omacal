@@ -231,11 +231,24 @@ const NS: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns
 /// CardDAV at all should see no mention of it in a calendar request.
 const CARD_NS: &str = r#"xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav""#;
 
+/// How long one request may take, start to finish, before it is given up
+/// on. Without one, a socket left half-open by a laptop's sleep or a proxy
+/// that takes the request and never answers held the sync forever, and with
+/// it every account after this one. Generous, because a REPORT over a large
+/// calendar on a slow link is legitimately slow. Shortened under test, so a
+/// test can watch it fire without waiting minutes.
+const REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 120 });
+/// How long the connection itself may take.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl CalDavClient {
     pub fn new(base_url: &str, username: &str, password: &str) -> anyhow::Result<Self> {
         let base = Url::parse(base_url.trim())?;
         https_or_private(&base)?;
         let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 // Same-host only: a redirect is the server's word, not the
                 // user's, and credentials ride on every request.
@@ -882,6 +895,22 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A server that takes the request and never answers (a half-open socket
+    /// after sleep, a proxy that hangs) is given up on, so one stalled
+    /// account cannot stall every sync after it. The timeout is shortened
+    /// under test; the server here is slower than it.
+    #[tokio::test]
+    async fn a_server_that_never_answers_is_given_up_on() {
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server).await;
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let started = std::time::Instant::now();
+        assert!(client.ctag(&format!("{}/cal/", server.uri())).await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "gave up before the server answered");
+    }
 
     #[test]
     fn only_same_site_hosts_may_see_credentials() {
