@@ -302,6 +302,136 @@ export const STRONG_SWIPE_PX_PER_MS = 2;
 export const STRONG_SWIPE_MIN_PX = 40;
 
 /**
+ * macOS's own momentum, recognised as it begins. After the fingers lift, a
+ * Mac keeps sending wheel events for up to a second and a half, one a frame
+ * with no pause after the hand's last, each a steady few percent smaller than
+ * the one before. The settle waited for the lull after them, by which time
+ * the speed it read was the tail's, so on a Mac no swipe was ever strong and
+ * a flick stopped wherever the momentum ran out: ten, twenty, fifty days on
+ * (Plamen, 2026-11-20, recorded on his MacBook in Safari: flicks peaked at
+ * 60–264 px an event and decayed by 0.88–0.99 an event, without a break).
+ * A hand never does that for five events running, and libinput sends no
+ * momentum at all, so on Linux this never fires.
+ *
+ * `run` counts the events in a row each no larger than the one before
+ * (one pixel of rounding allowed) and no more than a fifth smaller, in one
+ * direction; `from` is the size the run began from, `prev` the last.
+ */
+export type DecayRun = { n: number; from: number; prev: number; sign: number };
+export const NO_DECAY: DecayRun = { n: 0, from: 0, prev: 0, sign: 0 };
+/** Five events, about 80 ms at 60 Hz: as soon as a steady finger can be told apart. */
+export const MOMENTUM_RUN = 5;
+/** ...over which it must have lost a tenth: a hand held at one speed has not. */
+export const MOMENTUM_DECAY = 0.9;
+/** A pause this long between two wheel events is a hand touching down: it
+ *  stops the momentum, and the next swipe starts 59–110 ms later in the
+ *  recording. Within momentum the events came at most 38 ms apart. */
+export const MOMENTUM_GAP_MS = 50;
+
+export function decayStep(run: DecayRun, dx: number): DecayRun {
+  const abs = Math.abs(dx);
+  const sign = Math.sign(dx);
+  const decaying = sign !== 0 && sign === run.sign && run.prev > 0
+    && abs <= run.prev + 1 && abs >= run.prev * 0.8;
+  if (!decaying) return { n: 0, from: abs, prev: abs, sign };
+  return { n: run.n + 1, from: run.from, prev: abs, sign };
+}
+
+export function momentumBegun(run: DecayRun): boolean {
+  return run.n >= MOMENTUM_RUN && run.prev <= run.from * MOMENTUM_DECAY;
+}
+
+/** The rest of a momentum tail already accounted for, or a new hand: the
+ *  same direction, no pause, and no sudden jump in size (a fresh push). */
+export function momentumTail(
+  tail: { sign: number; abs: number; at: number }, dx: number, at: number,
+): boolean {
+  const abs = Math.abs(dx);
+  return at - tail.at <= MOMENTUM_GAP_MS
+    && (dx === 0 || Math.sign(dx) === tail.sign)
+    && abs <= tail.abs * 1.5 + 3;
+}
+
+/**
+ * A Mac's scroll deltas come accelerated: a fast flick there carries the
+ * track five to thirteen columns before the hand even lifts (the recording
+ * above), past the page it is about to land on, and the settle then pulled
+ * it back: "it visually goes forward and then comes back" (Plamen,
+ * 2026-11-20). On Linux the hand covers two to four, and the settle glides
+ * on. So on a Mac a swipe moving faster than this, in the hand's pixels per
+ * ms, meets the line it would land on and gives only a little past it. The
+ * recorded slow swipes never went faster than 2.7; flicks met the line at
+ * 2.3 to 9.7, most above 3.
+ */
+export const RESIST_PX_PER_MS = 3;
+/** How much of the travel past the line still moves the track... */
+export const RESIST_GIVE = 0.25;
+/** ...and how far past it, in columns, at most: a give the eye reads as the
+ *  page arriving, not a pull back. */
+export const RESIST_CAP = 0.3;
+
+/** Travel `d` from `x` (pan units) with the line `limit` resisting: free up
+ *  to it, a quarter beyond it, never more than `RESIST_CAP` past it. Travel
+ *  away from it, and a track already well past it, move freely. */
+export function resist(x: number, d: number, limit: number): number {
+  const s = Math.sign(limit);
+  if (d === 0 || s === 0 || Math.sign(d) !== s) return d;
+  const line = Math.abs(limit);
+  const a = s * x;
+  const b = s * (x + d);
+  // Held at the cap is still held; only a track the line never caught
+  // (it passed slower than `RESIST_PX_PER_MS`) moves on past it freely.
+  if (b <= line || a > line + RESIST_CAP + 1e-6) return d;
+  const from = Math.max(a, line);
+  const to = Math.min(line + RESIST_CAP, from + RESIST_GIVE * (b - from));
+  return s * Math.max(a, to) - x;
+}
+
+/** Where a strong swipe travelling in `dir` (the sign of pan units) lands,
+ *  from `x`: with `align`, the week after (or before) the one shown when the
+ *  gesture began; without, the next page boundary beyond `x`, except a
+ *  boundary the swipe pressed past only by the resistance's give, which is
+ *  the one it was stopped at. See `settleTarget`. */
+export function pageTarget(x: number, dir: number, page: number, align?: number): number {
+  if (align !== undefined) {
+    const shown = Math.round(align / page);
+    // `dir < 0` is content moving left: later days.
+    const lands = (dir < 0 ? shown + 1 : shown - 1) * page;
+    return align - lands + 0;
+  }
+  const u = x / page;
+  // `1e-9` so a page boundary already exactly reached counts as reached,
+  // not as one still to go: floor(1) + 1 would be 2.
+  let next = dir > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
+  const passed = (next - dir) * page;
+  if (passed !== 0 && Math.sign(passed) === dir && Math.abs(x - passed) <= RESIST_CAP + 1e-9) next -= dir;
+  return next * page + 0;
+}
+
+/** The first day on or after `ms` that is not a Saturday or Sunday. */
+export function weekdayOnOrAfter(ms: number): number {
+  const d = new Date(ms);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+/** Weekdays from `a` up to `b` (negative when `b` is earlier): the columns
+ *  between two days when weekends are hidden. */
+export function weekdaysBetween(a: number, b: number): number {
+  const dir = b < a ? -1 : 1;
+  const d = new Date(dir > 0 ? a : b);
+  const end = new Date(dir > 0 ? b : a);
+  end.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  let n = 0;
+  while (d < end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return dir * n;
+}
+
+/**
  * Where a released pan comes to rest, in pan units (columns; positive is
  * content moved right, toward earlier days) counted from where the gesture
  * began. `x` is how far it has travelled, `v` its speed at lift in columns/ms,
@@ -313,7 +443,8 @@ export const STRONG_SWIPE_MIN_PX = 40;
  *   boundary in its own direction, pages counted from where the gesture
  *   began: exactly where the button would have taken the view from there,
  *   and a week slid off its alignment by an earlier swipe keeps its offset,
- *   as the button keeps it.
+ *   as the button keeps it. A line the swipe pressed past only by a Mac's
+ *   give (`resist`) is the line it lands on (`pageTarget`).
  * - **Anything gentler follows the hand:** the flick's momentum (`v * tau`)
  *   rounded to a day, never as far as a page from where the fingers left it.
  * - **A pager** (Day view under a finger, #127) pages on every flick, however
@@ -343,20 +474,16 @@ export function settleTarget(
   if (strong && o.align !== undefined && !o.pager) {
     // The aligned week the window mostly showed when the gesture began, and
     // one week on from it in the swipe's direction: one flick, one week,
-    // however far a touchpad's momentum carried the track before the lull
-    // (macOS keeps sending wheel events for a second after the hand lifts).
-    const shown = Math.round(o.align / page);
-    // `v < 0` is content moving left: later days.
-    const lands = (v < 0 ? shown + 1 : shown - 1) * page;
-    return o.align - lands + 0;
+    // however far a touchpad's momentum carried the track.
+    return pageTarget(x, Math.sign(v), page, o.align);
   }
   if (strong) {
-    const u = x / page;
-    // `1e-9` so a page boundary already exactly reached counts as reached,
-    // not as one still to go: floor(1) + 1 would be 2.
-    let next = v > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
-    if (o.pager) next = Math.max(-1, Math.min(1, next));
-    return next * page + 0;
+    if (o.pager) {
+      const u = x / page;
+      const next = v > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
+      return Math.max(-1, Math.min(1, next)) * page + 0;
+    }
+    return pageTarget(x, Math.sign(v), page);
   }
   const near = Math.round(x);
   if (o.pager) return Math.max(-1, Math.min(1, near)) + 0;

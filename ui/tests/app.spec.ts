@@ -20,6 +20,7 @@ import {
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
+import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
 const WEEK = 7 * 24 * 3_600_000;
 /** The week the app opens on, and the one a click on › moves to. */
@@ -6375,45 +6376,217 @@ test.describe('App: week panning', () => {
    *  witness is the second step: the first leaves the week slid, which the
    *  spec checks, or a landing on a Monday would prove nothing. */
   test('a strong swipe after gentle ones lands on a whole week, not a slid one', async ({ page }) => {
-    await page.goto(app());
-    await expect(page.locator('.col')).toHaveCount(7);
-    const [first] = await callsTo(page, 'get_week');
-    const aligned = first.weekStartMs;
-    const startDay = async () =>
-      (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - aligned) / 86_400_000;
-
-    // Gentle: the slow scroll of the spec above, which slides by days.
-    await page.evaluate(async () => {
-      const body = document.querySelector('[data-testid="week-body"]')!;
-      const r = body.getBoundingClientRect();
-      for (let i = 0; i < 6; i++) {
-        body.dispatchEvent(new WheelEvent('wheel', {
-          deltaX: 8, deltaY: 0, clientX: r.left + 300, clientY: r.top + 100, bubbles: true, cancelable: true,
-        }));
-        await new Promise((res) => setTimeout(res, 16));
-      }
-    });
-    await page.waitForTimeout(600);
+    // On the paused clock of the Mac replays below (`openWeek`), with a Linux
+    // wheel: neither this machine's load nor a Mac's give can bend it.
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    await replay(page, Array.from({ length: 6 }, (): Wheel => [16, 8])); // the slow scroll above
+    await rest(page);
     const slid = await startDay();
     expect(slid, 'the gentle scroll left the week slid off its Monday').toBeGreaterThan(0);
     expect(slid).toBeLessThan(7);
-
-    // Strong: the flick of "a strong horizontal swipe pages exactly one week".
-    await page.evaluate(async () => {
-      const body = document.querySelector('[data-testid="week-body"]')!;
-      const r = body.getBoundingClientRect();
-      for (let i = 0; i < 4; i++) {
-        body.dispatchEvent(new WheelEvent('wheel', {
-          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
-          bubbles: true, cancelable: true,
-        }));
-        const t = performance.now();
-        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
-      }
-    });
-    await expect.poll(startDay).toBe(7);
-    await page.waitForTimeout(300);
+    await replay(page, [[0, 60], [8, 60], [8, 60], [8, 60]]); // the flick of "a strong horizontal swipe pages exactly one week"
+    await rest(page);
     expect(await startDay(), 'next week, from its Monday').toBe(7);
+  });
+
+  /** A Mac's own momentum, replayed from a recording of Plamen's trackpad
+   *  (`macos-trackpad.ts`). macOS keeps sending wheel events for a second
+   *  after the hand lifts, so the settle, waiting for the lull, read the
+   *  tail's speed: no Mac swipe was ever strong, and a flick stopped
+   *  wherever the momentum ran out, ten, twenty, fifty days on (Plamen,
+   *  2026-11-20: "stronger swipe moves random N of days, usually more than
+   *  10-12"). The synthetic flick above has no momentum, which is why it
+   *  passed on a build that failed on the Mac. */
+  /** Each recorded event dispatched after the page's clock (Playwright's,
+   *  installed and paused by `openWeek`) has run on by its recorded gap: the page's
+   *  timers, frames and `performance.now()` all follow the recording exactly,
+   *  however loaded the machine running it. Replayed on the wall clock, a busy
+   *  WebKit fired its timers 75 ms late and the stream arrived in bursts. */
+  const replay = async (page: Page, events: Wheel[], deltaY = 0) => {
+    const prevented: boolean[] = [];
+    let due = 0;
+    let ran = 0;
+    for (const [dt, deltaX] of events) {
+      due += dt;
+      const step = Math.round(due) - ran;
+      if (step > 0) { await page.clock.runFor(step); ran += step; }
+      prevented.push(await page.evaluate(([deltaX, deltaY]) => {
+        const body = document.querySelector('[data-testid="week-body"]')!;
+        const r = body.getBoundingClientRect();
+        const e = new WheelEvent('wheel', {
+          deltaX, deltaY, clientX: r.left + r.width / 2, clientY: r.top + 100, bubbles: true, cancelable: true,
+        });
+        body.dispatchEvent(e);
+        return e.defaultPrevented;
+      }, [deltaX, deltaY] as const));
+    }
+    return prevented;
+  };
+  /** Long enough for any settle to come to rest and any tail to have ended. */
+  const rest = (page: Page) => page.clock.runFor(1_500);
+  const swipe = (gesture: number, i: number) => MACOS_GESTURES[gesture - 1].swipes[i].events;
+  /** The app on a Mac (or `platform`), counting days from the window's first
+   *  day as it opened. The platform is set, not inherited from the machine
+   *  the tests run on, so this Mac and Linux CI run the same thing. */
+  const openWeek = async (
+    page: Page,
+    o: { platform?: string; settings?: Record<string, unknown>; dayView?: boolean } = {},
+  ) => {
+    await page.addInitScript(([platform, settings]) => {
+      Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform });
+      if (settings) sessionStorage.setItem('omacal-stub-settings', JSON.stringify(settings));
+    }, [o.platform ?? 'MacIntel', o.settings ?? null] as const);
+    await page.clock.install({ time: APP_NOW });
+    await page.goto(app());
+    const cols = o.dayView ? 1 : 7;
+    await expect(page.locator('.col')).toHaveCount(7);
+    if (o.dayView) {
+      await page.keyboard.press('1');
+      await expect(page.locator('.col')).toHaveCount(1);
+    }
+    // Paused from here: after `install` the clock also flows with real time,
+    // and a slow round trip between two events would stretch their gap.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 500);
+    const first = Number(await page.locator('.col').first().getAttribute('data-start-ms'));
+    // Read at rest only: while the track moves it also draws the padding,
+    // and its first column is not the window's.
+    const startDay = async () => {
+      if ((await page.locator('.col').count()) !== cols) return NaN;
+      return (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - first) / 86_400_000;
+    };
+    return Object.assign(startDay, { first });
+  };
+  /** `replay`, and the farthest the track was ever drawn from where it began,
+   *  in days, read off the column under the pane's left edge every frame. */
+  const replayWatching = async (page: Page, first: number, events: Wheel[]) => {
+    await page.evaluate((first) => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      w.__reach = [];
+      const look = () => {
+        const track = document.querySelector('[data-testid="week-body"] .track');
+        if (track) {
+          const left = track.getBoundingClientRect().left + 0.5;
+          for (const c of track.querySelectorAll<HTMLElement>('.col')) {
+            const r = c.getBoundingClientRect();
+            if (r.left <= left && left < r.right) {
+              w.__reach.push((Number(c.dataset.startMs) - first) / 86_400_000 + (left - r.left) / r.width);
+              break;
+            }
+          }
+        }
+        w.__watch = requestAnimationFrame(look);
+      };
+      look();
+    }, first);
+    await replay(page, events);
+    await rest(page);
+    return page.evaluate(() => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      cancelAnimationFrame(w.__watch);
+      return { max: Math.max(...w.__reach), min: Math.min(...w.__reach) };
+    });
+  };
+
+  test('a Mac flick, momentum and all, turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    // Rightward on the pad, content leftward: later days. Its momentum runs
+    // down to 10 px an event, so a settle that waits for the lull reads it
+    // as gentle and stops it 17 days on.
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+
+    await replay(page, swipe(7, 0)); // the other way, with a tail all the way down to 1 px
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('a Mac flick there and back, as recorded, lands where it began', async ({ page }) => {
+    // One hand: a flick, 83 ms without events while the fingers touch down
+    // and stop the momentum, then a flick back. The second is a new swipe,
+    // not more of the first one's tail.
+    const startDay = await openWeek(page);
+    await replay(page, MACOS_GESTURES[0].events);
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('two Mac flicks the same way, a touch-down apart, turn two weeks', async ({ page }) => {
+    // The second flick begins as small as the first one's tail has shrunk
+    // to; only the 70 ms pause of the fingers landing tells it apart.
+    const startDay = await openWeek(page);
+    const [, ...rest2] = swipe(2, 2);
+    await replay(page, [...swipe(2, 0), [70, swipe(2, 2)[0][1]], ...rest2]);
+    await rest(page);
+    expect(await startDay()).toBe(14);
+  });
+
+  test('a borderline Mac flick is judged on its speed as the hand lifted', async ({ page }) => {
+    // The gentlest recorded flick at nine tenths: about 2.05 px/ms as its
+    // momentum began, 1.9 by the time five shrinking events prove it is
+    // momentum. Linux judges a swipe at the lift; so does this.
+    const startDay = await openWeek(page);
+    await replay(page, swipe(3, 0).map(([dt, dx]): Wheel => [dt, dx * 0.9]));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac tail with an empty event in it is still the tail', async ({ page }) => {
+    const events = [...swipe(7, 0)];
+    events.splice(30, 0, [16, 0]);
+    const startDay = await openWeek(page);
+    await replay(page, events);
+    await rest(page);
+    expect(await startDay()).toBe(-7);
+  });
+
+  test('a vertical scroll straight after a Mac flick scrolls the hours', async ({ page }) => {
+    await openWeek(page);
+    await replay(page, swipe(7, 0).slice(0, 30));
+    const prevented = await replay(page, [[16, 0], [16, 0], [16, 0], [16, 0]], 40);
+    expect(prevented, 'none of the vertical events is taken for the tail').toEqual([false, false, false, false]);
+  });
+
+  /** The hand alone carries a Mac flick five to thirteen days before it
+   *  lifts; the settle then pulled the week back onto the page it landed on
+   *  ("it visually goes forward and then comes back", Plamen, 2026-11-20).
+   *  Now a fast swipe meets that line and gives only a little past it. */
+  test('a hard Mac flick slows into the next week instead of flying past it', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1)); // the hardest recorded
+    expect(reach.max, 'never drawn more than the give past next Monday').toBeLessThanOrEqual(7.35);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('on Linux a fast swipe is not held at the line: its wheel is not accelerated', async ({ page }) => {
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1));
+    expect(reach.max).toBeGreaterThan(8);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac flick in a rolling week turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page, { settings: { weekStartsToday: true } });
+    const reach = await replayWatching(page, startDay.first, swipe(2, 0));
+    expect(await startDay()).toBe(7);
+    expect(reach.max).toBeLessThanOrEqual(7.35);
+  });
+
+  test('a Mac flick in Day view turns exactly one day', async ({ page }) => {
+    const startDay = await openWeek(page, { dayView: true });
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(1);
+  });
+
+  test('a slow Mac swipe still moves by days, not a week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const slow = MACOS_GESTURES[5].swipes.find((s) => s.kind === 'slow' && s.events.length === 24)!;
+    await replay(page, slow.events);
+    await rest(page);
+    const moved = await startDay();
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(7);
   });
 
   test('a vertical wheel scrolls and never pans', async ({ page }) => {
@@ -6900,6 +7073,38 @@ test.describe('App: hiding weekends', () => {
     await expect(columns).toHaveCount(5);
     await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON));
     await expect(columns.last()).toHaveAttribute('data-start-ms', String(APP_MON + 4 * 24 * 3_600_000)); // Friday
+  });
+
+  /** With weekends hidden a week is five columns, and a strong swipe crosses
+   *  five; counted as five calendar days, the second swipe from a Monday
+   *  landed on a Thursday (Gemini, 2026-11-20). Each flick turns the week. */
+  test('strong swipes with weekends hidden turn whole weeks, Monday to Monday', async ({ page }) => {
+    const day = 24 * 3_600_000;
+    await openApp(page);
+    await setHideWeekends(page, true);
+    const columns = page.locator('[data-testid="week-body"] .col');
+    await expect(columns).toHaveCount(5);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON));
+    const flick = () => page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
+          bubbles: true, cancelable: true,
+        }));
+        const t = performance.now();
+        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
+      }
+    });
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 7 * day));
+    await page.waitForTimeout(600);
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await page.waitForTimeout(600);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await expect(columns).toHaveCount(5);
   });
 
   test('Day view\'s arrows step past Saturday and Sunday, landing on the weekday either side', async ({ page }) => {

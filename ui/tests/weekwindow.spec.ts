@@ -3,7 +3,10 @@ import type { WeekPayload } from '../src/lib/api';
 import {
   FLING_MIN_V, FLING_TAU_MS, filterWeekends, packBandLanes, padFor, panCommit, settleTarget, skipWeekendStart,
   sliceWeek, springAt, springPlan, stepDay, stepDays, velocityOf, visibleIndex, windowHeld,
+  NO_DECAY, RESIST_CAP, decayStep, momentumBegun, momentumTail, pageTarget, resist, weekdayOnOrAfter, weekdaysBetween,
+  type DecayRun,
 } from '../src/lib/weekwindow';
+import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
 const DAY = 86_400_000;
 const days = (n: number, from = 0) =>
@@ -366,4 +369,86 @@ test.describe('hiding weekends', () => {
   test('a multi-day shift with weekends shown is a plain calendar jump', () => {
     expect(stepDays(local(24), 3, false)).toBe(local(27));
   });
+});
+
+/** Where in a stream of wheel events momentum is first recognised, or -1. */
+const onset = (events: Wheel[]) => {
+  let run: DecayRun = NO_DECAY;
+  for (let i = 0; i < events.length; i++) {
+    run = decayStep(run, events[i][1]);
+    if (momentumBegun(run)) return i;
+  }
+  return -1;
+};
+
+test('every recorded Mac flick is recognised as momentum, and no slow swipe is', () => {
+  const swipes = MACOS_GESTURES.flatMap((g) => g.swipes);
+  const flicks = swipes.filter((s) => s.kind === 'flick');
+  const slow = swipes.filter((s) => s.kind === 'slow');
+  expect(flicks.length).toBe(18);
+  expect(slow.length).toBe(7);
+  for (const s of flicks) expect(onset(s.events), JSON.stringify(s.events.slice(0, 12))).toBeGreaterThan(0);
+  for (const s of slow) expect(onset(s.events), JSON.stringify(s.events)).toBe(-1);
+});
+
+test('a hand held at one speed, or the synthetic flick, is never momentum', () => {
+  expect(onset([[0, 60], [8, 60], [8, 60], [8, 60]])).toBe(-1);
+  const steady: Wheel[] = [38, 38, 38, 37, 38, 38, 37, 37, 38, 38, 37].map((dx) => [16, dx]);
+  expect(onset(steady)).toBe(-1);
+  // Shrinking, but by so little it could be a hand: a tenth over the run.
+  const creeping: Wheel[] = [100, 99, 98, 97, 96, 95].map((dx) => [16, dx]);
+  expect(onset(creeping)).toBe(-1);
+  // Momentum, but one direction turns mid-run: no run at all.
+  expect(onset([100, 95, 90, -85, 80, 76, 72].map((dx): Wheel => [16, dx]))).toBe(-1);
+  // ...and the same decay the other way round is recognised.
+  expect(onset([-100, -95, -90, -85, -80, -76, -72].map((dx): Wheel => [16, dx]))).toBe(5);
+});
+
+test('momentum after the decision is swallowed until a hand comes back', () => {
+  const tail = { sign: 1, abs: 40, at: 1_000 };
+  expect(momentumTail(tail, 38, 1_016)).toBe(true);
+  expect(momentumTail(tail, 0, 1_016)).toBe(true);
+  expect(momentumTail(tail, 41, 1_016), 'rounding up a pixel').toBe(true);
+  expect(momentumTail(tail, 38, 1_060), 'the pause of fingers touching down').toBe(false);
+  expect(momentumTail(tail, -2, 1_016), 'the other way').toBe(false);
+  expect(momentumTail(tail, 90, 1_016), 'a fresh push').toBe(false);
+});
+
+test('weekdays between two days count the columns a hidden-weekend week draws', () => {
+  const mon = new Date(2024, 0, 29).getTime();
+  const at = (d: number) => new Date(2024, 0, 29 + d).getTime();
+  expect(weekdaysBetween(mon, mon)).toBe(0);
+  expect(weekdaysBetween(mon, at(5))).toBe(5); // to Saturday
+  expect(weekdaysBetween(mon, at(7))).toBe(5); // to the next Monday
+  expect(weekdaysBetween(mon, at(8))).toBe(6);
+  expect(weekdaysBetween(mon, at(14))).toBe(10);
+  expect(weekdaysBetween(mon, at(-7))).toBe(-5);
+  expect(weekdaysBetween(mon, at(-3))).toBe(-1); // back to Friday
+  expect(weekdayOnOrAfter(at(5))).toBe(at(7));
+  expect(weekdayOnOrAfter(at(6))).toBe(at(7));
+  expect(weekdayOnOrAfter(at(2))).toBe(at(2));
+});
+
+test('the line resists: free up to it, a quarter past it, never more than the cap', () => {
+  // Pan units: negative is later days, so the next week's line is at -7.
+  expect(resist(-3, -2, -7)).toBe(-2); // short of it
+  expect(resist(-6, -2, -7)).toBeCloseTo(-1.25); // 1 free, then a quarter of 1
+  expect(-6 + resist(-6, -9, -7)).toBeCloseTo(-7 - RESIST_CAP); // a long push stops at the cap
+  expect(resist(-7 - RESIST_CAP, -1, -7)).toBeCloseTo(0); // held at the cap
+  expect(resist(-7.1, 2, -7)).toBe(2); // back toward the start is free
+  expect(resist(-9, -1, -7), 'a track the line never caught is not pulled back').toBe(-1);
+  expect(resist(5, 3, 7)).toBeCloseTo(2 + 0.25); // the same the other way
+});
+
+test('a strong swipe pressed past a page line only by the give lands on that line', () => {
+  expect(pageTarget(3, 1, 7)).toBe(7);
+  expect(pageTarget(7.2, 1, 7)).toBe(7);
+  expect(pageTarget(7.31, 1, 7)).toBe(14);
+  expect(pageTarget(-7.2, -1, 7)).toBe(-7);
+  expect(pageTarget(1.25, 1, 1)).toBe(1); // Day view
+  expect(pageTarget(0.1, 1, 1)).toBe(1);
+  expect(pageTarget(-3, 1, 7), 'a flick back from a slide returns to where it began').toBe(0);
+  // With a fixed first day the landing depends on where the week stood, not on x.
+  expect(pageTarget(-12, -1, 7, 0)).toBe(-7);
+  expect(pageTarget(-1, -1, 7, -3)).toBe(-10);
 });
