@@ -6830,6 +6830,9 @@ test.describe('the ICS import panel', () => {
     // hour keeps this independent of the clock-format preference.
     await expect(rows.filter({ hasText: 'Berlin trip' })).not.toContainText('·');
     await expect(rows.filter({ hasText: 'Lunch' })).toContainText('·');
+    // And its day is the file's own, not the day its instant falls on here.
+    await expect(rows.filter({ hasText: 'Berlin trip' })).toContainText('8');
+    await expect(rows.filter({ hasText: 'Berlin trip' })).not.toContainText('7');
   });
 
   test('a file with nothing to import lists nothing', async ({ page }) => {

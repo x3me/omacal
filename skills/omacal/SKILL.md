@@ -67,6 +67,11 @@ WebCal, local): OmaCal emails nobody there, so there is no notify question to as
 is Google's model and says nothing reliable about who else sees a change. WebCal feeds are read-only
 subscriptions (Settings → Accounts → "Add WebCal account"); they never take writes, RSVPs, or tasks.
 
+`search`'s `events` carry `eventId`, `title`, `startMs`/`endMs` and
+`allDayDate`: for an all-day event, its date (`2026-08-05`) in its own
+calendar's zone, `null` otherwise. **Use `allDayDate` for an all-day hit's
+day**, never `startMs` read in another zone, which can be a day out.
+
 `search`'s `tasks` (v5.3+) are `omacal tasks --json`'s own row shape (`id`,
 `summary`, `notes`, `due`, `dueMs`, `dueAllDay`, `overdue`, `completed`,
 `list`, `listId`, `canWrite`) for **open** tasks whose title matches, due
