@@ -1411,7 +1411,11 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('none');
     });
 
-    test('an event with guests asks, and Move without notifying sends none', async ({ page }) => {
+    /** A meeting moved is a meeting its guests need to hear about, so the
+     *  notify answer is the default one, the one Enter takes (Plamen,
+     *  2026-11-20: "when rescheduling a meeting the default should be to
+     *  Notify"). The dialog itself still stands between a drag and the mail. */
+    test('an event with guests asks, and notifying is the default Enter takes', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
 
@@ -1423,10 +1427,21 @@ test.describe('App', () => {
       // A one-off: there is no scope to choose, so the chooser is not offered.
       await expect(movePanel(page).getByRole('radiogroup')).toHaveCount(0);
 
-      await expect(
-        movePanel(page).getByRole('button', { name: 'Move without notifying' }),
-      ).toBeFocused();
+      const notify = movePanel(page).getByRole('button', { name: 'Move and notify guests' });
+      await expect(notify).toBeFocused();
+      await expect(notify).toHaveClass(/primary/);
       await page.keyboard.press('Enter');
+
+      await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      const [args] = await callsTo(page, 'update_event');
+      expect(args.sendUpdates).toBe('all');
+    });
+
+    test('Move without notifying is one click away and sends none', async ({ page }) => {
+      await writable(page);
+      await dragBy(page, 'Client call', 60);
+
+      await movePanel(page).getByRole('button', { name: 'Move without notifying' }).click();
 
       await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
       const [args] = await callsTo(page, 'update_event');
@@ -1481,11 +1496,7 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('all');
     });
 
-    /**
-     * **The only route to `all` in the whole drag path.** Sending mail is the
-     * deliberate choice, never the default and never a side effect of a
-     * gesture — which is why the *other* button is the primary one.
-     */
+    /** Clicked, not only by Enter: the notify button sends `all`. */
     test('Move and notify guests is the one path that sends all', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
