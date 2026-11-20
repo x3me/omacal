@@ -39,6 +39,7 @@ mod restart;
 mod resume;
 mod search;
 mod settings;
+mod snooze;
 mod status;
 mod sync_loop;
 mod tasks;
@@ -1364,8 +1365,14 @@ fn dispatch_notification_action(handle: &tauri::AppHandle, action: notify::Actio
                 tracing::warn!(%e, "could not open the meeting link");
             }
         }
-        // Still display-only; re-queueing is §2.5's future.
-        notify::Action::Snooze5m => {}
+        // Five minutes on, the reminder loop posts it again if the calendar
+        // still holds it (`snooze.rs`).
+        notify::Action::Snooze5m { event_id, occurrence_ms, minutes } => {
+            snooze::queue().snooze(
+                omacal_core::remind::FiredKey { event_id, occurrence_ms, minutes },
+                now_ms(),
+            );
+        }
         // The click on a task announcement (#137): bring the window up and
         // hand the webview the task, which opens the Tasks pane on it.
         notify::Action::OpenTask { task_id } => {
