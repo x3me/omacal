@@ -6368,6 +6368,54 @@ test.describe('App: week panning', () => {
     expect(moved).toBeLessThan(7);
   });
 
+  /** A strong swipe lands on a whole week even after gentle swipes slid the
+   *  window off its Monday. Counted from where the gesture began, the slide
+   *  was kept, and a fast swipe landed, say, Thursday to Wednesday (Plamen,
+   *  2026-11-20: "the strong swipe moves randomly to the next week"). The
+   *  witness is the second step: the first leaves the week slid, which the
+   *  spec checks, or a landing on a Monday would prove nothing. */
+  test('a strong swipe after gentle ones lands on a whole week, not a slid one', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.locator('.col')).toHaveCount(7);
+    const [first] = await callsTo(page, 'get_week');
+    const aligned = first.weekStartMs;
+    const startDay = async () =>
+      (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - aligned) / 86_400_000;
+
+    // Gentle: the slow scroll of the spec above, which slides by days.
+    await page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 6; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 8, deltaY: 0, clientX: r.left + 300, clientY: r.top + 100, bubbles: true, cancelable: true,
+        }));
+        await new Promise((res) => setTimeout(res, 16));
+      }
+    });
+    await page.waitForTimeout(600);
+    const slid = await startDay();
+    expect(slid, 'the gentle scroll left the week slid off its Monday').toBeGreaterThan(0);
+    expect(slid).toBeLessThan(7);
+
+    // Strong: the flick of "a strong horizontal swipe pages exactly one week".
+    await page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
+          bubbles: true, cancelable: true,
+        }));
+        const t = performance.now();
+        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
+      }
+    });
+    await expect.poll(startDay).toBe(7);
+    await page.waitForTimeout(300);
+    expect(await startDay(), 'next week, from its Monday').toBe(7);
+  });
+
   test('a vertical wheel scrolls and never pans', async ({ page }) => {
     await page.locator('[data-testid="week-body"]').hover();
     await page.mouse.wheel(0, 240);

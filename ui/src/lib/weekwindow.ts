@@ -319,16 +319,37 @@ export const STRONG_SWIPE_MIN_PX = 40;
  * - **A pager** (Day view under a finger, #127) pages on every flick, however
  *   slow, the way Android's calendar does, and never more than one page from
  *   where it began. Without a flick it goes to the nearer page.
+ * - **With `align`** (a Week view whose first day is fixed: Monday, Sunday,
+ *   Saturday), a strong swipe lands on a whole week instead: the week after
+ *   (or before) the aligned week the window mostly showed when the gesture
+ *   began: one flick, one week, however far momentum carried it.
+ *   `align` is the window's slide off its alignment when the gesture began
+ *   (`weekPanDays`, in days; the slide it ends on is `align - target`).
+ *   Counted from the gesture's start, a week slid off its Monday by gentle
+ *   swipes kept the slide, and a fast swipe landed Thursday to Wednesday
+ *   (Plamen, 2026-11-20: "the strong swipe moves randomly to the next week").
+ *   A rolling week has no first day to align to, and Day view none either:
+ *   they pass no `align` and keep the rule above.
  */
 export function settleTarget(
   x: number, v: number,
-  o: { page: number; pager: boolean; minV: number; strongV?: number; strongX?: number; tau?: number },
+  o: { page: number; pager: boolean; minV: number; strongV?: number; strongX?: number; tau?: number; align?: number },
 ): number {
   const page = Math.max(1, o.page);
   const moving = Math.abs(v) >= o.minV;
   const strong = o.pager
     ? moving
     : o.strongV !== undefined && Math.abs(v) >= o.strongV && Math.abs(x) >= (o.strongX ?? 0);
+  if (strong && o.align !== undefined && !o.pager) {
+    // The aligned week the window mostly showed when the gesture began, and
+    // one week on from it in the swipe's direction: one flick, one week,
+    // however far a touchpad's momentum carried the track before the lull
+    // (macOS keeps sending wheel events for a second after the hand lifts).
+    const shown = Math.round(o.align / page);
+    // `v < 0` is content moving left: later days.
+    const lands = (v < 0 ? shown + 1 : shown - 1) * page;
+    return o.align - lands + 0;
+  }
   if (strong) {
     const u = x / page;
     // `1e-9` so a page boundary already exactly reached counts as reached,

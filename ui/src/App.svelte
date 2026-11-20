@@ -2817,6 +2817,7 @@
                   {formPreview} {createColor} {revealNowRequest} bind:hourPx
                   keyboardCursor={visibleKeyboardCursor}
                   onpan={panView}
+                  panAlign={view === 'week' && !weekStartsToday ? weekPanDays : null}
                   oncreate={newEventAt} oncreateallday={newAllDayEventOver}
                   onedit={openEdit} ondelete={askDelete}
                   oncopy={copyOccurrence}
