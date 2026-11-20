@@ -3317,6 +3317,67 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       occurrenceEndMs: Date.parse('2026-08-14T00:00:00+12:00'),
       onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
     },
+    // **A trip of many days** (Plamen, 2026-11-20: a multi-day all-day event
+    // "shows very small amount of information" — its first day and nothing
+    // else). 24 Nov to 12 Dec inclusive: nineteen days.
+    'all-day-trip': {
+      detail: detail({
+        id: 13, title: 'Niki 24.11 - 12.12 (LOT)', is_all_day: true,
+        start_ms: Date.parse('2026-11-24T00:00:00Z'), end_ms: Date.parse('2026-12-13T00:00:00Z'),
+        start_date: '2026-11-24', end_date: '2026-12-12',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-24T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-12-13T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    'all-day-over-new-year': {
+      detail: detail({
+        id: 14, title: 'Ski week', is_all_day: true,
+        start_ms: Date.parse('2026-12-30T00:00:00Z'), end_ms: Date.parse('2027-01-03T00:00:00Z'),
+        start_date: '2026-12-30', end_date: '2027-01-02',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-12-30T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2027-01-03T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // A three-day all-day series; the clicked occurrence is the one a year
+    // after the master's, so its range is the master's moved by a year.
+    'all-day-series-of-three-days': {
+      detail: detail({
+        id: 15, title: 'Festival', is_all_day: true, is_recurring: true,
+        start_ms: Date.parse('2026-07-10T00:00:00Z'), end_ms: Date.parse('2026-07-13T00:00:00Z'),
+        start_date: '2026-07-10', end_date: '2026-07-12',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2027-07-10T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2027-07-13T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // An overnight flight: the time alone, 22:00–06:00, hid that it lands
+    // the next day. Instants in the browser's zone (the spec pins UTC).
+    'timed-overnight': {
+      detail: detail({
+        id: 16, title: 'Flight SOF–DEL',
+        start_ms: Date.parse('2026-11-09T22:00:00Z'), end_ms: Date.parse('2026-11-10T06:00:00Z'),
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-09T22:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-11-10T06:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // Ends on the stroke of midnight: still one evening, not two days.
+    'timed-to-midnight': {
+      detail: detail({
+        id: 17, title: 'Late session',
+        start_ms: Date.parse('2026-11-09T22:00:00Z'), end_ms: Date.parse('2026-11-10T00:00:00Z'),
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-09T22:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-11-10T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
   },
   DeleteConfirm: {
     // Three attendees, one of them the signed-in user, so the notice must say
