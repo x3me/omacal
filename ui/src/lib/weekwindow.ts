@@ -352,6 +352,62 @@ export function momentumTail(
     && abs <= tail.abs * 1.5 + 3;
 }
 
+/**
+ * A Mac's scroll deltas come accelerated: a fast flick there carries the
+ * track five to thirteen columns before the hand even lifts (the recording
+ * above), past the page it is about to land on, and the settle then pulled
+ * it back: "it visually goes forward and then comes back" (Plamen,
+ * 2026-11-20). On Linux the hand covers two to four, and the settle glides
+ * on. So on a Mac a swipe moving faster than this, in the hand's pixels per
+ * ms, meets the line it would land on and gives only a little past it. The
+ * recorded slow swipes never went faster than 2.7; flicks met the line at
+ * 2.3 to 9.7, most above 3.
+ */
+export const RESIST_PX_PER_MS = 3;
+/** How much of the travel past the line still moves the track... */
+export const RESIST_GIVE = 0.25;
+/** ...and how far past it, in columns, at most: a give the eye reads as the
+ *  page arriving, not a pull back. */
+export const RESIST_CAP = 0.3;
+
+/** Travel `d` from `x` (pan units) with the line `limit` resisting: free up
+ *  to it, a quarter beyond it, never more than `RESIST_CAP` past it. Travel
+ *  away from it, and a track already well past it, move freely. */
+export function resist(x: number, d: number, limit: number): number {
+  const s = Math.sign(limit);
+  if (d === 0 || s === 0 || Math.sign(d) !== s) return d;
+  const line = Math.abs(limit);
+  const a = s * x;
+  const b = s * (x + d);
+  // Held at the cap is still held; only a track the line never caught
+  // (it passed slower than `RESIST_PX_PER_MS`) moves on past it freely.
+  if (b <= line || a > line + RESIST_CAP + 1e-6) return d;
+  const from = Math.max(a, line);
+  const to = Math.min(line + RESIST_CAP, from + RESIST_GIVE * (b - from));
+  return s * Math.max(a, to) - x;
+}
+
+/** Where a strong swipe travelling in `dir` (the sign of pan units) lands,
+ *  from `x`: with `align`, the week after (or before) the one shown when the
+ *  gesture began; without, the next page boundary beyond `x`, except a
+ *  boundary the swipe pressed past only by the resistance's give, which is
+ *  the one it was stopped at. See `settleTarget`. */
+export function pageTarget(x: number, dir: number, page: number, align?: number): number {
+  if (align !== undefined) {
+    const shown = Math.round(align / page);
+    // `dir < 0` is content moving left: later days.
+    const lands = (dir < 0 ? shown + 1 : shown - 1) * page;
+    return align - lands + 0;
+  }
+  const u = x / page;
+  // `1e-9` so a page boundary already exactly reached counts as reached,
+  // not as one still to go: floor(1) + 1 would be 2.
+  let next = dir > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
+  const passed = (next - dir) * page;
+  if (passed !== 0 && Math.sign(passed) === dir && Math.abs(x - passed) <= RESIST_CAP + 1e-9) next -= dir;
+  return next * page + 0;
+}
+
 /** The first day on or after `ms` that is not a Saturday or Sunday. */
 export function weekdayOnOrAfter(ms: number): number {
   const d = new Date(ms);
@@ -387,7 +443,8 @@ export function weekdaysBetween(a: number, b: number): number {
  *   boundary in its own direction, pages counted from where the gesture
  *   began: exactly where the button would have taken the view from there,
  *   and a week slid off its alignment by an earlier swipe keeps its offset,
- *   as the button keeps it.
+ *   as the button keeps it. A line the swipe pressed past only by a Mac's
+ *   give (`resist`) is the line it lands on (`pageTarget`).
  * - **Anything gentler follows the hand:** the flick's momentum (`v * tau`)
  *   rounded to a day, never as far as a page from where the fingers left it.
  * - **A pager** (Day view under a finger, #127) pages on every flick, however
@@ -417,20 +474,16 @@ export function settleTarget(
   if (strong && o.align !== undefined && !o.pager) {
     // The aligned week the window mostly showed when the gesture began, and
     // one week on from it in the swipe's direction: one flick, one week,
-    // however far a touchpad's momentum carried the track before the lull
-    // (macOS keeps sending wheel events for a second after the hand lifts).
-    const shown = Math.round(o.align / page);
-    // `v < 0` is content moving left: later days.
-    const lands = (v < 0 ? shown + 1 : shown - 1) * page;
-    return o.align - lands + 0;
+    // however far a touchpad's momentum carried the track.
+    return pageTarget(x, Math.sign(v), page, o.align);
   }
   if (strong) {
-    const u = x / page;
-    // `1e-9` so a page boundary already exactly reached counts as reached,
-    // not as one still to go: floor(1) + 1 would be 2.
-    let next = v > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
-    if (o.pager) next = Math.max(-1, Math.min(1, next));
-    return next * page + 0;
+    if (o.pager) {
+      const u = x / page;
+      const next = v > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
+      return Math.max(-1, Math.min(1, next)) * page + 0;
+    }
+    return pageTarget(x, Math.sign(v), page);
   }
   const near = Math.round(x);
   if (o.pager) return Math.max(-1, Math.min(1, near)) + 0;

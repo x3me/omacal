@@ -22,7 +22,8 @@
   import { onPinch, type Pinch } from './pinch';
   import {
     BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, STRONG_SWIPE_MIN_PX, STRONG_SWIPE_PX_PER_MS, TOUCH_LIFT_WHEEL_MS,
-    NO_DECAY, decayStep, filterWeekends, momentumBegun, momentumTail, packBandLanes, panCommit,
+    NO_DECAY, RESIST_PX_PER_MS, decayStep, filterWeekends, momentumBegun, momentumTail, packBandLanes,
+    pageTarget, panCommit, resist,
     settleTarget, skipWeekendStart, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { DayColumn, Lane, Placed, WeekPayload, UiEvent } from './api';
@@ -465,6 +466,9 @@
    *  track moving, which is what a scroll view would do. A touchscreen says
    *  so directly (`endTouchPan`) and never waits for this. */
   const PAN_LULL_MS = 120;
+  /** A Mac, whose touchpad deltas come accelerated and carry a fast flick
+   *  past the page it lands on (`RESIST_PX_PER_MS`). Linux's do not. */
+  const ACCELERATED_WHEEL = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 
   /** The gesture under way is a finger on the screen, not a touchpad: set by
    *  the press that began it, which a touchpad swipe never makes. */
@@ -2126,23 +2130,28 @@
     }
     if (panColWidth <= 0) return;
     panActive = true;
-    const days = -(e.deltaX * (panTouch ? 1 : PAN_GAIN)) / panColWidth;
+    const gain = panTouch ? 1 : PAN_GAIN;
+    let days = -(e.deltaX * gain) / panColWidth;
+    // The samples keep the hand's own travel: the speed is the hand's.
     panSamples.push({ t: eventTime(e), days });
     if (panSamples.length > 12) panSamples.shift();
+    const speed = Math.abs(velocityOf(panSamples));
+    if (ACCELERATED_WHEEL && !panTouch && days !== 0 && speed * panColWidth / gain >= RESIST_PX_PER_MS) {
+      const x = panHanded + panDays + panPending;
+      days = resist(x, days, pageTarget(x, Math.sign(days), visible, panAlignStart));
+    }
     if (!tracking) {
       movePan(days);
     } else {
       panPending += days;
       if (!panFrame) panFrame = requestAnimationFrame(flushPan);
     }
-    // A Mac's momentum, begun at a strong swipe's speed, in a week that has
-    // a first day to land on: decide it now. Waiting for the lull after it
-    // read the tail's speed, which is never strong. A finger on the screen
-    // sends no momentum; a rolling week and Day view keep gliding with it.
+    // A Mac's momentum, begun at a strong swipe's speed: decide it now, a
+    // page on. Waiting for the lull after it read the tail's speed, which is
+    // never strong. A finger on the screen sends no momentum.
     panDecay = decayStep(panDecay, e.deltaX);
-    const speed = Math.abs(velocityOf(panSamples));
     panRunPeakV = panDecay.n === 0 ? speed : Math.max(panRunPeakV, speed);
-    if (!panTouch && panAlignStart !== undefined && momentumBegun(panDecay) && strongAt(panRunPeakV)) {
+    if (!panTouch && momentumBegun(panDecay) && strongAt(panRunPeakV)) {
       panTail = { sign: Math.sign(e.deltaX), abs: Math.abs(e.deltaX), at };
       settlePan(panRunPeakV);
       return;

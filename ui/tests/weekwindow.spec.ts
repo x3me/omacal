@@ -3,7 +3,8 @@ import type { WeekPayload } from '../src/lib/api';
 import {
   FLING_MIN_V, FLING_TAU_MS, filterWeekends, packBandLanes, padFor, panCommit, settleTarget, skipWeekendStart,
   sliceWeek, springAt, springPlan, stepDay, stepDays, velocityOf, visibleIndex, windowHeld,
-  NO_DECAY, decayStep, momentumBegun, momentumTail, weekdayOnOrAfter, weekdaysBetween, type DecayRun,
+  NO_DECAY, RESIST_CAP, decayStep, momentumBegun, momentumTail, pageTarget, resist, weekdayOnOrAfter, weekdaysBetween,
+  type DecayRun,
 } from '../src/lib/weekwindow';
 import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
@@ -426,4 +427,28 @@ test('weekdays between two days count the columns a hidden-weekend week draws', 
   expect(weekdayOnOrAfter(at(5))).toBe(at(7));
   expect(weekdayOnOrAfter(at(6))).toBe(at(7));
   expect(weekdayOnOrAfter(at(2))).toBe(at(2));
+});
+
+test('the line resists: free up to it, a quarter past it, never more than the cap', () => {
+  // Pan units: negative is later days, so the next week's line is at -7.
+  expect(resist(-3, -2, -7)).toBe(-2); // short of it
+  expect(resist(-6, -2, -7)).toBeCloseTo(-1.25); // 1 free, then a quarter of 1
+  expect(-6 + resist(-6, -9, -7)).toBeCloseTo(-7 - RESIST_CAP); // a long push stops at the cap
+  expect(resist(-7 - RESIST_CAP, -1, -7)).toBeCloseTo(0); // held at the cap
+  expect(resist(-7.1, 2, -7)).toBe(2); // back toward the start is free
+  expect(resist(-9, -1, -7), 'a track the line never caught is not pulled back').toBe(-1);
+  expect(resist(5, 3, 7)).toBeCloseTo(2 + 0.25); // the same the other way
+});
+
+test('a strong swipe pressed past a page line only by the give lands on that line', () => {
+  expect(pageTarget(3, 1, 7)).toBe(7);
+  expect(pageTarget(7.2, 1, 7)).toBe(7);
+  expect(pageTarget(7.31, 1, 7)).toBe(14);
+  expect(pageTarget(-7.2, -1, 7)).toBe(-7);
+  expect(pageTarget(1.25, 1, 1)).toBe(1); // Day view
+  expect(pageTarget(0.1, 1, 1)).toBe(1);
+  expect(pageTarget(-3, 1, 7), 'a flick back from a slide returns to where it began').toBe(0);
+  // With a fixed first day the landing depends on where the week stood, not on x.
+  expect(pageTarget(-12, -1, 7, 0)).toBe(-7);
+  expect(pageTarget(-1, -1, 7, -3)).toBe(-10);
 });
