@@ -191,6 +191,37 @@ test.describe('the window on a padded week', () => {
     expect(settleTarget(-0.3, -0.03, day)).toBe(-1);
   });
 
+  /** In a Week view with a fixed first day, a strong swipe lands on a whole
+   *  week: the week after (or before) the aligned week the window mostly
+   *  showed when the gesture began, however far momentum carried it. Counted from where the gesture began, as
+   *  without `align`, a week slid off its Monday by slow swipes kept the
+   *  slide, so a fast swipe landed Thursday to Wednesday (Plamen,
+   *  2026-11-20: "the strong swipe moves randomly to the next week").
+   *  `align` is the window's slide (`weekPanDays`) when the gesture began;
+   *  the slide it ends on is `align - target`, which must be a whole page. */
+  test('in a fixed week, a strong swipe lands on a whole aligned week', () => {
+    const week = { page: 7, pager: false, minV: FLING_MIN_V, strongV: 0.02, strongX: 0.4 };
+    const endsOn = (x: number, v: number, align: number) => align - settleTarget(x, v, { ...week, align });
+    // Unslid, it is the button as before: one week either way.
+    expect(endsOn(-0.5, -0.03, 0)).toBe(7);
+    expect(endsOn(0.5, 0.03, 0)).toBe(-7);
+    // Slid three days early (Fri to Thu, mostly this week): on to next week,
+    // or back to last week, each starting on its own Monday.
+    expect(endsOn(-0.5, -0.03, -3)).toBe(7);
+    expect(endsOn(0.5, 0.03, -3)).toBe(-7);
+    // Slid four days early (mostly last week): next is this week.
+    expect(endsOn(-0.5, -0.03, -4)).toBe(0);
+    // Slid two days late: next week, or this week when flicked back.
+    expect(endsOn(-0.5, -0.03, 2)).toBe(7);
+    expect(endsOn(0.5, 0.03, 2)).toBe(-7);
+    // One flick, one week: momentum that carried the track eight days before
+    // the lull (a Mac touchpad's tail) still lands on the next week, not the
+    // one after.
+    expect(endsOn(-8, -0.05, 0)).toBe(7);
+    // A gentle swipe still follows the hand, slide and all.
+    expect(endsOn(-1, 0, -3)).toBe(-2);
+  });
+
   test('strong is a speed of the hand: a slow scroll never pages, however narrow the columns', () => {
     // The regression Plamen caught in the first cut: in a half-width window a
     // slow touchpad scroll has momentum worth four 100px columns, which read

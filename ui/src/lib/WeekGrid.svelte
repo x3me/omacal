@@ -40,7 +40,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, calendars = [], weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontaskdue = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
+  let { week, calendars = [], weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontaskdue = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, panAlign = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -58,6 +58,11 @@
      *  whole days — positive is forward. Optional: a grid without it (a
      *  future embedding) simply keeps the wheel native. */
     onpan?: ((days: number) => void) | null;
+    /** The window's slide off its alignment, in days (`App`'s
+     *  `weekPanDays`), when the view has a fixed first day to align to; `null`
+     *  in a rolling week or Day view. With it a strong swipe lands on a whole
+     *  aligned week (`settleTarget`'s `align`). */
+    panAlign?: number | null;
     /** The forecast by ISO date (`weather.ts`), or null for none — off, not
      *  yet fetched, or failed all look the same here: a header with no sky,
      *  which is what this header looked like for its whole life until now. */
@@ -464,6 +469,10 @@
   /** The gesture under way is a finger on the screen, not a touchpad: set by
    *  the press that began it, which a touchpad swipe never makes. */
   let panTouch = false;
+  /** `panAlign` as it stood when the gesture began: the strong swipe's one
+   *  week is counted from the week on screen then, not from wherever the
+   *  momentum has carried the slide by the time it settles. */
+  let panAlignStart: number | undefined;
   /** When the last finger left the screen. See `wheelPan` for the wheel
    *  event WebKitGTK sends right after, which is not movement. */
   let touchLiftAt = -Infinity;
@@ -523,6 +532,7 @@
       minV: pager ? PAGE_FLICK_PX_PER_MS / panColWidth : FLING_MIN_V,
       strongV: STRONG_SWIPE_PX_PER_MS * perPx,
       strongX: STRONG_SWIPE_MIN_PX * perPx,
+      align: panAlignStart,
     });
     const plan = springPlan(x, target, v);
     const started = performance.now();
@@ -2074,6 +2084,7 @@
       panHanded = 0;
       panSamples = [];
       panTouch = touchDown;
+      panAlignStart = panAlign ?? undefined;
       cancelPressGestures();
     }
     if (panColWidth <= 0) return;
