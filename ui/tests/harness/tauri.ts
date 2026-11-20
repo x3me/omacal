@@ -470,13 +470,13 @@ function statusFor(scenario: string): AppStatus {
     // picker opens after either.
     case 'sign-in-adds-account':
       return {
-        accounts: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
+        accounts: [], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
         overlay_titlebar: false, self_update: false,
       };
     // A newer release, as the daily check would have left it on AppState.
     case 'update-available':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], version: '9.9.9', system_tz_change: null,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], version: '9.9.9', system_tz_change: null,
         update: { version: '0.2.0', url: 'https://github.com/x3me/omacal/releases/tag/v0.2.0' },
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
@@ -484,7 +484,7 @@ function statusFor(scenario: string): AppStatus {
     // token, discovered by a sync, waiting on a re-consent.
     case 'needs-reauth':
       return {
-        accounts: ['me@x.com'], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
     // A macOS window whose controls are drawn over the webview. The default
@@ -493,12 +493,12 @@ function statusFor(scenario: string): AppStatus {
     // since none of them is about the title bar.
     case 'overlay-titlebar':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: true, self_update: false,
       };
     default:
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: false, self_update: false,
       };
   }

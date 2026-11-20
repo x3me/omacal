@@ -7,6 +7,10 @@ export type AppStatus = {
    *  again is the only fix. Emails rather than a count, because "an account
    *  needs attention" with two connected is a guessing game. */
   needs_reauth: string[];
+  /** CalDAV accounts whose server rejects the stored password. Apart from
+   *  `needs_reauth` because the fix is the password entered again in
+   *  Settings, not a Google sign-in. */
+  caldav_reauth: string[];
   /** A newer published release, when the backend's daily check found one —
    *  the header shows a quiet notice for it. Null means current, unchecked,
    *  or demo; the UI has no reason to tell those apart. */
@@ -45,7 +49,10 @@ export type AppStatus = {
 export const getStatus = () => invoke<AppStatus>('get_status');
 export const signIn = () => invoke<string>('sign_in');
 export const cancelSignIn = () => invoke<void>('cancel_sign_in');
-export const syncNow = () => invoke<number>('sync_now');
+/** A full sync, or with `calendarId` that calendar alone: what a write's
+ *  follow-up sync asks for (`App.refreshOf`). */
+export const syncNow = (calendarId?: number) =>
+  invoke<number>('sync_now', calendarId === undefined ? undefined : { calendarId });
 /** Opens the latest release's page in the system browser. No argument on
  *  purpose: the backend opens the URL *it* fetched, so the webview never
  *  chooses what the browser is pointed at. */
@@ -150,6 +157,15 @@ export function syncLight(
  */
 export function reauthMessage(emails: string[]): string {
   return `Google sign-in for ${emails.join(', ')} is no longer valid. Reconnect to resume syncing.`;
+}
+
+/**
+ * The CalDAV reconnect banner's sentence. Names the account for the same
+ * reason as `reauthMessage`, and names the fix, because it is not a sign-in:
+ * the password (for iCloud, an app-specific one) entered again.
+ */
+export function caldavReauthMessage(emails: string[]): string {
+  return `The calendar server rejected the password for ${emails.join(', ')}. Enter it again in Settings → Accounts to resume syncing.`;
 }
 
 /**

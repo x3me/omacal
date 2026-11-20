@@ -1197,6 +1197,25 @@ test.describe('Header', () => {
     await expect(page.getByTestId('reauth-banner')).toHaveCount(0);
   });
 
+  /** A CalDAV account whose server rejects its password is named in words
+   *  that say so, and its Reconnect opens Settings on Accounts, where the
+   *  password is entered again. Google's banner, whose button starts a
+   *  Google sign-in, stays away: that was the wrong fix for this account. */
+  test('a CalDAV account with a rejected password is sent to Accounts, not to Google', async ({ page }) => {
+    await page.goto(show('Header', 'caldavreauth'));
+    const banner = page.getByTestId('caldav-reauth-banner');
+    await expect(banner).toContainText('The calendar server rejected the password for me@icloud.com');
+    await expect(page.getByTestId('reauth-banner')).toHaveCount(0);
+
+    await banner.getByRole('button', { name: 'Reconnect' }).click();
+
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+
+    await page.goto(show('Header', 'connected'));
+    await expect(page.getByTestId('caldav-reauth-banner')).toHaveCount(0);
+  });
+
   /** The update notice: present when status carries one, absent otherwise
    *  (the absence over `connected` is what pins the field as the gate), calm
    *  rather than alarming (not `.err` — teaching users to ignore red is the

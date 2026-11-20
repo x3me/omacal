@@ -122,6 +122,19 @@
     weeklyDays: [...initial.weeklyDays],
     repeatEnd: { ...initial.repeatEnd },
   });
+  /** The value as the form opened, normalised as above: what "changed"
+   *  is measured against. Read once on purpose, at open. */
+  // svelte-ignore state_referenced_locally
+  const opened = JSON.stringify(value);
+  /** Whether anything in the form differs from how it opened. */
+  const changed = $derived(JSON.stringify(value) !== opened);
+
+  /** A click beside the form. With nothing changed it is a way out, as it
+   *  always was. With changes it is a missed click, not a decision to throw
+   *  them away: Cancel and Escape are the explicit ways to discard. */
+  function clickedOutside() {
+    if (!changed) oncancel();
+  }
   // The Zoom URL gets its own draft because the choice can be switched away
   // from and back to without throwing away a link somebody just pasted. The
   // actual event value is still updated on every keystroke, so the grid
@@ -662,7 +675,7 @@
 
 <!-- A sibling of `.pop`, not a wrapper, so a click inside the panel never
      reaches this button. -->
-<button class="scrim" aria-label="Cancel" onclick={oncancel}></button>
+<button class="scrim" aria-label="Cancel" onclick={clickedOutside}></button>
 
 <div
   class="pop"

@@ -1897,6 +1897,17 @@ test.describe('App', () => {
         await page.evaluate(() => window.__harness.releaseSync());
       });
 
+      /** The sync a write waits on is the written calendar's, not every
+       *  account's: a full sync fails when any account or feed does, and a
+       *  failed follow-up sync leaves the saved event dimmed and locked. The
+       *  backend half (only that calendar is asked) is `sync_one_calendar`'s
+       *  test; this is the wiring that asks for it. */
+      test("a write's follow-up sync names the written calendar", async ({ page }) => {
+        await writable(page);
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toEqual([{ calendarId: APP_PRIMARY_CALENDAR_ID }]);
+      });
+
       test('a background reload while the follow-up sync runs does not undo a move', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextSync());
@@ -2421,15 +2432,59 @@ test.describe('App', () => {
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toHaveCount(0);
       });
 
-      test('Reopen goes when the banner clears', async ({ page }) => {
+      /** A refused write is news about something the user did, and a
+       *  week step is not an answer to it: the banner, and its Reopen, stay
+       *  until the user dismisses them. It used to clear on the next load,
+       *  so stepping a week erased the only record that a change was lost. */
+      test('a refused write stays through a week step until it is dismissed', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
         await createLunch(page);
         await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
-        await page.getByRole('button', { name: 'Next week' }).click(); // a load clears the banner
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await expect(page.locator('.err')).toContainText('Could not create “Lunch”');
+        await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
+
+        await page.locator('.err').getByRole('button', { name: 'Dismiss' }).click();
         await expect(page.locator('.err')).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+      });
+
+      /** A refused edit is as much typing as a refused create, and gets the
+       *  same way back to it. */
+      test('a refused edit offers to reopen what was typed', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(page.locator('.err')).toContainText('Could not save “Board review”');
+
+        await page.locator('.err').getByRole('button', { name: 'Reopen' }).click();
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+      });
+
+      /** A click beside a form with changes in it is a missed click, not a
+       *  decision to throw them away: the form stays. One with nothing
+       *  changed still closes on it, and Cancel discards either way. */
+      test('a click outside a form keeps what was typed in it', async ({ page }) => {
+        await writable(page);
+        await openBoardPrepForm(page);
+        const outside = page.locator('button.scrim[aria-label="Cancel"]');
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+
+        await editForm(page).getByRole('button', { name: 'Cancel' }).click();
+        await expect(editForm(page)).toHaveCount(0);
+        await openBoardPrepForm(page);
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toHaveCount(0);
       });
 
       test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {
@@ -7122,6 +7177,21 @@ test.describe('the tasks sidebar', () => {
   };
   const lastCall = (page: import('@playwright/test').Page, cmd: string) => page.evaluate((c) =>
     (window as any).__harness.calls.filter((x: any) => x.cmd === c).pop()?.args, cmd);
+
+  /** Deleting a task removes it from the server at once and there is no
+   *  undo, so the × asks first: one click turns it into "Delete?", and only
+   *  that deletes. Anything else (another row, Escape) leaves the task. */
+  test('the × asks before a task is deleted', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByText('Buy milk').hover(); // the × shows on the row's hover
+    await side.getByRole('button', { name: 'Delete Buy milk' }).click();
+    expect(await lastCall(page, 'delete_task_cmd')).toBeUndefined();
+    await expect(side.getByText('Buy milk')).toBeVisible();
+
+    await side.getByRole('button', { name: 'Confirm delete Buy milk' }).click();
+    await expect.poll(() => lastCall(page, 'delete_task_cmd')).toEqual({ id: 11 });
+    await expect(side.getByText('Buy milk')).toHaveCount(0);
+  });
 
   /** The sidebar sits beside the week rather than over it: tasks are worked
    *  next to the calendar, and a panel covering the grid hides the thing the

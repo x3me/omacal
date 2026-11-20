@@ -212,13 +212,18 @@ pub(crate) const EVENT_NOT_SYNCED_YET: &str =
 fn friendly(e: CalDavError) -> anyhow::Error {
     match e {
         CalDavError::PreconditionFailed => anyhow::anyhow!(EVENT_CHANGED_ON_SERVER),
+        // In the allowlisted words any other status gets: the user learns the
+        // server said no, rather than reading "Sync failed".
+        CalDavError::Forbidden => {
+            anyhow::anyhow!(crate::errors::server_answered(reqwest::StatusCode::FORBIDDEN))
+        }
         other => anyhow::Error::from(other),
     }
 }
 
 /// Post-write reconciliation: one collection resynced through the read path,
 /// and the bar's feed refreshed.
-async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+pub(crate) async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
     let (client, collection_url) =
         crate::caldav_account::client_for_calendar(state, calendar_id).await?;
     let (supports_events, supports_tasks): (i64, i64) = sqlx::query_as(
@@ -1311,6 +1316,21 @@ mod tests {
 
             let until = master_until(&server).await;
             assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
+        }
+
+        /// A server that refuses a change (a calendar shared read-only that
+        /// still lists write access, say) says so in the words every other
+        /// status gets, rather than "Sync failed".
+        #[tokio::test]
+        async fn a_refused_change_says_the_server_refused_it() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+            let (state, ids) = seeded(&server, "refused-put@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+            let at = ms("2026-11-02T08:00:00Z");
+
+            let err = update(&state, ids["series-1"], "all", at, retitled(at, at + 3_600_000)).await.unwrap_err();
+
+            assert_eq!(crate::errors::user_facing(&err), "The server answered 403 Forbidden");
         }
 
         /// A moved event gets a file name of its own making. A UID is the

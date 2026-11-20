@@ -1,6 +1,6 @@
 <!-- ui/src/lib/Header.svelte -->
 <script lang="ts">
-  import { reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
+  import { caldavReauthMessage, reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
   import { zoneName } from './zonename.svelte';
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
@@ -19,7 +19,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, syncing = false, error, errorAction = null, calendars, view, onpick,
+    busy, syncing = false, error, errorAction = null, onDismissError, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     groups = [], onapplygroup = () => {}, onsavegroups = async () => {},
@@ -56,6 +56,9 @@
     /** A button beside the error, for a failure with a next step (a refused
      *  create's Reopen, part 3 spec §6). */
     errorAction?: { label: string; run: () => void } | null;
+    /** Clears the error banner. A write's failure stays until this runs:
+     *  nothing else on screen answers it. */
+    onDismissError?: () => void;
     calendars: Calendar[];
     /** The view the switcher shows as current — `App`'s own `view` state,
      *  passed straight through. */
@@ -174,6 +177,12 @@
    *  them and re-consent is the only fix, so this is the one failure with a
    *  button on it. */
   const reauth = $derived(status?.needs_reauth ?? []);
+  /** CalDAV accounts whose server rejects the stored password. Their fix is
+   *  the password entered again under Settings → Accounts, so their banner
+   *  opens that pane rather than starting a Google sign-in. */
+  const caldavReauth = $derived(status?.caldav_reauth ?? []);
+  /** The pane Settings opens on: Accounts when a CalDAV banner opened it. */
+  let settingsTab = $state<'General' | 'Accounts'>('General');
   /** The newer release, if the backend's daily check found one. */
   const update = $derived(status?.update ?? null);
   /** Dismissal is session-local on purpose: the notice returns on the next
@@ -229,7 +238,7 @@
   const light = $derived(
     syncLight(
       {
-        connected, busy: busy || syncing, error, reauth: reauth.length > 0,
+        connected, busy: busy || syncing, error, reauth: reauth.length + caldavReauth.length > 0,
         lastSyncMs: status?.last_sync_ms ?? null,
       },
       now,
@@ -245,6 +254,7 @@
 
   function openSettings() {
     menuOpen = false;
+    settingsTab = 'General';
     settingsOpen = true;
   }
 
@@ -491,6 +501,7 @@
     {oncalendarchange}
     {onappearancechange}
     {onsettingschange}
+    initialTab={settingsTab}
     onSignIn={() => {
       settingsOpen = false;
       onSignIn();
@@ -510,9 +521,10 @@
   </p>
 {/if}
 {#if error}
-  <p class="err" class:with-action={!!errorAction}>
+  <p class="err" class:with-action={!!errorAction || !!onDismissError}>
     <span>{error}</span>
     {#if errorAction}<button type="button" onclick={errorAction.run}>{errorAction.label}</button>{/if}
+    {#if onDismissError}<button type="button" class="dismiss" aria-label="Dismiss" onclick={onDismissError}>×</button>{/if}
   </p>
 {/if}
 
@@ -527,6 +539,16 @@
     <span>{reauthMessage(reauth)}</span>
     <button class="primary" onclick={onSignIn} disabled={busy}>
       {busy ? 'Connecting…' : 'Reconnect'}
+    </button>
+  </p>
+{/if}
+<!-- Its CalDAV twin. Same rules, a different fix: the server's password,
+     entered again where the account was connected. -->
+{#if caldavReauth.length > 0 && !status?.demo}
+  <p class="err reauth" data-testid="caldav-reauth-banner">
+    <span>{caldavReauthMessage(caldavReauth)}</span>
+    <button class="primary" onclick={() => { settingsTab = 'Accounts'; menuOpen = false; settingsOpen = true; }}>
+      Reconnect
     </button>
   </p>
 {/if}
@@ -720,6 +742,8 @@
             gap: 12px; flex-wrap: wrap; }
   .reauth button, .with-action button { border: none; border-radius: 6px; padding: 5px 12px;
                    font-size: 12.5px; cursor: pointer; }
+  /* The dismiss ×: quieter than the banner's one action. */
+  .with-action button.dismiss { background: transparent; color: inherit; padding: 2px 8px; font-size: 15px; }
   /* The .err shape in the accent's clothes: same box, calmer colours,
      because this banner reports an option rather than a problem. */
   .notice { color: var(--text); font-size: 12.5px; line-height: 1.45;

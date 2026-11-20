@@ -66,6 +66,7 @@
     oncalendarchange,
     onappearancechange,
     onsettingschange,
+    initialTab = 'General',
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
      *  one through `onSignIn` and cannot remove one, because nothing can yet. */
@@ -85,6 +86,9 @@
      *  backend now holds them. `App` derives the create-default from these,
      *  and without this call its copy is stale until a restart. */
     onsettingschange?: (s: AppSettings) => void;
+    /** The pane the modal opens on. Accounts, when it is opened to enter a
+     *  CalDAV server's password again; General otherwise. */
+    initialTab?: 'General' | 'Appearance' | 'Menu bar' | 'Calendars' | 'Accounts' | 'Notifications' | 'About';
     /** Live appearance preview. Separate from `onsettingschange`: dragging a
      *  range should repaint the calendar behind this modal without causing
      *  every unrelated settings reaction (including a weather cache read). */
@@ -886,7 +890,9 @@
   const TABS = ['General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications', 'About'] as const;
   type Tab = (typeof TABS)[number];
 
-  let tab = $state<Tab>('General');
+  // Read once, at open: the modal is mounted fresh each time it opens.
+  // svelte-ignore state_referenced_locally
+  let tab = $state<Tab>(initialTab);
 
   /** The About pane's own answer, beside its own links, like every other pane's
    *  note. Only a failure has anything to say here: a browser coming up is its

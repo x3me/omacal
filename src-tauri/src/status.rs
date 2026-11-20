@@ -14,6 +14,10 @@ pub struct AppStatus {
     /// prompt — which is why this is emails rather than a count: "an account
     /// needs attention" with two accounts connected is a guessing game.
     pub needs_reauth: Vec<String>,
+    /// CalDAV accounts whose server rejects the stored password, by address.
+    /// Apart from `needs_reauth` because the fix is different: the server's
+    /// password entered again in Settings, not a Google sign-in.
+    pub caldav_reauth: Vec<String>,
     /// A newer published release, when the daily check has found one — the
     /// header turns it into a quiet notice. `None` means current, unchecked,
     /// or demo; the UI has no reason to tell those apart.
@@ -85,9 +89,20 @@ pub async fn read_status(
             .fetch_all(pool)
             .await?;
 
+    // The marks arrive as one set: Google's under the bare address, CalDAV's
+    // under `caldav:` (`caldav_account::reauth_key`). Split here, the one
+    // place that decides what the UI is told.
+    let (caldav_reauth, needs_reauth): (Vec<String>, Vec<String>) =
+        needs_reauth.into_iter().partition(|k| k.starts_with(crate::caldav_account::REAUTH_PREFIX));
+    let caldav_reauth = caldav_reauth
+        .into_iter()
+        .map(|k| k[crate::caldav_account::REAUTH_PREFIX.len()..].to_string())
+        .collect();
+
     Ok(AppStatus {
         accounts,
         needs_reauth,
+        caldav_reauth,
         update,
         version,
         system_tz_change,
@@ -184,6 +199,22 @@ mod tests {
 
         let none = read_status(&pool, false, false, false, vec![], None, None, "1.2.3".into()).await.unwrap();
         assert!(none.needs_reauth.is_empty(), "a healthy account was told to reconnect");
+    }
+
+    /// A CalDAV account is marked under its own key, and reported apart from
+    /// Google's: the fix for each is different (sign in with Google again, or
+    /// enter the server's password again), so one list would send the user
+    /// down the wrong one. The same address on both providers is two
+    /// accounts, and only the dead one is named.
+    #[tokio::test]
+    async fn caldav_accounts_needing_reconnection_are_reported_apart() {
+        let pool = pool_with_account().await;
+        let marked = vec!["caldav:me@icloud.com".to_string(), "me@x.com".to_string()];
+
+        let s = read_status(&pool, false, false, false, marked, None, None, "1.2.3".into()).await.unwrap();
+
+        assert_eq!(s.needs_reauth, vec!["me@x.com".to_string()], "Google's sign-in alone");
+        assert_eq!(s.caldav_reauth, vec!["me@icloud.com".to_string()], "the server password, by address");
     }
 
     /// The Settings footer's whole claim. Pinned as a ride-through so a
