@@ -2394,6 +2394,22 @@ async fn split_series(
         }
     }
 
+    // Reminders, by the same rule as "Show as" further down: the form's when
+    // it set them, and otherwise what the dialog showed, the clicked
+    // occurrence's own (the exception's row for a moved occurrence, the
+    // series' for any other). This body is an INSERT, so leaving `reminders`
+    // out does not leave them alone: it gives the tail the calendar's
+    // defaults. Sent only when they are not those defaults, the create path's
+    // rule.
+    let reminders = match &after.reminders {
+        Some(wanted) => wanted.clone(),
+        None if ev.original_start_utc.is_some() => reminders_as_input(&ev.reminders),
+        None => reminders_as_input(&master_row.reminders),
+    };
+    if !reminders.use_default {
+        body["reminders"] = crate::write::reminders_json(&reminders);
+    }
+
     // **The tail carries the guest list the user asked for.**
     //
     // "This and following" means *from here on, it is like this*, so a guest
@@ -7258,6 +7274,8 @@ mod tests {
             "summary": "Standup",
             "recurrence": rules,
             "attendees": wire_guests(),
+            // What Google returns for an event on the calendar's defaults.
+            "reminders": {"useDefault": true},
             "start": {"dateTime": omacal_sync::to_rfc3339(DTSTART)},
             "end":   {"dateTime": omacal_sync::to_rfc3339(DTSTART + HOUR)}
         })
@@ -7971,6 +7989,136 @@ mod tests {
         let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
         let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
         assert_eq!(body["conferenceData"], conference);
+    }
+
+    /// Reminders travel to the tail like "Show as" does: the form's when it
+    /// set them, and the series' own otherwise. The tail is an INSERT, so
+    /// leaving them out quietly swapped a series' own reminders for the
+    /// calendar's defaults, and dropped a reminder change made on this save.
+    #[tokio::test]
+    async fn the_new_series_carries_the_series_reminders_or_the_forms() {
+        let popup = |minutes| crate::write::ReminderInput { method: "popup".into(), minutes };
+        for (form_r, want) in [
+            (
+                None,
+                serde_json::json!({"useDefault": false, "overrides": [
+                    {"method": "popup", "minutes": 25}, {"method": "email", "minutes": 1440},
+                ]}),
+            ),
+            (
+                Some(crate::write::RemindersInput { use_default: false, overrides: vec![popup(5)] }),
+                serde_json::json!({"useDefault": false, "overrides": [
+                    {"method": "popup", "minutes": 5},
+                ]}),
+            ),
+        ] {
+            let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+            let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+            let mut master = wire_master(&["RRULE:FREQ=WEEKLY"]);
+            master["reminders"] = serde_json::json!({"useDefault": false, "overrides": [
+                {"method": "popup", "minutes": 25}, {"method": "email", "minutes": 1440},
+            ]});
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(master))
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                    UNTIL_BEFORE_OCCURRENCE,
+                ])))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let after = crate::write::EventFields {
+                reminders: form_r,
+                ..form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR)
+            };
+            update_via_client(
+                &pool, "following", OCCURRENCE, ev, "cal@x.com", "UTC", after, "all", &client,
+            )
+            .await
+            .unwrap();
+
+            let sent = requests(&server).await;
+            let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+            let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+            assert_eq!(body["reminders"], want, "{body}");
+        }
+    }
+
+    /// Splitting from a moved occurrence with reminders of its own: the
+    /// dialog showed that occurrence's reminders, so the tail keeps them
+    /// rather than taking the series'.
+    #[tokio::test]
+    async fn a_split_from_a_moved_occurrence_carries_its_own_reminders() {
+        let mut ev = exception_row("master1_20260810T090000Z", OCCURRENCE, "confirmed");
+        ev.start_utc = OCCURRENCE + 5 * HOUR;
+        ev.end_utc = OCCURRENCE + 6 * HOUR;
+        ev.reminders = omacal_store::Reminders {
+            use_default: false,
+            overrides: vec![omacal_store::Reminder { method: "popup".into(), minutes: 45 }],
+        };
+        let clicked = ev.start_utc;
+        let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let server = wiremock::MockServer::start().await;
+        mount_master(&server, &["RRULE:FREQ=WEEKLY"]).await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(clicked)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                UNTIL_BEFORE_OCCURRENCE,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            clicked,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Standup", clicked, clicked + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let sent = requests(&server).await;
+        let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+        let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        assert_eq!(
+            body["reminders"],
+            serde_json::json!({"useDefault": false, "overrides": [{"method": "popup", "minutes": 45}]}),
+            "{body}"
+        );
     }
 
     /// "Show as" and visibility the form did not touch travel to the tail
