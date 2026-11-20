@@ -8,6 +8,7 @@
     guests,
     reach,
     verb,
+    notifyFirst = verb === 'Create',
     title,
     anchor,
     onconfirm,
@@ -28,6 +29,9 @@
      *  over a form whose own action reads "Create" is a small lie in the one
      *  dialog whose whole job is to be unambiguous about mailing other people. */
     verb: 'Save' | 'Create';
+    /** Whether notifying is the default answer: on a create, and on an edit
+     *  that moved the event or its place (`EventForm`'s `rescheduled`). */
+    notifyFirst?: boolean;
     /** The event's title, so the heading names what is being saved. Whatever
      *  opened this panel is behind it and cannot be read. */
     title: string;
@@ -79,11 +83,14 @@
       <button type="button" class="primary" data-choice onclick={() => onconfirm('none')}>
         {verb} my copy
       </button>
-    {:else if verb === 'Create'}
+    {:else if notifyFirst}
     <!-- A new event with guests is an invitation: telling them is what
          creating it is for, so notifying is primary here (Plamen, 2026-11-19),
-         as Quick Add's direct create already does. Focus still starts on
-         Cancel, so Enter alone sends nothing. -->
+         as Quick Add's direct create already does. So it is for an edit that
+         changed when or where (Plamen, 2026-11-20): guests outside Google
+         learn of a change only from the email, and their calendar keeps the
+         old time without it. Focus still starts on Cancel, so Enter alone
+         sends nothing. -->
     <button type="button" class="ghost" data-choice onclick={() => onconfirm('none')}>
       {verb} without notifying
     </button>
@@ -91,11 +98,9 @@
       {verb} and notify guests
     </button>
     {:else}
-    <!-- **On an edit, not notifying is the primary action**, and the order
-         says so — the same ruling as the drag's, for the same reason: mailing
-         everyone about a typo fix is the outcome this choice exists to
-         prevent. This is also the only path from this form to
-         `sendUpdates=all`. -->
+    <!-- **On an edit that left the time and place alone, not notifying is the
+         primary action**: mailing everyone about a typo fix is the outcome
+         this choice exists to prevent. -->
     <button type="button" class="ghost" data-choice onclick={() => onconfirm('all')}>
       {verb} and notify guests
     </button>

@@ -5490,10 +5490,11 @@ test.describe('EventForm', () => {
 
   /** A new event with guests is an invitation: telling them is what
    *  creating it is for, so notifying is the primary choice there (Plamen,
-   *  2026-11-19), as Quick Add's direct create already does. An edit keeps
-   *  "without notifying" primary: mailing everyone about a typo fix is the
-   *  outcome that choice exists to prevent. */
-  test('notifying is primary on a create, and not on an edit', async ({ page }) => {
+   *  2026-11-19), as Quick Add's direct create already does. An edit that
+   *  leaves the time and place alone keeps "without notifying" primary:
+   *  mailing everyone about a typo fix is the outcome that choice exists to
+   *  prevent. */
+  test('notifying is primary on a create, and not on an untouched edit', async ({ page }) => {
     await open(page, 'create-guests');
     await addGuest(page, 'ana@x.com');
     await page.getByRole('button', { name: 'Create', exact: true }).click();
@@ -5504,6 +5505,35 @@ test.describe('EventForm', () => {
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Save without notifying' })).toHaveClass(/\bprimary\b/);
     await expect(page.getByRole('button', { name: 'Save and notify guests' })).not.toHaveClass(/\bprimary\b/);
+  });
+
+  /** An edit that changes when or where is news the guests act on, and
+   *  guests outside Google learn of it only from the email: notifying is the
+   *  default answer, as it is for a drag (Plamen, 2026-11-20). A title fix
+   *  keeps not notifying first. Each arm against the other, or a panel that
+   *  always or never put notifying first would pass. */
+  test('an edit that moves the event or its place puts notifying first', async ({ page }) => {
+    const primaryAfter = async (edit: () => Promise<void>) => {
+      await open(page, 'with-guests');
+      await edit();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      const notify = page.getByRole('button', { name: 'Save and notify guests' });
+      const quiet = page.getByRole('button', { name: 'Save without notifying' });
+      await expect(notify).toBeVisible();
+      return (await notify.getAttribute('class'))?.match(/\bprimary\b/) ? 'notify'
+        : (await quiet.getAttribute('class'))?.match(/\bprimary\b/) ? 'quiet' : 'neither';
+    };
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Start', { exact: true }).fill('11:00');
+      await page.getByLabel('End', { exact: true }).fill('12:00');
+    }), 'a new time').toBe('notify');
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Location').fill('Room 4');
+    }), 'a new place').toBe('notify');
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Title').fill('A typo fixed');
+    }), 'a title fix').toBe('quiet');
+    expect(await primaryAfter(async () => {}), 'nothing changed').toBe('quiet');
   });
 
   test('an address typed in is added, and reaches the save', async ({ page }) => {

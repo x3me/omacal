@@ -332,6 +332,16 @@
    *  already here and nothing about it is the caller's business — the same
    *  reason the scope radios live in this form rather than in `App`. */
   let asking = $state<{ result: Omit<EventFormResult, 'notify'> } | null>(null);
+  /** When and where, as one comparable value: the fields a guest acts on. */
+  const whenAndWhere = (v: EventFormValue) => JSON.stringify([
+    v.date, v.endDate, v.start, v.end, v.isAllDay,
+    v.repeat, v.weeklyDays, v.repeatEnd, v.recurrence,
+    v.location.trim(), v.videoCall,
+  ]);
+  /** An edit that moved the event, changed how it repeats, or changed where it
+   *  is: notifying is then the save's default answer (`SaveConfirm`), as it
+   *  is for a drag. A title or description fix keeps not notifying first. */
+  const rescheduled = $derived(initial.isEdit && whenAndWhere(value) !== whenAndWhere(initial));
 
   /** The event arrived carrying a rule omacal cannot express. Read from
    *  `initial`, not `value`: once the user picks something else the entry stays
@@ -1271,6 +1281,7 @@
     guests={guests}
     {reach}
     {verb}
+    notifyFirst={verb === 'Create' || rescheduled}
     title={value.title.trim() === '' ? '(no title)' : value.title}
     {anchor}
     onconfirm={confirmSave}
