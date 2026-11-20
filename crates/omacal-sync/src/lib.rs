@@ -203,6 +203,8 @@ async fn apply(
     }
 
     let mut outcome = SyncOutcome { did_full_resync, ..Default::default() };
+    // Read before this sync writes its own cursor below.
+    let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await?;
 
     // On a full resync the fetched set is the whole truth for the window, and
     // it has to be *applied* as the whole truth: an event deleted upstream
@@ -276,6 +278,9 @@ async fn apply(
     .bind(window_end_ms)
     .execute(&mut *tx)
     .await?;
+    if first_sync {
+        omacal_store::forget_baseline_changes(&mut tx, calendar_id).await?;
+    }
 
     // The cursor write above must stay *before* this line, inside this
     // transaction, alongside the gate and the event writes. Move it after the
@@ -407,6 +412,51 @@ mod tests {
             "SELECT sync_token FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(tok.as_deref(), Some("tok-1"));
+    }
+
+    /// A calendar's first sync is the baseline, not news. It brings in every
+    /// occurrence of other people's series that was ever moved or cancelled,
+    /// and each insert fires the change ledger's triggers, so connecting an
+    /// account used to fill the invitation tray with "moved" and "cancelled"
+    /// for things that happened before the user ever looked. A move after
+    /// that first sync is still news.
+    #[tokio::test]
+    async fn a_calendars_first_sync_is_a_baseline_and_later_moves_are_news() {
+        let moved = |start: &str, token: &str| serde_json::json!({
+            "items": [{
+                "id": "s1_20260803", "status": "confirmed", "summary": "Standup",
+                "recurringEventId": "s1",
+                "organizer": { "email": "ana@x.com" },
+                "attendees": [{ "email": "e@x", "self": true, "responseStatus": "accepted" }],
+                "originalStartTime": { "dateTime": "2026-08-03T09:00:00+03:00", "timeZone": "Europe/Sofia" },
+                "start": { "dateTime": start, "timeZone": "Europe/Sofia" },
+                "end":   { "dateTime": start.replace("T10:", "T11:").replace("T12:", "T13:"), "timeZone": "Europe/Sofia" }
+            }],
+            "nextSyncToken": token
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/calendars/primary/events"))
+            .and(query_param_is_missing("syncToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(moved("2026-08-03T10:00:00+03:00", "tok-1")))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/calendars/primary/events"))
+            .and(query_param("syncToken", "tok-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(moved("2026-08-03T12:00:00+03:00", "tok-2")))
+            .mount(&server).await;
+        let pool = seeded_pool().await;
+        let client = CalendarClient::new(server.uri(), "at-1");
+        let ledger = |pool: sqlx::SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM event_changes WHERE calendar_id = 1")
+                .fetch_one(&pool).await.unwrap()
+        };
+
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 1, "the fixture's premise: the moved occurrence was stored");
+        assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
+
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
     }
 
     #[tokio::test]

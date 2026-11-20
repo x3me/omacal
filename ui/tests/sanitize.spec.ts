@@ -5,6 +5,60 @@ const text = (raw: string | null) =>
   descriptionSegments(raw).map((s) => s.value).join('');
 
 test.describe('descriptionSegments', () => {
+  /** Plain text carries `<` too. Only something shaped like a real HTML tag
+   *  is markup to strip; an address in angle brackets (a forwarded header's
+   *  "Alice <alice@corp.com>") and a less-than in a sentence are what the
+   *  author wrote, and were being eaten up to the next `>`. */
+  test('an address in angle brackets and a less-than stay as written', () => {
+    expect(text('From: Alice <alice@corp.com>')).toBe('From: Alice <alice@corp.com>');
+    expect(text('if p99 < 5ms and qps > 100')).toBe('if p99 < 5ms and qps > 100');
+    expect(text('<b>bold</b> and <i>it</i>')).toBe('bold and it');
+    // Shaped like a tag and named like none: the author's placeholder.
+    expect(text('Owner: <TBD>')).toBe('Owner: <TBD>');
+  });
+
+  /** Outlook and Teams invitations open with a `<style>` block and
+   *  conditional comments. Stripping only their tags left the CSS itself on
+   *  screen, ahead of the actual invitation. */
+  test('a style block, a script and a comment leave nothing behind', () => {
+    expect(text('<style>p.MsoNormal{margin:0}</style><p>Hi</p>')).toBe('Hi');
+    expect(text('<script>alert(1)</script>after')).toBe('after');
+    expect(text('<!--[if mso]><b>x</b><![endif]-->kept')).toBe('kept');
+    expect(text('before<!-- a note -->after')).toBe('beforeafter');
+  });
+
+  /** List items and table rows are lines, as paragraphs are. */
+  test('list items and table rows keep their lines', () => {
+    expect(text('<ul><li>one</li><li>two</li></ul>')).toBe('• one\n• two');
+    expect(text('<table><tr><td>a</td></tr><tr><td>b</td></tr></table>')).toBe('a\nb');
+  });
+
+  /** An anchor someone forgot to close is not a link around everything up
+   *  to the next anchor's `</a>`. */
+  test('an unclosed anchor does not swallow the next one', () => {
+    const out = descriptionSegments('<a href="https://x.com">Link<p>para two</p><a href="https://y.com">y</a>');
+    const links = out.filter((s) => s.kind === 'link');
+    expect(links).toEqual([{ kind: 'link', value: 'y', href: 'https://y.com' }]);
+    expect(text('<a href="https://x.com">Link<p>para two</p><a href="https://y.com">y</a>')).toBe('Linkpara two\ny');
+  });
+
+  /** A right-to-left override reverses what follows it on screen, so a
+   *  description could show one thing while saying another. */
+  test('bidirectional control characters are removed', () => {
+    expect(text('pay ‮gnp.exe')).toBe('pay gnp.exe');
+    expect(text('pay &#x202e;gnp.exe')).toBe('pay gnp.exe');
+  });
+
+  /** A sentence's full stop, or the parenthesis around a link, is not part
+   *  of where the link goes. */
+  test('a link ends before the punctuation around it', () => {
+    const href = (raw: string) => descriptionSegments(raw).find((s) => s.kind === 'link')?.href;
+    expect(href('See https://example.com/a.')).toBe('https://example.com/a');
+    expect(href('(https://example.com/foo)')).toBe('https://example.com/foo');
+    expect(href('https://en.wikipedia.org/wiki/Function_(mathematics)')).toBe('https://en.wikipedia.org/wiki/Function_(mathematics)');
+    expect(text('See https://example.com/a.')).toBe('See https://example.com/a.');
+  });
+
   test('a script tag is shown, not run', () => {
     // Anyone who knows your email can put an event on your calendar, so a
     // description is attacker-controlled input inside a webview that can call
@@ -109,6 +163,17 @@ test.describe('descriptionSegments', () => {
     // No '>' anywhere in the input, so nothing is a tag — the whole run is
     // kept as literal text, same as the old (slow) implementation produced.
     expect(out).toBe(input);
+  });
+
+  /** A style or script element is skipped to its end, and an end that never
+   *  comes is looked for once, not again from every later one: a run of
+   *  unclosed `<style>`s would otherwise rescan the rest of the string from
+   *  each of them. Same budget and reasoning as the test above. */
+  test('a run of unclosed style elements is stripped in linear time', () => {
+    const input = '<style>x'.repeat(200_000);
+    const start = Date.now();
+    stripTags(input);
+    expect(Date.now() - start).toBeLessThan(5000);
   });
 
   test('an anchor written with words keeps its destination', () => {

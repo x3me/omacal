@@ -249,18 +249,57 @@ fn scheme_has_handler(_scheme: &str) -> bool {
 /// own protocol when something claims it, avoiding the disposable browser
 /// handoff page; otherwise — and if the handler still fails — the original
 /// HTTPS link is the fallback. All other URLs take their existing path.
+///
+/// **Web links only.** Every link the user can click ends here (a Join
+/// button, a reminder's Join, a link in a description, the form's "Open"),
+/// and the system opener runs whatever a scheme is registered to: `file:`
+/// opens a local file or app, `smb:` mounts a share, a custom scheme starts
+/// whatever claimed it. Their sources are an event's own data, which anyone
+/// who can invite the user writes. So anything but `http`/`https` is
+/// refused before a process is spawned. The Zoom rewrite above is derived
+/// from a link that passed, so it is the one other scheme that leaves.
 pub(crate) fn open_external(url: &str) -> std::io::Result<()> {
+    open_external_with(url, &open_one)
+}
+
+/// [`open_external`] with the spawner passed in, so a test can watch what
+/// would have been opened without opening it.
+fn open_external_with(url: &str, open: &dyn Fn(&str) -> std::io::Result<()>) -> std::io::Result<()> {
+    let web = reqwest::Url::parse(url.trim())
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+    if !web {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "only web links are opened"));
+    }
     if let Some(direct) = zoom_join_uri(url) {
-        if scheme_has_handler("zoommtg") && open_one(&direct).is_ok() {
+        if scheme_has_handler("zoommtg") && open(&direct).is_ok() {
             return Ok(());
         }
     }
-    open_one(url)
+    open(url)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a web link leaves the app. Every link a user can click (a Join
+    /// button, a link in a description, the form's "Open") ends here, and
+    /// the system opener runs whatever a scheme is registered to: `file:`
+    /// opens a local file or app, `smb:` mounts a share. Refused before
+    /// anything is spawned, which the recording opener witnesses.
+    #[test]
+    fn only_a_web_link_is_handed_to_the_system() {
+        let opened = std::cell::RefCell::new(Vec::<String>::new());
+        let record = |u: &str| { opened.borrow_mut().push(u.to_string()); Ok(()) };
+        for refused in ["file:///etc/passwd", "smb://host/share", "javascript:alert(1)", "zoommtg://x", "not a url"] {
+            assert!(open_external_with(refused, &record).is_err(), "{refused}");
+        }
+        assert!(opened.borrow().is_empty(), "nothing refused was opened: {:?}", opened.borrow());
+
+        open_external_with("https://example.com/a", &record).unwrap();
+        open_external_with("HTTP://example.com/b", &record).unwrap();
+        assert_eq!(opened.borrow().len(), 2);
+    }
 
     /// Issue #100, as the reporter timed it: with the browser not already
     /// running, `xdg-open` execs it in the foreground and does not come back

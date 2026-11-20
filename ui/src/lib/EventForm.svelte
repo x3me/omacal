@@ -19,6 +19,7 @@
   import SaveConfirm from './SaveConfirm.svelte';
   import { editReach, type SendUpdates } from './eventdetail';
   import { zoneName } from './zonename.svelte';
+  import { openLink } from './api';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
     isCalendarAddress, mailableGuests, normalizedWeeklyDays, onlyShowAsChanged, previewSpan, removableGuest,
@@ -858,7 +859,8 @@
           {/if}
         </select>
         {#if value.videoCall?.uri}
-          <a href={value.videoCall.uri} target="_blank" rel="noopener noreferrer">Open ↗</a>
+          <a href={value.videoCall.uri} target="_blank" rel="noopener noreferrer"
+             onclick={(e) => { e.preventDefault(); if (value.videoCall?.uri) void openLink(value.videoCall.uri).catch(() => {}); }}>Open ↗</a>
         {/if}
       </div>
       {#if videoChoice === 'googleMeet' && value.videoCall?.uri === null}
@@ -874,6 +876,7 @@
             oninput={(e) => updateZoomCall(e.currentTarget.value)}
           />
           <a href="https://zoom.us/meeting/schedule" target="_blank" rel="noopener noreferrer"
+             onclick={(e) => { e.preventDefault(); void openLink('https://zoom.us/meeting/schedule').catch(() => {}); }}
             >Schedule ↗</a
           >
         </div>

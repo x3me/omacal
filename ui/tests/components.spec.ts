@@ -2940,6 +2940,19 @@ test.describe('EventPopover', () => {
     await expect(link).toHaveAttribute('data-copy-value', 'https://docs.example.com/pre-read');
   });
 
+  /** A click on a description's link is opened by the backend, as Join is,
+   *  never by the webview: the webview's own spawn hands the browser this
+   *  process's AppImage environment (issue #1), and the backend is where a
+   *  link is checked for being a web link at all. */
+  test('a link in the description is opened by the backend', async ({ page }) => {
+    await page.goto(show('labelled-link-description'));
+    await page.locator('.desc a').click();
+    const calls = await page.evaluate(() => (window as any).__harness.calls);
+    expect(calls.filter((c: any) => c.cmd === 'open_link')).toEqual([
+      expect.objectContaining({ args: { url: 'https://docs.example.com/pre-read' } }),
+    ]);
+  });
+
   test('a one-off event offers no scope choice', async ({ page }) => {
     await page.goto(show('standup'));
     await expect(page.locator('.rsvp')).toBeVisible();
