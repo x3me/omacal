@@ -1159,8 +1159,29 @@ test.describe('Header', () => {
 
   test('disconnected state offers to connect', async ({ page }) => {
     await page.goto(show('Header', 'disconnected'));
-    await expect(page.getByRole('button', { name: 'Connect Google Calendar' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await expect(page.locator('header')).toHaveScreenshot('header-disconnected.png');
+  });
+
+  /** A new user is offered every kind of calendar the app connects, not only
+   *  Google's: the site pitches Google, iCloud and any CalDAV server alike,
+   *  and the other three used to wait behind ☰ → Settings → Accounts.
+   *  Google starts its sign-in; the others open Accounts with their own
+   *  form already open. */
+  test('the empty state offers every kind of calendar, each to its own form', async ({ page }) => {
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    const menu = page.getByRole('menu', { name: 'Connect a calendar' });
+    await expect(menu.getByRole('menuitem')).toHaveText(['Google Calendar', 'iCloud', 'CalDAV server', 'WebCal feed']);
+
+    await menu.getByRole('menuitem', { name: 'iCloud' }).click();
+    await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('textbox', { name: 'Apple ID' })).toBeVisible();
+
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'WebCal feed' }).click();
+    await expect(page.getByRole('group', { name: 'Subscribe to a calendar URL' }).getByRole('textbox').first()).toBeVisible();
   });
 
   /**
@@ -1400,7 +1421,7 @@ test.describe('Header', () => {
     // Connect stays in the header rather than moving behind the hamburger: the
     // three controls §1 moves are all rare, and this is the one thing a new
     // user has to find.
-    await expect(page.getByRole('button', { name: /Connect Google Calendar/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await openMenu(page);
     await expect(page.getByRole('button', { name: 'Add Google account' })).toHaveCount(0);
   });
@@ -1583,6 +1604,20 @@ test.describe('Header', () => {
 
     const values = await page.evaluate(() => (window as any).__harness.settingValues('photonPlaces'));
     expect(values[0]).toBe(true);
+  });
+
+  /** The daily update check asks GitHub, a third party, so turning it off is
+   *  the user's to do. On by default (the backend starts it off inside a
+   *  Flatpak, whose package manager brings the updates). */
+  test('About carries the update check, on by default and saved off', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'About');
+    const toggle = modal.getByRole('checkbox', { name: 'Check for updates' });
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect(toggle).not.toBeChecked();
+    const values = await page.evaluate(() => (window as any).__harness.settingValues('updateCheck'));
+    expect(values[0]).toBe(false);
   });
 
   /**
@@ -5389,6 +5424,24 @@ test.describe('EventForm', () => {
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Save event' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Save without notifying' })).toBeVisible();
+  });
+
+  /** A new event with guests is an invitation: telling them is what
+   *  creating it is for, so notifying is the primary choice there (Plamen,
+   *  2026-11-19), as Quick Add's direct create already does. An edit keeps
+   *  "without notifying" primary: mailing everyone about a typo fix is the
+   *  outcome that choice exists to prevent. */
+  test('notifying is primary on a create, and not on an edit', async ({ page }) => {
+    await open(page, 'create-guests');
+    await addGuest(page, 'ana@x.com');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Create and notify guests' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Create without notifying' })).not.toHaveClass(/\bprimary\b/);
+
+    await open(page, 'with-guests');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Save without notifying' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Save and notify guests' })).not.toHaveClass(/\bprimary\b/);
   });
 
   test('an address typed in is added, and reaches the save', async ({ page }) => {

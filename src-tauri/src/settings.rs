@@ -92,6 +92,7 @@ const AUTOSTART_KEY: &str = "autostart";
 const AUTOSTART_ASKED_KEY: &str = "autostart_asked";
 const WEATHER_KEY: &str = "weather_enabled";
 const PHOTON_PLACES_KEY: &str = "photon_places";
+const UPDATE_CHECK_KEY: &str = "update_check";
 const APPEARANCE_KEY: &str = "appearance";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
@@ -691,6 +692,10 @@ pub struct AppSettings {
     /// Photon's public server asks for light personal use. History
     /// suggestions stay on regardless — they never leave the machine.
     pub photon_places: bool,
+    /// Whether the daily check for a newer release runs (it asks GitHub's
+    /// public release listing, which sees the version and the IP address).
+    /// See [`update_check_default`] for why it starts off inside Flatpak.
+    pub update_check: bool,
     /// Whether the day headers' forecast high is drawn in Celsius or
     /// Fahrenheit — Celsius by default, so no installed copy changes under
     /// its user. Read by the same components as `weather_enabled` guards,
@@ -1131,6 +1136,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // the setting must keep sending only an IP to the weather service,
         // not typed locations to a third party.
         photon_places: photon_places(pool).await,
+        update_check: update_check(pool).await,
         // Same "only a spelling this version writes moves the setting" rule
         // as `week_start`: absent, garbage and a future spelling all land on
         // Celsius, the unit omacal has always drawn.
@@ -1256,6 +1262,25 @@ pub(crate) async fn weather_enabled(pool: &SqlitePool) -> bool {
 /// means. Absent is off — `list_mode`'s polarity, for the opposite of
 /// weather's reason: a forecast nobody asked to lose is decoration; a
 /// typed location sent off-machine is not.
+/// Whether the update check may run, named for [`weather_enabled`]'s reason:
+/// the update loop and `read_settings` must agree on default and polarity.
+pub(crate) async fn update_check(pool: &SqlitePool) -> bool {
+    read(pool, UPDATE_CHECK_KEY)
+        .await
+        .map(|v| v == "1")
+        .unwrap_or_else(|| update_check_default(std::env::var_os("FLATPAK_ID").is_some()))
+}
+
+/// The update check's default before the user has chosen. On, except inside
+/// a Flatpak: there the package manager delivers updates, and a notice from
+/// GitHub only repeats it late, at the cost of a request to a third party.
+/// The other packaged channels (the .deb, the .rpm, the AUR, all the same
+/// binary) cannot be told apart from a download at run time, so they keep
+/// it on, and anyone can turn it off in Settings.
+pub(crate) fn update_check_default(in_flatpak: bool) -> bool {
+    !in_flatpak
+}
+
 pub(crate) async fn photon_places(pool: &SqlitePool) -> bool {
     read(pool, PHOTON_PLACES_KEY).await.map(|v| v == "1").unwrap_or(false)
 }
@@ -1517,6 +1542,8 @@ pub enum Setting {
     /// Whether Photon may be queried from the Location field. History
     /// suggestions ignore this — they are a local SELECT.
     PhotonPlaces(bool),
+    /// Whether the daily update check runs.
+    UpdateCheck(bool),
     NotificationsEnabled(bool),
     /// The task half of the switch above (#137), stored separately so either
     /// can be off while the other speaks.
@@ -1711,6 +1738,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         }
         S::WeatherEnabled(on) => write(pool, WEATHER_KEY, flag(*on)).await?,
         S::PhotonPlaces(on) => write(pool, PHOTON_PLACES_KEY, flag(*on)).await?,
+        S::UpdateCheck(on) => write(pool, UPDATE_CHECK_KEY, flag(*on)).await?,
         S::NotificationsEnabled(on) => write(pool, NOTIFICATIONS_KEY, flag(*on)).await?,
         S::TaskNotificationsEnabled(on) => write(pool, TASK_NOTIFICATIONS_KEY, flag(*on)).await?,
         S::KeepRemindersOnScreen(on) => write(pool, KEEP_REMINDERS_KEY, flag(*on)).await?,

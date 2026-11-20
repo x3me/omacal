@@ -758,6 +758,7 @@ type StubSettings = {
   weatherEnabled: boolean;
   weatherLocation: string | null;
   photonPlaces: boolean;
+  updateCheck: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
   startOnLoginAsked: boolean;
@@ -852,6 +853,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   // Off until asked: typed locations do not leave the machine on a
   // fresh install, and Photon's public server asks for light use.
   photonPlaces: false,
+  updateCheck: true,
   // The backend's default: Celsius, so no installed copy changes under its user.
   temperatureUnit: 'celsius',
   // The backend's default too, and for a reason the stub has to reproduce

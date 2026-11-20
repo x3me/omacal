@@ -446,7 +446,8 @@ test.describe('App', () => {
   // line threw away.
   test('the first-run config error is readable in full', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
 
     const err = page.locator('.err');
     await expect(err).toContainText('Create it with client_id and client_secret');
@@ -461,7 +462,8 @@ test.describe('App', () => {
 
   test('the error clears when the user moves to another week', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.err')).toContainText(NO_CONFIG_ERROR);
 
     await page.getByRole('button', { name: 'Next week' }).click();
@@ -496,7 +498,8 @@ test.describe('App', () => {
   // never left syncing behind the user's back without them having seen it.
   test('signing in opens the picker with the new calendars in it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await expect(page.locator('.acct')).toHaveCount(1);
   });
@@ -510,7 +513,8 @@ test.describe('App', () => {
   // true and unable to reopen the (by-then-closed) child.
   test('closing the picker then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('.panel')).toHaveCount(0);
@@ -527,7 +531,8 @@ test.describe('App', () => {
   // reviewer who found this confirmed both propagate up correctly.
   test('clicking away then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     // **The picker's own scrim**, named exactly: the menu it now sits inside
     // has one too, and clicking the wrong one would close the wrong layer.
@@ -1213,6 +1218,27 @@ test.describe('App', () => {
       await page.mouse.up();
       return { cx, cy };
     };
+
+    /** A drag the window loses mid-gesture (Alt-Tab, a notification taking
+     *  focus, a touchpad palm-rejected) is abandoned, as Escape abandons it.
+     *  It used to stay armed until the next release anywhere, which then
+     *  committed a move the user never finished. */
+    test('a drag the window loses is abandoned, not dropped on the next release', async ({ page }) => {
+      await writable(page);
+      const b = block(page, 'Board prep').first();
+      await b.scrollIntoViewIfNeeded();
+      const box = (await b.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx, cy + 60, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await page.mouse.move(cx, cy + 120, { steps: 4 });
+      await page.mouse.up();
+      await page.waitForTimeout(300);
+      expect(await callsTo(page, 'update_event'), 'nothing was moved').toHaveLength(0);
+    });
 
     /**
      * **A dragged block is drawn as it would land, not as it was packed.**
@@ -4355,6 +4381,39 @@ test.describe('App', () => {
     await expect(results(page)).toHaveCount(0);
   });
 
+  /** Search is keyboard-first like the rest of the app: Enter opens the top
+   *  result, and the arrows move a selection Enter then opens. Before, the
+   *  field took neither, so a result could be reached only by Tab or the
+   *  mouse. The second "standup" hit is the guests fixture, whose details
+   *  are titled "Client call", which is what tells the two picks apart. */
+  test('Enter opens the top result, and the arrows choose another', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    await page.keyboard.press('Enter');
+    await expect(search(page)).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'Standup' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    const hits = search(page).getByRole('option');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(1)).toHaveAttribute('aria-selected', 'true');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowDown'); // the last stays chosen
+    await page.keyboard.press('ArrowUp');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(field(page)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Client call' })).toBeVisible();
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');
@@ -4441,11 +4500,11 @@ test.describe('App', () => {
     await writable(page);
     await page.keyboard.press('/');
     await field(page).fill('board');
-    // The **button**, not the `<li>` around it. A list item is not focusable,
+    // The **result** (an option), not the `<li>` around it. A list item is not focusable,
     // so focusing one leaves focus in the field — where `isTypingTarget`
     // already spares the key, and the guard under test never runs. That is
     // what the first version of this spec did, and a mutation is what said so.
-    await results(page).first().getByRole('button').focus();
+    await results(page).first().getByRole('option').focus();
     await expect(field(page)).not.toBeFocused();
 
     await page.keyboard.press('4');
@@ -4494,7 +4553,7 @@ test.describe('App', () => {
     await field(page).fill('milk');
     await expect(results(page)).toHaveCount(1);
     await expect(results(page).first()).toContainText('Buy milk');
-    await results(page).first().getByRole('button').click();
+    await results(page).first().getByRole('option').click();
 
     await expect(search(page), 'search does not linger').toHaveCount(0);
     const side = page.getByRole('complementary', { name: 'Tasks' });
@@ -6054,6 +6113,26 @@ test.describe('App: keyboard event navigation', () => {
 
   /* `h` and `l` are the keyboard's own arrows, so they page and keep it
      showing. Fails the moment the hide moves into `step`, which all four share. */
+  /** `n` and `q` create on the day the keyboard has selected, not on the
+   *  day the view is anchored to: moving the selection to Tuesday (`w`) and
+   *  pressing `n` used to open a form for Monday, the anchor. */
+  test('n and q create on the selected day', async ({ page }) => {
+    await page.keyboard.press('w'); // next day: Tuesday 30 January
+    await expect(page.locator('.kbd-status')).toContainText('Selected');
+    await page.keyboard.press('n');
+    const form = page.getByRole('dialog', { name: 'New event' });
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2024-01-30');
+  });
+
+  /** A shortcut does nothing while a menu or a panel of the header is open:
+   *  `n` opened a form behind the open menu, and the view keys moved the
+   *  calendar under an open invitation tray or calendar list. */
+  test('shortcuts wait while a header menu is open', async ({ page }) => {
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.keyboard.press('n');
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
+  });
+
   test('h and l keep the keyboard selection', async ({ page }) => {
     await page.keyboard.press('w');
     await page.keyboard.press('l');

@@ -202,7 +202,11 @@ test('tray error dismissal clears the shared notice and a narrow header keeps it
 for (const scenario of ['sign-in-adds-account', 'needs-reauth']) test(`${scenario} syncs the newly connected calendars`, async ({page}) => {
   await page.goto(`/tests/harness/index.html?c=App&f=${scenario}`);
   const before = await calls(page, 'get_week');
-  await page.getByRole('button', {name: scenario === 'needs-reauth' ? 'Reconnect' : 'Connect Google Calendar', exact: true}).click();
+  if (scenario === 'needs-reauth') await page.getByRole('button', {name: 'Reconnect', exact: true}).click();
+  else {
+    await page.getByRole('button', {name: 'Connect calendar…', exact: true}).click();
+    await page.getByRole('menuitem', {name: 'Google Calendar'}).click();
+  }
   await expect.poll(() => calls(page, 'sign_in')).toBe(1);
   await expect.poll(() => calls(page, 'sync_now')).toBe(1);
   await expect.poll(() => calls(page, 'get_week')).toBeGreaterThan(before);

@@ -79,11 +79,23 @@
       <button type="button" class="primary" data-choice onclick={() => onconfirm('none')}>
         {verb} my copy
       </button>
+    {:else if verb === 'Create'}
+    <!-- A new event with guests is an invitation: telling them is what
+         creating it is for, so notifying is primary here (Plamen, 2026-11-19),
+         as Quick Add's direct create already does. Focus still starts on
+         Cancel, so Enter alone sends nothing. -->
+    <button type="button" class="ghost" data-choice onclick={() => onconfirm('none')}>
+      {verb} without notifying
+    </button>
+    <button type="button" class="primary" data-choice onclick={() => onconfirm('all')}>
+      {verb} and notify guests
+    </button>
     {:else}
-    <!-- **Not notifying is the primary action**, and the order says so — the
-         same ruling as the drag's, for the same reason: sending mail to other
-         people is the deliberate choice, never the default. This is also the
-         only path from this form to `sendUpdates=all`. -->
+    <!-- **On an edit, not notifying is the primary action**, and the order
+         says so — the same ruling as the drag's, for the same reason: mailing
+         everyone about a typo fix is the outcome this choice exists to
+         prevent. This is also the only path from this form to
+         `sendUpdates=all`. -->
     <button type="button" class="ghost" data-choice onclick={() => onconfirm('all')}>
       {verb} and notify guests
     </button>
