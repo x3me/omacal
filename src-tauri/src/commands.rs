@@ -881,15 +881,20 @@ pub fn assemble_big_year_combining(
                 if src.status == "cancelled" {
                     continue;
                 }
+                // Only all-day events are drawn here, so a timed one is
+                // skipped before it is expanded, not after: a daily timed
+                // series was expanded once per row, fourteen times, and every
+                // occurrence thrown away.
+                if !src.is_all_day {
+                    continue;
+                }
                 for iv in occurrences(src, row_start, row_end) {
                     if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                         continue;
                     }
-                    if src.is_all_day {
-                        let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
-                        segments.push(Segment { idx: pill_events.len(), start_col, end_col });
-                        pill_events.push(to_ui(src, iv.start_ms, iv.end_ms));
-                    }
+                    let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
+                    segments.push(Segment { idx: pill_events.len(), start_col, end_col });
+                    pill_events.push(to_ui(src, iv.start_ms, iv.end_ms));
                 }
             }
 

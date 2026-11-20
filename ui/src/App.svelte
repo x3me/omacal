@@ -36,7 +36,7 @@
   import { calendarColor, getCalendars, offerableCalendarId, setCalendarSelected, type Calendar } from './lib/calendars';
   import { applyCalendarGroup, groupIndexForCode, saveCalendarGroups, type CalendarGroup } from './lib/calendargroups';
   import {
-    createEvent, deleteEvent, getEventDetail, updateEvent,
+    createEvent, deleteEvent, getEventDetail, refreshEvent, updateEvent,
     type EventDetail, type Occurrence, type SendUpdates,
   } from './lib/eventdetail';
   import {
@@ -773,6 +773,9 @@
       event.start_ms,
       event.end_ms,
       r ? { top: r.top, left: r.left, width: r.width, height: r.height } : keyboardAnchor(),
+      // A combined event's copies, as a click passes them: without them the
+      // card has no copy chooser.
+      event.copies ?? [],
     );
   }
 
@@ -877,6 +880,16 @@
    *  not be undone once that slow read lands — bumped by `pick`, the one
    *  chokepoint every way of changing `view` already goes through. */
   let viewChoices = 0;
+  /** Whether the stored settings have been read once (or failed to be), so
+   *  the view they name is known. The first fetch waits for it: the app
+   *  started on Week, fetched that week, and then switched to the stored
+   *  default when the settings arrived, a flash of the wrong view and a
+   *  fetch thrown away. */
+  let settingsSeeded = $state(false);
+  // Not a wait without end: a view or list chosen before the settings land
+  // is the user's own answer to "what to show" (see `viewChoices`), and a
+  // read that never lands must not leave the grid empty.
+  setTimeout(() => { settingsSeeded = true; }, 1500);
 
   /** The stored default for new events, or `null` for the old rule. Seeded
    *  below and kept fresh by `SettingsModal`'s `onsettingschange` — without
@@ -959,7 +972,8 @@
         if (listModeChoices !== before) return; // superseded by the user's own choice
         listMode = s.listMode;
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { settingsSeeded = true; });
   });
 
   async function toggleList() {
@@ -968,6 +982,7 @@
     // way to see or undo it.
     if (!listable(view)) return;
     listModeChoices += 1;
+    settingsSeeded = true;
     listMode = !listMode;
     try {
       await setSetting('listMode', listMode);
@@ -1215,6 +1230,7 @@
     // Reading it here, synchronously, is what makes this effect depend on
     // `fetchPlan` — and, transitively, on `view` and `anchorMs`.
     const plan = fetchPlan;
+    if (!settingsSeeded) return;
     // A new view or a new date is a new attempt: a stale failure must not
     // outlive the switch.
     error = null;
@@ -1395,6 +1411,7 @@
     // `listModeChoices`'s reason: a settings read still in flight when this
     // runs must not later overwrite whatever the switcher just chose.
     viewChoices += 1;
+    settingsSeeded = true;
     // Spec §5 and the DoD: the anchor survives every switch, and Year is a
     // switch like any other. `yearNum` starts on the real current year, so
     // without this an anchor on 28 Dec 2022 opened Year on the current year
@@ -1742,6 +1759,11 @@
         return;
       }
       gridDetail = d;
+      // Then the fresh copy, as a click on the grid asks for one: an answer
+      // or a move made elsewhere since the last sync. The keyboard's and
+      // search's opens used to keep the store's copy. A failure leaves the
+      // card as drawn, which is still true.
+      void refreshEvent(id).then((fresh) => { if (mine() && gridDetail?.id === id) gridDetail = fresh; }).catch(() => {});
     } catch (e) {
       // Same rule as `WeekGrid.openPopover`: close, but never in silence.
       // A click that opens nothing and says nothing reads as a dead
