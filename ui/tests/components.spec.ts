@@ -2954,6 +2954,24 @@ test.describe('EventPopover', () => {
     await expect(page.locator('.pop .note')).toHaveText('Copied description');
   });
 
+  /** Copy floated alone above the text's right edge, tiny, on a line of its
+   *  own: "this COPY button is somehow not well placed" (Plamen, 2026-11-20).
+   *  It now sits on a Notes heading's line, at the right, over the text. */
+  test('the description has a Notes heading, with Copy on its line', async ({ page }) => {
+    await page.goto(show('labelled-link-description'));
+    const label = page.locator('.desc .desclabel');
+    await expect(label).toHaveText('Notes');
+    const copy = page.getByRole('button', { name: 'Copy description' });
+    const text = page.locator('.desc p');
+    const [l, c, t] = await Promise.all([label.boundingBox(), copy.boundingBox(), text.boundingBox()]);
+    if (!l || !c || !t) throw new Error('not laid out');
+    expect(Math.abs((l.y + l.height / 2) - (c.y + c.height / 2)), 'one line').toBeLessThan(3);
+    expect(c.x, 'Copy after the heading').toBeGreaterThan(l.x + l.width);
+    expect(c.y + c.height, 'above the text, not beside it').toBeLessThanOrEqual(t.y + 1);
+    expect(t.y - (l.y + l.height), 'the text right under its heading, no empty line between').toBeLessThan(8);
+    expect(Math.abs((c.x + c.width) - (t.x + t.width)), 'at the text column\'s right edge').toBeLessThan(6);
+  });
+
   test('a description containing markup is shown as text', async ({ page }) => {
     await page.goto(show('nasty-description'));
     await expect(page.locator('.desc')).toContainText('<script>alert(1)</script>');
@@ -3284,6 +3302,50 @@ test.describe('EventPopover on an all-day series east of the browser', () => {
     // be read off instants on the other arm without this one having to care.
     await page.goto('/tests/harness/index.html?c=EventPopover&f=all-day-series-east-of-the-browser');
     await expect(page.locator('.when')).not.toContainText(':');
+  });
+});
+
+/** A multi-day event says where it starts, where it ends and how long it is:
+ *  the line showed the first day alone (Plamen, 2026-11-20). Every view opens
+ *  this one popover, so this is the fix for Week, Month and both Year views. */
+test.describe('EventPopover: an event of more than one day', () => {
+  test.use({ timezoneId: 'UTC' });
+  const open = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
+
+  test('a trip names its first and last day and counts them', async ({ page }) => {
+    await page.goto(open('all-day-trip'));
+    await expect(page.locator('.when')).toHaveText('Tue, Nov 24 – Sat, Dec 12 · 19 days');
+  });
+
+  test('across New Year both ends carry their year', async ({ page }) => {
+    await page.goto(open('all-day-over-new-year'));
+    await expect(page.locator('.when')).toHaveText('Wed, Dec 30, 2026 – Sat, Jan 2, 2027 · 4 days');
+  });
+
+  test('an occurrence of a series shows its own range', async ({ page }) => {
+    await page.goto(open('all-day-series-of-three-days'));
+    await expect(page.locator('.when')).toHaveText('Sat, Jul 10 – Mon, Jul 12 · 3 days');
+  });
+
+  test('a one-day all-day event is still just its day', async ({ page }) => {
+    await page.goto(open('all-day-series-east-of-the-browser'));
+    await expect(page.locator('.when')).toHaveText('Thu, Aug 13');
+  });
+
+  test('a timed event that lands the next day names both days', async ({ page }) => {
+    await page.goto(open('timed-overnight'));
+    await expect(page.locator('.when')).toHaveText('Mon, Nov 9 22:00 – Tue, Nov 10 06:00');
+  });
+
+  test('a timed event ending at midnight stays one evening', async ({ page }) => {
+    await page.goto(open('timed-to-midnight'));
+    await expect(page.locator('.when')).toHaveText('Mon, Nov 9 · 22:00–00:00');
+  });
+
+  test('the date line copies as it reads', async ({ page }) => {
+    await page.goto(open('all-day-trip'));
+    await expect(page.getByRole('button', { name: 'Copy date and time' }))
+      .toHaveAttribute('data-copy-value', 'Tue, Nov 24 – Sat, Dec 12 · 19 days');
   });
 });
 

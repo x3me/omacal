@@ -106,7 +106,8 @@
   /** The day an **instant** falls on, read in the browser's zone — right for a
    *  timed event, whose start genuinely is an instant and whose reader is
    *  whoever is looking at the screen. */
-  const dayOfInstant = (ms: number) => formatDate(new Date(ms).getTime(), dateFormat(), DAY_FORMAT);
+  const dayOfInstant = (ms: number, year = false) =>
+    formatDate(new Date(ms).getTime(), dateFormat(), year ? { ...DAY_FORMAT, year: 'numeric' } : DAY_FORMAT);
 
   /** The day a `yyyy-mm-dd` names, read in **no** zone.
    *
@@ -120,9 +121,15 @@
    *  midnight in the **calendar's** zone, and this browser does not know what
    *  that zone is; reading it here is how this line used to show "Sun, Aug 9"
    *  for a trip the form beside it opened on `2026-08-10`. */
-  const dayOfDate = (date: string) => {
+  const dayOfDate = (date: string, year = false) => {
     const [y, m, d] = date.split('-').map(Number);
-    return formatDate(new Date(Date.UTC(y, m - 1, d)).getTime(), dateFormat(), { ...DAY_FORMAT, timeZone: 'UTC' });
+    return formatDate(new Date(Date.UTC(y, m - 1, d)).getTime(), dateFormat(),
+      { ...DAY_FORMAT, timeZone: 'UTC', ...(year ? { year: 'numeric' } : {}) });
+  };
+  /** Days from one `yyyy-mm-dd` to another, read in no zone. */
+  const daysBetween = (a: string, b: string) => {
+    const utc = (s: string) => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+    return Math.round((utc(b) - utc(a)) / 86_400_000);
   };
 
   /**
@@ -135,9 +142,8 @@
    * function, so the two cannot drift apart on screen again — see its comment in
    * `eventform.ts` for why the subtraction has no zone in it.
    *
-   * Only the first day, for a multi-day all-day event, which is what this line
-   * has always shown. Widening it to a range is a display question, not a
-   * boundary one, and is not this task's.
+   * A multi-day event names both ends (`whenLine`). Its last day moves with
+   * its first: `end_date` is shifted by the same whole days as `start_date`.
    *
    * One consequence worth stating, since `detail` is a live prop and these two
    * are not: the after-paint `refresh_event` no longer moves this line. It
@@ -146,14 +152,39 @@
    * was not on — and a genuine time change reaches the screen the way every
    * other one does, when the grid reloads.
    */
-  const day = $derived(
+  const firstDate = $derived(
+    detail.is_all_day ? occurrenceDate(detail.start_date, detail.start_ms, occurrenceStartMs) : null,
+  );
+  const lastDate = $derived(
     detail.is_all_day
-      ? dayOfDate(occurrenceDate(detail.start_date, detail.start_ms, occurrenceStartMs))
-      : dayOfInstant(occurrenceStartMs),
+      ? occurrenceDate(detail.end_date ?? detail.start_date, detail.start_ms, occurrenceStartMs)
+      : null,
   );
-  const whenLine = $derived(
-    detail.is_all_day ? day : `${day} · ${hhmm(occurrenceStartMs)}–${hhmm(occurrenceEndMs)}`,
-  );
+  /**
+   * The date line. A multi-day event says where it starts, where it ends and,
+   * all day, for how many days (Plamen, 2026-11-20: the first day alone was
+   * "very small amount of information" for a three-week trip). Both ends
+   * carry their year when they fall in different ones. A timed event that
+   * ends on a later day names both days, or 22:00–06:00 hides that it lands
+   * the next morning; one that ends on the stroke of midnight is still one
+   * evening.
+   */
+  const whenLine = $derived.by(() => {
+    if (detail.is_all_day && firstDate && lastDate) {
+      const n = daysBetween(firstDate, lastDate) + 1;
+      if (n <= 1) return dayOfDate(firstDate);
+      const year = firstDate.slice(0, 4) !== lastDate.slice(0, 4);
+      return `${dayOfDate(firstDate, year)} – ${dayOfDate(lastDate, year)} · ${n} days`;
+    }
+    const start = new Date(occurrenceStartMs);
+    const last = new Date(occurrenceEndMs - 1);
+    if (occurrenceEndMs - occurrenceStartMs > 0 && start.toDateString() !== last.toDateString()) {
+      const year = start.getFullYear() !== last.getFullYear();
+      return `${dayOfInstant(occurrenceStartMs, year)} ${hhmm(occurrenceStartMs)} – `
+        + `${dayOfInstant(occurrenceEndMs, year)} ${hhmm(occurrenceEndMs)}`;
+    }
+    return `${dayOfInstant(occurrenceStartMs)} · ${hhmm(occurrenceStartMs)}–${hhmm(occurrenceEndMs)}`;
+  });
 
   // A neutral default so `.pop` renders (and so `offsetWidth`/`offsetHeight`
   // are measurable at all) before `onMount` below can place it for real.
@@ -575,10 +606,15 @@
 
   {#if segments.length}
     <div class="desc">
-      <button type="button" class="copydesc" aria-label="Copy description"
-              data-copy-label="description"
-              data-copy-value={detail.description ?? ''}
-              onclick={() => copyField(detail.description ?? '', 'description')}>Copy</button>
+      <!-- Copy on a heading's line, at the right: alone above the text it
+           floated, tiny, and read as stray (Plamen, 2026-11-20). -->
+      <div class="deschead">
+        <span class="desclabel">Notes</span>
+        <button type="button" class="copydesc" aria-label="Copy description"
+                data-copy-label="description"
+                data-copy-value={detail.description ?? ''}
+                onclick={() => copyField(detail.description ?? '', 'description')}>Copy</button>
+      </div>
       <!-- `href` and the copied value are the destination; the text between
            the tags is the label. For a bare URL those are the same string,
            which is every link this popover drew before descriptions could
@@ -808,12 +844,18 @@
   h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; letter-spacing: -.01em; }
   .when { color: var(--muted); font-size: 11px; margin: 0 0 8px; }
 
-  .desc { position: relative; white-space: pre-wrap; word-break: break-word; line-height: 1.5;
-          margin: 0 0 10px; padding-right: 38px; }
-  .desc p { margin: 0; }
-  .copydesc { appearance: none; -webkit-appearance: none; position: absolute; top: 0; right: 0;
+  /* `pre-wrap` on the text alone: on the whole block it also kept the line
+     breaks of this markup between the heading and the text, and drew them as
+     an empty line, which is what left Copy stranded on a row of its own. */
+  .desc { line-height: 1.5; margin: 0 0 10px; }
+  .desc p { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .deschead { display: flex; align-items: center; justify-content: space-between;
+              line-height: 1.2; margin: 0 0 3px; }
+  .desclabel { font-size: 9.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+               color: var(--muted); }
+  .copydesc { appearance: none; -webkit-appearance: none;
               font: inherit; font-size: 9.5px; color: var(--muted); cursor: copy;
-              border: 0; border-radius: 3px; background: none; padding: 1px 3px; }
+              border: 0; border-radius: 3px; background: none; padding: 1px 0 1px 6px; }
   .copydesc:hover { color: var(--text); }
   .desc a { color: var(--accent); }
 
