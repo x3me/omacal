@@ -3,7 +3,9 @@ import type { WeekPayload } from '../src/lib/api';
 import {
   FLING_MIN_V, FLING_TAU_MS, filterWeekends, packBandLanes, padFor, panCommit, settleTarget, skipWeekendStart,
   sliceWeek, springAt, springPlan, stepDay, stepDays, velocityOf, visibleIndex, windowHeld,
+  NO_DECAY, decayStep, momentumBegun, momentumTail, weekdayOnOrAfter, weekdaysBetween, type DecayRun,
 } from '../src/lib/weekwindow';
+import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
 const DAY = 86_400_000;
 const days = (n: number, from = 0) =>
@@ -366,4 +368,62 @@ test.describe('hiding weekends', () => {
   test('a multi-day shift with weekends shown is a plain calendar jump', () => {
     expect(stepDays(local(24), 3, false)).toBe(local(27));
   });
+});
+
+/** Where in a stream of wheel events momentum is first recognised, or -1. */
+const onset = (events: Wheel[]) => {
+  let run: DecayRun = NO_DECAY;
+  for (let i = 0; i < events.length; i++) {
+    run = decayStep(run, events[i][1]);
+    if (momentumBegun(run)) return i;
+  }
+  return -1;
+};
+
+test('every recorded Mac flick is recognised as momentum, and no slow swipe is', () => {
+  const swipes = MACOS_GESTURES.flatMap((g) => g.swipes);
+  const flicks = swipes.filter((s) => s.kind === 'flick');
+  const slow = swipes.filter((s) => s.kind === 'slow');
+  expect(flicks.length).toBe(18);
+  expect(slow.length).toBe(7);
+  for (const s of flicks) expect(onset(s.events), JSON.stringify(s.events.slice(0, 12))).toBeGreaterThan(0);
+  for (const s of slow) expect(onset(s.events), JSON.stringify(s.events)).toBe(-1);
+});
+
+test('a hand held at one speed, or the synthetic flick, is never momentum', () => {
+  expect(onset([[0, 60], [8, 60], [8, 60], [8, 60]])).toBe(-1);
+  const steady: Wheel[] = [38, 38, 38, 37, 38, 38, 37, 37, 38, 38, 37].map((dx) => [16, dx]);
+  expect(onset(steady)).toBe(-1);
+  // Shrinking, but by so little it could be a hand: a tenth over the run.
+  const creeping: Wheel[] = [100, 99, 98, 97, 96, 95].map((dx) => [16, dx]);
+  expect(onset(creeping)).toBe(-1);
+  // Momentum, but one direction turns mid-run: no run at all.
+  expect(onset([100, 95, 90, -85, 80, 76, 72].map((dx): Wheel => [16, dx]))).toBe(-1);
+  // ...and the same decay the other way round is recognised.
+  expect(onset([-100, -95, -90, -85, -80, -76, -72].map((dx): Wheel => [16, dx]))).toBe(5);
+});
+
+test('momentum after the decision is swallowed until a hand comes back', () => {
+  const tail = { sign: 1, abs: 40, at: 1_000 };
+  expect(momentumTail(tail, 38, 1_016)).toBe(true);
+  expect(momentumTail(tail, 0, 1_016)).toBe(true);
+  expect(momentumTail(tail, 41, 1_016), 'rounding up a pixel').toBe(true);
+  expect(momentumTail(tail, 38, 1_060), 'the pause of fingers touching down').toBe(false);
+  expect(momentumTail(tail, -2, 1_016), 'the other way').toBe(false);
+  expect(momentumTail(tail, 90, 1_016), 'a fresh push').toBe(false);
+});
+
+test('weekdays between two days count the columns a hidden-weekend week draws', () => {
+  const mon = new Date(2024, 0, 29).getTime();
+  const at = (d: number) => new Date(2024, 0, 29 + d).getTime();
+  expect(weekdaysBetween(mon, mon)).toBe(0);
+  expect(weekdaysBetween(mon, at(5))).toBe(5); // to Saturday
+  expect(weekdaysBetween(mon, at(7))).toBe(5); // to the next Monday
+  expect(weekdaysBetween(mon, at(8))).toBe(6);
+  expect(weekdaysBetween(mon, at(14))).toBe(10);
+  expect(weekdaysBetween(mon, at(-7))).toBe(-5);
+  expect(weekdaysBetween(mon, at(-3))).toBe(-1); // back to Friday
+  expect(weekdayOnOrAfter(at(5))).toBe(at(7));
+  expect(weekdayOnOrAfter(at(6))).toBe(at(7));
+  expect(weekdayOnOrAfter(at(2))).toBe(at(2));
 });

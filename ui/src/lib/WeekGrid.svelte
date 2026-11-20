@@ -22,7 +22,7 @@
   import { onPinch, type Pinch } from './pinch';
   import {
     BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, STRONG_SWIPE_MIN_PX, STRONG_SWIPE_PX_PER_MS, TOUCH_LIFT_WHEEL_MS,
-    filterWeekends, packBandLanes, panCommit,
+    NO_DECAY, decayStep, filterWeekends, momentumBegun, momentumTail, packBandLanes, panCommit,
     settleTarget, skipWeekendStart, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { DayColumn, Lane, Placed, WeekPayload, UiEvent } from './api';
@@ -473,6 +473,18 @@
    *  week is counted from the week on screen then, not from wherever the
    *  momentum has carried the slide by the time it settles. */
   let panAlignStart: number | undefined;
+  /** The run of shrinking wheel events the gesture is in (`decayStep`): five
+   *  of them at a strong swipe's speed are a Mac's momentum, and the swipe is
+   *  decided there, while its speed is still the hand's. */
+  let panDecay = NO_DECAY;
+  /** The momentum still arriving after a swipe was decided on it: swallowed,
+   *  so it neither drags the settle on nor starts a gesture of its own. */
+  let panTail: { sign: number; abs: number; at: number } | null = null;
+  /** The fastest the gesture went since its current run of shrinking events
+   *  began: the hand's speed as it lifted, which is what a strong swipe is
+   *  judged on everywhere else. Read at the moment momentum is recognised,
+   *  five events later, the speed has already lost a little to the decay. */
+  let panRunPeakV = 0;
   /** When the last finger left the screen. See `wheelPan` for the wheel
    *  event WebKitGTK sends right after, which is not movement. */
   let touchLiftAt = -Infinity;
@@ -508,8 +520,10 @@
 
   /** The fingers lifted. One spring from where the track is to the column it
    *  should rest on (`settleTarget`), carrying the speed they left with, and
-   *  whole days handed up as their columns pass. */
-  function settlePan() {
+   *  whole days handed up as their columns pass. `lift` is the hand's speed
+   *  when it is known better than the last events say: momentum's first
+   *  frames have already slowed (`panRunPeakV`). */
+  function settlePan(lift?: number) {
     clearTimeout(panLull);
     flushPan();
     if (panColWidth <= 0) {
@@ -518,7 +532,8 @@
       return;
     }
     const x = panHanded + panDays;
-    const v = velocityOf(panSamples);
+    const now = velocityOf(panSamples);
+    const v = lift !== undefined && Math.abs(lift) > Math.abs(now) ? Math.sign(now) * Math.abs(lift) : now;
     panSamples = [];
     // A strong swipe is the ‹ / › step, a page of `visible` days; Day view
     // under a finger pages on every flick (#127). The strong thresholds are
@@ -555,6 +570,15 @@
       panActive = false;
     };
     snapRaf = requestAnimationFrame(step);
+  }
+
+  /** Whether the gesture, as it stands, is a strong swipe: the same speed
+   *  and travel `settlePan` asks of it, in the hand's pixels. */
+  function strongAt(speed: number): boolean {
+    if (panColWidth <= 0) return false;
+    const perPx = (panTouch ? 1 : PAN_GAIN) / panColWidth;
+    return speed >= STRONG_SWIPE_PX_PER_MS * perPx
+      && Math.abs(panHanded + panDays + panPending) >= STRONG_SWIPE_MIN_PX * perPx;
   }
 
   /** Moves the track by `days` of travel, handing up whole columns as they
@@ -2070,6 +2094,17 @@
       if (sideways || panActive) e.preventDefault();
       return;
     }
+    // Only a sideways event can be the tail: a vertical scroll straight
+    // after a flick scrolls the hours. An event with no travel at all keeps
+    // the tail's last size, or the next frame of it would read as a push.
+    if (panTail) {
+      if ((sideways || e.deltaY === 0) && momentumTail(panTail, e.deltaX, at)) {
+        e.preventDefault();
+        panTail = { sign: panTail.sign, abs: e.deltaX === 0 ? panTail.abs : Math.abs(e.deltaX), at };
+        return;
+      }
+      panTail = null;
+    }
     const tracking = panActive && !panSettling;
     if (!sideways && !tracking) return;
     e.preventDefault();
@@ -2085,6 +2120,8 @@
       panSamples = [];
       panTouch = touchDown;
       panAlignStart = panAlign ?? undefined;
+      panDecay = NO_DECAY;
+      panRunPeakV = 0;
       cancelPressGestures();
     }
     if (panColWidth <= 0) return;
@@ -2097,6 +2134,18 @@
     } else {
       panPending += days;
       if (!panFrame) panFrame = requestAnimationFrame(flushPan);
+    }
+    // A Mac's momentum, begun at a strong swipe's speed, in a week that has
+    // a first day to land on: decide it now. Waiting for the lull after it
+    // read the tail's speed, which is never strong. A finger on the screen
+    // sends no momentum; a rolling week and Day view keep gliding with it.
+    panDecay = decayStep(panDecay, e.deltaX);
+    const speed = Math.abs(velocityOf(panSamples));
+    panRunPeakV = panDecay.n === 0 ? speed : Math.max(panRunPeakV, speed);
+    if (!panTouch && panAlignStart !== undefined && momentumBegun(panDecay) && strongAt(panRunPeakV)) {
+      panTail = { sign: Math.sign(e.deltaX), abs: Math.abs(e.deltaX), at };
+      settlePan(panRunPeakV);
+      return;
     }
     clearTimeout(panLull);
     panLull = setTimeout(settlePan, PAN_LULL_MS);

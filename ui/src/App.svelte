@@ -57,7 +57,7 @@
   import LoginPrompt from './lib/LoginPrompt.svelte';
   import { TASKS_WIDTH_DEFAULT } from './lib/taskwidth';
   import { HOUR_PX_DEFAULT, hourPxStepped } from './lib/zoom';
-  import { padFor, sliceWeek, stepDay, stepDays, visibleIndex, windowHeld } from './lib/weekwindow';
+  import { padFor, sliceWeek, stepDay, stepDays, visibleIndex, weekdayOnOrAfter, weekdaysBetween, windowHeld } from './lib/weekwindow';
   import { attachPeriodPaging } from './lib/periodpaging';
   import { PAGE_EASE, PAGE_SLIDE_MS, prefersReducedMotion } from './lib/periodscroll';
   import { setClockFormat } from './lib/clock.svelte';
@@ -172,8 +172,26 @@
       anchorMs = stepDays(anchorMs, days, hideWeekends());
       return;
     }
+    if (hideWeekends()) {
+      // With weekends hidden a column is a weekday, so a swipe moves the
+      // window by weekdays, from the first one it draws. Counted as calendar
+      // days, a week's five columns from a Monday made Saturday, drawn as
+      // the next Monday, and the next five made Thursday.
+      const to = new Date(stepDays(weekdayOnOrAfter(pannedWeekStartMs), days, true));
+      const from = new Date(weekStartMs);
+      // Calendar days between the two dates, read off their dates: exact
+      // across a change of clock, as `weekPanDays` must be.
+      weekPanDays = (Date.UTC(to.getFullYear(), to.getMonth(), to.getDate())
+        - Date.UTC(from.getFullYear(), from.getMonth(), from.getDate())) / 86_400_000;
+      return;
+    }
     weekPanDays += days;
   }
+  /** The window's slide off its week, in the columns `WeekGrid` counts:
+   *  weekdays when weekends are hidden, days otherwise. */
+  const panAlignColumns = $derived(
+    hideWeekends() ? weekdaysBetween(weekStartMs, weekdayOnOrAfter(pannedWeekStartMs)) : weekPanDays
+  );
 
   let week = $state<WeekPayload | null>(null);
   let month = $state<MonthPayload | null>(null);
@@ -2817,7 +2835,7 @@
                   {formPreview} {createColor} {revealNowRequest} bind:hourPx
                   keyboardCursor={visibleKeyboardCursor}
                   onpan={panView}
-                  panAlign={view === 'week' && !weekStartsToday ? weekPanDays : null}
+                  panAlign={view === 'week' && !weekStartsToday ? panAlignColumns : null}
                   oncreate={newEventAt} oncreateallday={newAllDayEventOver}
                   onedit={openEdit} ondelete={askDelete}
                   oncopy={copyOccurrence}

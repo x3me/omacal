@@ -302,6 +302,80 @@ export const STRONG_SWIPE_PX_PER_MS = 2;
 export const STRONG_SWIPE_MIN_PX = 40;
 
 /**
+ * macOS's own momentum, recognised as it begins. After the fingers lift, a
+ * Mac keeps sending wheel events for up to a second and a half, one a frame
+ * with no pause after the hand's last, each a steady few percent smaller than
+ * the one before. The settle waited for the lull after them, by which time
+ * the speed it read was the tail's, so on a Mac no swipe was ever strong and
+ * a flick stopped wherever the momentum ran out: ten, twenty, fifty days on
+ * (Plamen, 2026-11-20, recorded on his MacBook in Safari: flicks peaked at
+ * 60–264 px an event and decayed by 0.88–0.99 an event, without a break).
+ * A hand never does that for five events running, and libinput sends no
+ * momentum at all, so on Linux this never fires.
+ *
+ * `run` counts the events in a row each no larger than the one before
+ * (one pixel of rounding allowed) and no more than a fifth smaller, in one
+ * direction; `from` is the size the run began from, `prev` the last.
+ */
+export type DecayRun = { n: number; from: number; prev: number; sign: number };
+export const NO_DECAY: DecayRun = { n: 0, from: 0, prev: 0, sign: 0 };
+/** Five events, about 80 ms at 60 Hz: as soon as a steady finger can be told apart. */
+export const MOMENTUM_RUN = 5;
+/** ...over which it must have lost a tenth: a hand held at one speed has not. */
+export const MOMENTUM_DECAY = 0.9;
+/** A pause this long between two wheel events is a hand touching down: it
+ *  stops the momentum, and the next swipe starts 59–110 ms later in the
+ *  recording. Within momentum the events came at most 38 ms apart. */
+export const MOMENTUM_GAP_MS = 50;
+
+export function decayStep(run: DecayRun, dx: number): DecayRun {
+  const abs = Math.abs(dx);
+  const sign = Math.sign(dx);
+  const decaying = sign !== 0 && sign === run.sign && run.prev > 0
+    && abs <= run.prev + 1 && abs >= run.prev * 0.8;
+  if (!decaying) return { n: 0, from: abs, prev: abs, sign };
+  return { n: run.n + 1, from: run.from, prev: abs, sign };
+}
+
+export function momentumBegun(run: DecayRun): boolean {
+  return run.n >= MOMENTUM_RUN && run.prev <= run.from * MOMENTUM_DECAY;
+}
+
+/** The rest of a momentum tail already accounted for, or a new hand: the
+ *  same direction, no pause, and no sudden jump in size (a fresh push). */
+export function momentumTail(
+  tail: { sign: number; abs: number; at: number }, dx: number, at: number,
+): boolean {
+  const abs = Math.abs(dx);
+  return at - tail.at <= MOMENTUM_GAP_MS
+    && (dx === 0 || Math.sign(dx) === tail.sign)
+    && abs <= tail.abs * 1.5 + 3;
+}
+
+/** The first day on or after `ms` that is not a Saturday or Sunday. */
+export function weekdayOnOrAfter(ms: number): number {
+  const d = new Date(ms);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+/** Weekdays from `a` up to `b` (negative when `b` is earlier): the columns
+ *  between two days when weekends are hidden. */
+export function weekdaysBetween(a: number, b: number): number {
+  const dir = b < a ? -1 : 1;
+  const d = new Date(dir > 0 ? a : b);
+  const end = new Date(dir > 0 ? b : a);
+  end.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  let n = 0;
+  while (d < end) {
+    if (d.getDay() !== 0 && d.getDay() !== 6) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return dir * n;
+}
+
+/**
  * Where a released pan comes to rest, in pan units (columns; positive is
  * content moved right, toward earlier days) counted from where the gesture
  * began. `x` is how far it has travelled, `v` its speed at lift in columns/ms,
