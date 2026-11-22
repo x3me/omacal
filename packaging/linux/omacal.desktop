@@ -22,7 +22,12 @@ Comment={{comment}}
 Exec={{exec}} %f
 StartupWMClass={{exec}}
 Icon={{icon}}
-Categories={{categories}}
+# Office (the freedesktop main category) and Calendar (its registered
+# additional one), written out: tauri-bundler's `{{categories}}` comes from
+# `bundle.category`, which can say Office but never Calendar, and was empty
+# here, so launchers that sort by category had nowhere to put OmaCal (#187,
+# KDE Plasma).
+Categories=Office;Calendar;
 Keywords=calendar;event;meeting;invitation;task;caldav;google;icloud;
 Terminal=false
 # `text/calendar` alone, deliberately. `x-scheme-handler/webcal` would also

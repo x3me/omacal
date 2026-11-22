@@ -189,6 +189,13 @@ jobs:
             file -L squashfs-root/.DirIcon >&2
             exit 1
           }
+          # The entry the AppImage carries is the deb's template (#187): a
+          # bundler that stopped using it would ship an empty Categories=.
+          grep -qx 'Categories=Office;Calendar;' squashfs-root/*.desktop || {
+            echo "the AppImage's desktop entry lost its categories" >&2
+            cat squashfs-root/*.desktop >&2
+            exit 1
+          }
           # The GTK hook forces GDK_BACKEND=x11, guarding a WebKit-on-Wayland
           # crash (tauri#8541) that in this AppImage was the bundled libwayland
           # removed one line up. XWayland is not free either: under Hyprland's

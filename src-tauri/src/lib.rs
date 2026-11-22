@@ -2358,6 +2358,16 @@ mod tests {
         assert!(!cached_is_usable(Some(&cached(NOW)), NOW));
     }
 
+    /// The deb, the rpm, the AppImage and the AUR package all install this
+    /// entry, so a launcher that sorts by category finds OmaCal under Office
+    /// and Calendar. The bundler's `{{categories}}` slot came out empty (#187).
+    #[test]
+    fn the_linux_desktop_entry_names_its_categories() {
+        let entry = include_str!("../../packaging/linux/omacal.desktop");
+        let categories: Vec<&str> = entry.lines().filter(|l| l.starts_with("Categories=")).collect();
+        assert_eq!(categories, ["Categories=Office;Calendar;"]);
+    }
+
     #[test]
     fn the_synced_window_is_180_days_back_and_365_forward() {
         // Both year views render dates outside this, and must say "not fetched"

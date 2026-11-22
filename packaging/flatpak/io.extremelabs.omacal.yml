@@ -162,8 +162,8 @@ modules:
       # scales up from otherwise is the 256px one, and it shows.
       - install -Dm644 usr/share/icons/hicolor/scalable/apps/omacal.svg /app/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
       - install -Dm644 usr/share/icons/hicolor/512x512/apps/omacal.png /app/share/icons/hicolor/512x512/apps/${FLATPAK_ID}.png
-      # The .deb's own desktop entry carries an empty Categories= and an
-      # unprefixed name, so ship a proper one rather than patching that.
+      # The .deb's own desktop entry has an unprefixed name, and a Flatpak's
+      # must carry the app id, so ship one rather than patching that.
       - install -Dm644 ${FLATPAK_ID}.desktop /app/share/applications/${FLATPAK_ID}.desktop
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml /app/share/metainfo/${FLATPAK_ID}.metainfo.xml
     sources:

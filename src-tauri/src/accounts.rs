@@ -53,6 +53,20 @@ pub async fn sign_out(
     accounts_of(&state).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
+/// The dead-credential mark a sync sets for this account in `AppState.reauth`:
+/// a Google account's is its address, a CalDAV account's is
+/// `caldav_account::reauth_key` (`caldav:` and the address). Signing out
+/// cleared the bare address for both, so a CalDAV account signed out while its
+/// password was rejected left the reconnect banner up for the rest of the
+/// session, about an account that no longer existed (found in the 2026-11-22
+/// triage of #191).
+fn reauth_mark(provider: &str, email: &str) -> String {
+    match provider {
+        "caldav" => crate::caldav_account::reauth_key(email),
+        _ => email.to_string(),
+    }
+}
+
 async fn sign_out_impl(state: &AppState, account_id: i64) -> anyhow::Result<()> {
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT email, provider FROM accounts WHERE id = ?1")
@@ -102,8 +116,24 @@ async fn sign_out_impl(state: &AppState, account_id: i64) -> anyhow::Result<()> 
     // The account's cached access token and its dead-credential mark both
     // describe an account that no longer exists.
     state.tokens.lock().await.remove(&email);
-    state.reauth.lock().expect("reauth mark poisoned").remove(&email);
+    state.reauth.lock().expect("reauth mark poisoned").remove(&reauth_mark(&provider, &email));
 
     crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mark signing out clears is the one the sync set (`lib.rs`'s
+    /// `sync_accounts`): `caldav_account::reauth_key` for a rejected CalDAV
+    /// password, and the bare address for a Google account whose grant died.
+    #[test]
+    fn signing_out_clears_the_mark_the_sync_set() {
+        let email = "user@icloud.com";
+        assert_eq!(reauth_mark("caldav", email), crate::caldav_account::reauth_key(email));
+        assert_ne!(reauth_mark("caldav", email), email, "a CalDAV mark is not the bare address");
+        assert_eq!(reauth_mark("google", "me@gmail.com"), "me@gmail.com");
+    }
 }

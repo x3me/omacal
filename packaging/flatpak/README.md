@@ -34,7 +34,7 @@ Four things ride along with it:
 
 | File | Why it exists |
 | --- | --- |
-| `io.extremelabs.omacal.desktop` | The `.deb`'s own entry has an empty `Categories=` and an unprefixed name |
+| `io.extremelabs.omacal.desktop` | The `.deb`'s own entry is named `omacal`, and a Flatpak's must carry the app id |
 | `io.extremelabs.omacal.metainfo.xml` | AppStream metadata — required by Flathub, validated in its CI |
 | `bump.sh` | Points the manifest at a new release: URL, checksum, `<release>` entry |
 | `shared-modules/` | Flathub's submodule, used for one thing: intltool |
