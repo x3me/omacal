@@ -366,15 +366,21 @@ mod tests {
 
     /// The token refresh runs before every Google sync, so a token endpoint
     /// that hangs would hang them all.
+    ///
+    /// The server hangs for a minute and the client (two seconds under test)
+    /// must give up within half of it. A five-second hang left three seconds
+    /// of slack, which a loaded machine ate: the timer fired late and the test
+    /// failed now and then (2026-11-22, load average 15 to 55). The minute
+    /// costs nothing: the server is dropped once the client gives up.
     #[tokio::test]
     async fn a_token_endpoint_that_hangs_is_given_up_on() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
             .mount(&server).await;
         let started = std::time::Instant::now();
         assert!(refresh(&format!("{}/token", server.uri()), "id", "secret", "rt").await.is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "gave up before the server answered");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "gave up before the server answered");
     }
 
     #[test]
@@ -637,17 +643,21 @@ mod tests {
 
     /// The deadline is a ceiling, not a fixed wait: a browser that arrives
     /// promptly must not be made to wait it out.
+    ///
+    /// A two-minute ceiling, and back within half of it. Thirty seconds against
+    /// five left too little room for a loaded machine (2026-11-22); the gap
+    /// between the two is what the test is about, not either number.
     #[tokio::test]
     async fn a_redirect_that_arrives_in_time_does_not_wait_out_the_deadline() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let started = Instant::now();
         let handle = tokio::task::spawn_blocking(move || {
-            wait_for_redirect(listener, Duration::from_secs(30))
+            wait_for_redirect(listener, Duration::from_secs(120))
         });
         let _ = reqwest::get(format!("http://127.0.0.1:{port}/?code=c&state=s")).await;
         assert!(handle.await.unwrap().is_ok());
-        assert!(started.elapsed() < Duration::from_secs(5), "returned only after the deadline");
+        assert!(started.elapsed() < Duration::from_secs(60), "returned only after the deadline");
     }
 
     #[test]
