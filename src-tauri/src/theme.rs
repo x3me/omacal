@@ -11,6 +11,56 @@ pub struct Palette {
     pub muted: String,
     pub accent: String,
     pub is_dark: bool,
+    /// How events, the today column and the header title are drawn, for the
+    /// themes whose look is more than colours (the two Daylights). `None` for
+    /// everything else — every other built-in and every Omarchy-derived
+    /// palette — and then absent from the wire entirely, which `setPalette`
+    /// reads as "the stock look".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<ThemeStyle>,
+}
+
+/// The knobs a theme may turn beyond its five colours. Each event default is
+/// the literal the stylesheets carried before this existed (7% / 2px / 600,
+/// ink 65% / 60%, secondary line 62%), and the today tint and title fall back
+/// to what `Header` and `setPalette` always drew, so a palette with no
+/// `ThemeStyle` renders exactly as it always did. Mirrors `ThemeStyle` in
+/// `theme.ts`, which turns them into CSS custom properties.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThemeStyle {
+    /// How much of the calendar's colour a timed block's fill takes, percent.
+    pub tint: u8,
+    /// Width of the calendar-colour edge down a block's left side, px.
+    pub spine: u8,
+    /// CSS `font-weight` of a block's title.
+    pub title_weight: u16,
+    /// How much of the calendar's colour an event's text keeps, percent; the
+    /// rest is the theme's ink. Lower is darker.
+    pub ink: u8,
+    /// Opacity of a block's second line (time, location), percent.
+    pub sub: u8,
+    /// Fill of today's column — a neutral, not a wash of the ink.
+    pub today: String,
+    /// Size in px and weight of the header's month-and-year title.
+    pub heading_size: u8,
+    pub heading_weight: u16,
+    /// The colour space `tint` is mixed in, as CSS `color-mix` spells it;
+    /// `None` is the stylesheets' `srgb`. A dark page wants `srgb-linear`: a
+    /// yellow or an orange mixed toward near-black in sRGB loses its chroma
+    /// and drifts toward green, so the blocks read olive and brown, while the
+    /// same mix in linear light keeps them gold and amber. The percentage
+    /// means less there, which is why Daylight Dark's `tint` is a third of
+    /// what it was in sRGB for a fill of about the same lightness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tint_space: Option<String>,
+    /// The fill behind text and ticks drawn in `--on-accent` (primary buttons,
+    /// the active view, today's badge, a checked box), where it is not
+    /// `accent` itself. `accent` has to clear 4.5:1 *as text* on the card, and
+    /// on a dark card a red that does is too bright to carry white at 4.5:1,
+    /// so its buttons got dark text. A deeper red here keeps the buttons'
+    /// text light. `None` fills with `accent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent_fill: Option<String>,
 }
 
 impl Palette {
@@ -24,6 +74,7 @@ impl Palette {
             muted: "#8a8a90".into(),
             accent: "#5b8def".into(),
             is_dark: true,
+            style: None,
         }
     }
 
@@ -56,16 +107,17 @@ impl Palette {
             muted: "#63636b".into(),
             accent: "#3566d6".into(),
             is_dark: false,
+            style: None,
         }
     }
 
-    /// The built-in palette a system's light-or-dark setting asks for.
-    /// No preference is dark: what every copy showed before it asked.
-    pub fn for_system(scheme: SystemScheme) -> Self {
-        match scheme {
-            SystemScheme::Light => Palette::fallback_light(),
-            SystemScheme::Dark | SystemScheme::NoPreference => Palette::fallback_dark(),
-        }
+    /// What "Follow the desktop" wears where there is no Omarchy theme: the
+    /// theme the user gave `Auto` for the side the system's light-or-dark
+    /// setting is on ([`AutoPair`]), Daylight and Daylight Dark unless they
+    /// chose otherwise. No preference is the dark side: what every copy
+    /// showed before it asked.
+    pub fn for_system(scheme: SystemScheme, auto: AutoPair) -> Self {
+        auto.for_scheme(scheme).palette().expect("an AutoPair holds only pinned themes")
     }
 
     /// A named theme's palette, for a desktop that has no Omarchy theme to
@@ -84,23 +136,72 @@ impl Palette {
     ///   Latte's blue measures 4.3:1 on its background and 4.0:1 on a card.
     /// - Rosé Pine Dawn takes **pine**: foam, which the theme file names,
     ///   measures 3.1:1.
+    /// - Retro Bloom is @itscallssh's Omarchy theme
+    ///   (github.com/itscallssh/omarchy-retro-bloom-theme): Gruvbox's dark
+    ///   palette (morhetz/gruvbox, MIT) around its orange, `#fe8019`, as the
+    ///   accent (5.8:1 on the page). Page, card, text and accent are what this
+    ///   app reads from its `colors.toml` on Omarchy; muted is Gruvbox's fg4,
+    ///   the theme's `dark_foreground` (5.3:1): the file's `muted` is 3.0:1,
+    ///   and its `light_foreground`, which an Omarchy theme's muted is read
+    ///   from, is brighter than its text.
     /// - The light themes' cards sit a shade nearer their background than the
     ///   shift would put them (1.05:1, not 1.07:1): at the shifted shade,
     ///   Latte's mauve and Dawn's muted grey fell just under 4.5:1 on a card,
     ///   and neither palette has a darker colour to trade them for.
+    /// - Daylight is ours, not a theme file's: the Fantastical-style bright
+    ///   look (white page, cool grey card, near-black ink, one crisp red). The
+    ///   red is Fantastical's `#e0383e` pulled a shade darker, because that
+    ///   one measures 4.0:1 on the card (this one 4.6:1). It is also the first
+    ///   palette to set a [`ThemeStyle`] — a stronger tint, a 3px edge, a
+    ///   bolder title in a darker shade of the calendar's colour, a grey today
+    ///   column and a large month-and-year heading whose year is the accent:
+    ///   what makes a block read at a glance on white, where the stock 7% wash
+    ///   is close to invisible.
+    /// - Daylight Dark is the same look with the lights off, and the second
+    ///   palette with a [`ThemeStyle`]: neutral near-blacks rather than the
+    ///   blue-tinted greys of Tokyo Night, and the same red lifted to
+    ///   `#ef5350` so it still clears 4.5:1 on the card (4.6:1; `#d32f3a`
+    ///   measures 3.2:1 there). A red that bright cannot also carry white
+    ///   text at 4.5:1, so the buttons and badges keep Daylight's `#d32f3a`
+    ///   as their fill (`accent_fill`) and its white text on top (4.7:1). The
+    ///   other knobs differ from Daylight's in three ways: the tint is mixed
+    ///   in linear light (`tint_space`), because over near-black an sRGB mix
+    ///   turns yellow and orange calendars olive and brown, and 10% there is
+    ///   a fill about as light as 30% in sRGB; an ink of 42, which on a pale
+    ///   ink means a *lighter* shade of the calendar's colour where
+    ///   Daylight's is a darker one (the same `color-mix`, toward `text`);
+    ///   and a today column a step lighter than the page rather than a grey
+    ///   on white.
     ///
     /// Every text colour clears 4.5:1 on `bg` and on `surface`
     /// (`every_named_palette_is_legible` measures all of it).
     pub fn named(theme: Appearance) -> Option<Self> {
         let p = |bg: &str, surface: &str, text: &str, muted: &str, accent: &str, is_dark| Self {
             bg: bg.into(), surface: surface.into(), text: text.into(),
-            muted: muted.into(), accent: accent.into(), is_dark,
+            muted: muted.into(), accent: accent.into(), is_dark, style: None,
         };
         Some(match theme {
             Appearance::TokyoNight => p("#1a1b26", "#21222d", "#c0caf5", "#a9b1d6", "#7aa2f7", true),
             Appearance::CatppuccinMocha => p("#1e1e2e", "#252535", "#cdd6f4", "#a6adc8", "#cba6f7", true),
             Appearance::CatppuccinLatte => p("#eff1f5", "#e9ebef", "#4c4f69", "#5c5f77", "#8839ef", false),
             Appearance::RosePineDawn => p("#faf4ed", "#f5efe8", "#575279", "#6e6a86", "#286983", false),
+            Appearance::RetroBloom => p("#282828", "#2f2f2f", "#ebdbb2", "#a89984", "#fe8019", true),
+            Appearance::Daylight => Self {
+                style: Some(ThemeStyle {
+                    tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                    today: "#f2f2f4".into(), heading_size: 24, heading_weight: 700,
+                    tint_space: None, accent_fill: None,
+                }),
+                ..p("#ffffff", "#f4f6f9", "#14161a", "#5a6270", "#d32f3a", false)
+            },
+            Appearance::DaylightDark => Self {
+                style: Some(ThemeStyle {
+                    tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                    today: "#1e2024".into(), heading_size: 24, heading_weight: 700,
+                    tint_space: Some("srgb-linear".into()), accent_fill: Some("#d32f3a".into()),
+                }),
+                ..p("#16171a", "#1f2125", "#eceef1", "#9aa1ab", "#ef5350", true)
+            },
             Appearance::Auto | Appearance::Light | Appearance::Dark => return None,
         })
     }
@@ -146,6 +247,8 @@ pub fn system_scheme() -> SystemScheme {
 /// `Auto` stays the default: the Omarchy theme if there is one, and
 /// otherwise the system's own light-or-dark ([`SystemScheme`]) — which until
 /// 2026-09-24 it never asked, so every Mac on `Auto` was dark for good.
+/// Which theme it wears on each side is the user's to choose ([`AutoPair`]),
+/// Daylight and Daylight Dark unless they do.
 ///
 /// `Light` and `Dark` are the user overruling that, and they take the built-in
 /// palette **whole** — including on Omarchy, where the theme's own accent is
@@ -153,8 +256,10 @@ pub fn system_scheme() -> SystemScheme {
 /// obligation to be legible on white (Omarchy ships pale yellows and washed
 /// greens), and the entire point of choosing a palette explicitly is getting
 /// one that works. Someone who wants their theme's colours wants `Auto`.
+/// That is their job on Omarchy, and only there now: off Omarchy they were
+/// retired for Daylight and Daylight Dark ([`Appearance::on_this_desktop`]).
 ///
-/// The four named themes are the same kind of choice — see
+/// The seven named themes are the same kind of choice — see
 /// [`Palette::named`] — spelled as Omarchy spells its themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +275,11 @@ pub enum Appearance {
     CatppuccinLatte,
     #[serde(rename = "rose-pine-dawn")]
     RosePineDawn,
+    #[serde(rename = "retro-bloom")]
+    RetroBloom,
+    Daylight,
+    #[serde(rename = "daylight-dark")]
+    DaylightDark,
 }
 
 impl Appearance {
@@ -184,6 +294,9 @@ impl Appearance {
             Appearance::CatppuccinMocha => "catppuccin-mocha",
             Appearance::CatppuccinLatte => "catppuccin-latte",
             Appearance::RosePineDawn => "rose-pine-dawn",
+            Appearance::RetroBloom => "retro-bloom",
+            Appearance::Daylight => "daylight",
+            Appearance::DaylightDark => "daylight-dark",
         }
     }
 
@@ -193,6 +306,7 @@ impl Appearance {
         [
             Appearance::Auto, Appearance::Light, Appearance::Dark, Appearance::TokyoNight,
             Appearance::CatppuccinMocha, Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+            Appearance::RetroBloom, Appearance::Daylight, Appearance::DaylightDark,
         ]
         .into_iter()
         .find(|a| a.as_str() == stored)
@@ -203,6 +317,107 @@ impl Appearance {
     /// been told not to follow.
     pub fn is_pinned(self) -> bool {
         !matches!(self, Appearance::Auto)
+    }
+
+    /// The choice as this desktop honours it. **Off Omarchy the plain Light
+    /// and Dark are retired** (Plamen, 2026-11-16: "we have better ones in
+    /// light and dark modes"): Daylight and Daylight Dark took their places,
+    /// in the picker, as what "Follow the desktop" wears unless the user
+    /// picks others ([`AutoPair`]), and for anyone who had chosen one of the
+    /// two. On Omarchy, where the named themes are hidden, Light and Dark
+    /// stay: they are the way out of an Omarchy theme that is hard to read.
+    /// `omarchy` is whether there is an Omarchy theme directory.
+    pub fn on_this_desktop(self, omarchy: bool) -> Self {
+        match (self, omarchy) {
+            (Appearance::Light, false) => Appearance::Daylight,
+            (Appearance::Dark, false) => Appearance::DaylightDark,
+            (appearance, _) => appearance,
+        }
+    }
+
+    /// This choice's own palette, whole; `None` for `Auto`, which is not a
+    /// palette but a rule for finding one ([`resolve`]). Not always what is
+    /// worn: off Omarchy a plain Light or Dark is worn as its successor, so a
+    /// caller that wants the worn palette maps the choice through
+    /// [`Appearance::on_this_desktop`] first, as `resolve` and
+    /// [`AutoPair::from_stored`] do.
+    pub fn palette(self) -> Option<Palette> {
+        match self {
+            Appearance::Auto => None,
+            Appearance::Light => Some(Palette::fallback_light()),
+            Appearance::Dark => Some(Palette::fallback_dark()),
+            named => Palette::named(named),
+        }
+    }
+
+    /// Whether `Auto` may wear this while the system is dark (`dark`) or
+    /// light: a pinned theme whose palette is that side's. Read off the
+    /// palette's own `is_dark` rather than a list of names, so a theme added
+    /// later lands on the right side without anyone remembering to say so.
+    pub fn suits(self, dark: bool) -> bool {
+        self.palette().is_some_and(|p| p.is_dark == dark)
+    }
+}
+
+/// Which theme `Auto` wears on each side of the system's light-or-dark, on a
+/// desktop with no Omarchy theme: one for light mode and one for dark, the
+/// way a Mac app offers it. The default is Daylight and Daylight Dark, which
+/// is all `Auto` could wear before this existed, so nobody who never opens
+/// the setting sees a change.
+///
+/// The fields are private, so a pair is either the default or built by
+/// [`AutoPair::from_stored`], and both hold the one invariant everything else
+/// leans on: each side is a pinned theme of that side, never `Auto` (which
+/// would resolve to itself), never a dark theme for light mode, and never
+/// the plain Light or Dark, which are retired wherever the pair is worn
+/// ([`Appearance::on_this_desktop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoPair {
+    light: Appearance,
+    dark: Appearance,
+}
+
+impl Default for AutoPair {
+    fn default() -> Self {
+        Self { light: Appearance::Daylight, dark: Appearance::DaylightDark }
+    }
+}
+
+impl AutoPair {
+    /// The two stored spellings read back. A stored `light` or `dark` is
+    /// honoured as its successor, as the main choice is off Omarchy
+    /// ([`Appearance::on_this_desktop`]): the pair is only ever worn there,
+    /// with no Omarchy theme to follow. A side whose row is absent, garbage,
+    /// a spelling a future version writes, `auto`, or a theme of the other
+    /// side falls back to that side's default on its own, so one bad row
+    /// cannot cost the user the other choice.
+    pub fn from_stored(light: Option<&str>, dark: Option<&str>) -> Self {
+        let side = |stored: Option<&str>, dark: bool, default: Appearance| {
+            stored
+                .and_then(Appearance::parse)
+                .map(|a| a.on_this_desktop(false))
+                .filter(|a| a.suits(dark))
+                .unwrap_or(default)
+        };
+        let stock = Self::default();
+        Self { light: side(light, false, stock.light), dark: side(dark, true, stock.dark) }
+    }
+
+    pub fn light(self) -> Appearance {
+        self.light
+    }
+
+    pub fn dark(self) -> Appearance {
+        self.dark
+    }
+
+    /// The side a system setting picks. No preference is dark, as
+    /// [`Palette::for_system`] says.
+    pub fn for_scheme(self, scheme: SystemScheme) -> Appearance {
+        match scheme {
+            SystemScheme::Light => self.light,
+            SystemScheme::Dark | SystemScheme::NoPreference => self.dark,
+        }
     }
 }
 
@@ -302,6 +517,7 @@ pub fn parse_colors(toml_src: &str) -> Option<Palette> {
         muted,
         accent,
         is_dark,
+        style: None,
     })
 }
 
@@ -447,6 +663,7 @@ pub fn parse_alacritty(toml_src: &str) -> Option<Palette> {
         muted,
         accent,
         is_dark,
+        style: None,
     })
 }
 
@@ -457,19 +674,20 @@ pub fn parse_alacritty(toml_src: &str) -> Option<Palette> {
 /// the base produced. Never fails.
 ///
 /// A pinned [`Appearance`] short-circuits the whole chain, theme directory and
-/// all: it is the user saying which of the two built-in palettes they want,
-/// and a theme file cannot outrank that. `Auto` is the chain exactly as it was.
-pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance) -> Palette {
-    match appearance {
-        Appearance::Light => return Palette::fallback_light(),
-        Appearance::Dark => return Palette::fallback_dark(),
-        Appearance::Auto => {}
-        named => return Palette::named(named).expect("every other variant is a named theme"),
+/// all: it is the user saying which palette they want, and a theme file cannot
+/// outrank that. `Auto` with a theme directory is the chain exactly as it was.
+/// With none, `Auto` wears `auto`'s theme for the side the system's
+/// light-or-dark is on ([`Palette::for_system`]); `auto` is read nowhere else.
+/// An Omarchy theme outranks it, because there "Follow the desktop" means the
+/// desktop's own theme.
+pub fn resolve(theme_dir: Option<&Path>, appearance: Appearance, auto: AutoPair) -> Palette {
+    if let Some(pinned) = appearance.on_this_desktop(theme_dir.is_some()).palette() {
+        return pinned;
     }
     let Some(dir) = theme_dir else {
         // No Omarchy theme: follow the system's light-or-dark instead, which
         // is what "Follow the desktop theme" says it does.
-        return Palette::for_system(system_scheme());
+        return Palette::for_system(system_scheme(), auto);
     };
     let colors_src = std::fs::read_to_string(dir.join("colors.toml")).ok();
 
@@ -562,13 +780,16 @@ blue = "#1e66f5"
 
     #[test]
     fn resolve_falls_back_when_the_directory_is_missing() {
-        let p = resolve(Some(std::path::Path::new("/nonexistent/omarchy/theme")), Appearance::Auto);
+        let p = resolve(Some(std::path::Path::new("/nonexistent/omarchy/theme")), Appearance::Auto, AutoPair::default());
         assert_eq!(p, Palette::fallback_dark());
     }
 
+    /// No Omarchy theme and no word from the system: Daylight Dark, since
+    /// the plain Dark was retired off Omarchy. (No test sets the system
+    /// scheme, so it is the process default, no preference.)
     #[test]
     fn resolve_falls_back_when_given_nothing() {
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        assert_eq!(resolve(None, Appearance::Auto, AutoPair::default()), Palette::named(Appearance::DaylightDark).unwrap());
     }
 
     #[test]
@@ -588,7 +809,7 @@ blue = "#7aa2f7"
 white = "#a9b1d6"
 "##;
         std::fs::write(&theme_file, toml_content).expect("write temp theme file");
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#1a1b26");
         assert_eq!(p.text, "#c0caf5");
         assert_eq!(p.accent, "#7aa2f7");
@@ -613,7 +834,7 @@ white = "#a9b1d6"
         .unwrap();
         std::fs::write(temp_dir.join("colors.toml"), "accent = \"#e0af68\"").unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.accent, "#e0af68", "the theme said orange; blue was a guess");
         assert_eq!(p.bg, "#1a1b26", "everything else still comes from alacritty");
 
@@ -641,7 +862,7 @@ white = "#a9b1d6"
         )
         .unwrap();
         std::fs::write(temp_dir.join("colors.toml"), "accent = \"nope\"").unwrap();
-        assert_eq!(resolve(Some(&temp_dir), Appearance::Auto).accent, "#7aa2f7");
+        assert_eq!(resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default()).accent, "#7aa2f7");
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -768,38 +989,173 @@ light_foreground = "#adb5c4"
         )
         .unwrap();
 
-        assert_eq!(resolve(Some(&dir), Appearance::Light), Palette::fallback_light());
-        assert_eq!(resolve(Some(&dir), Appearance::Dark), Palette::fallback_dark());
+        assert_eq!(resolve(Some(&dir), Appearance::Light, AutoPair::default()), Palette::fallback_light());
+        assert_eq!(resolve(Some(&dir), Appearance::Dark, AutoPair::default()), Palette::fallback_dark());
         // Auto still follows the theme, which is every existing install.
-        let auto = resolve(Some(&dir), Appearance::Auto);
+        let auto = resolve(Some(&dir), Appearance::Auto, AutoPair::default());
         assert_eq!(auto.bg, "#2e3440", "Auto is the behaviour that must not move");
 
-        // And with no Omarchy at all — the case issue #30 is about.
-        assert_eq!(resolve(None, Appearance::Light), Palette::fallback_light());
-        assert_eq!(resolve(None, Appearance::Auto), Palette::fallback_dark());
+        // And with no Omarchy at all — the case issue #30 is about — where
+        // the plain two are retired and their successors are worn.
+        let daylight = Palette::named(Appearance::Daylight).unwrap();
+        let daylight_dark = Palette::named(Appearance::DaylightDark).unwrap();
+        assert_eq!(resolve(None, Appearance::Light, AutoPair::default()), daylight);
+        assert_eq!(resolve(None, Appearance::Dark, AutoPair::default()), daylight_dark);
         // A named theme outranks the installed one exactly as Light does.
-        assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn).bg, "#faf4ed");
-        assert_eq!(resolve(None, Appearance::TokyoNight).bg, "#1a1b26");
+        assert_eq!(resolve(Some(&dir), Appearance::RosePineDawn, AutoPair::default()).bg, "#faf4ed");
+        assert_eq!(resolve(None, Appearance::TokyoNight, AutoPair::default()).bg, "#1a1b26");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// With no Omarchy theme, Auto is the system's choice; no preference is
-    /// dark, as it always was.
+    /// Auto wears the theme chosen for the side the system is on, and no
+    /// preference is the dark side, as it always was.
+    #[test]
+    fn auto_wears_the_theme_chosen_for_each_side() {
+        let pair = AutoPair::from_stored(Some("rose-pine-dawn"), Some("tokyo-night"));
+        assert_eq!(Palette::for_system(SystemScheme::Light, pair), Palette::named(Appearance::RosePineDawn).unwrap());
+        assert_eq!(Palette::for_system(SystemScheme::Dark, pair), Palette::named(Appearance::TokyoNight).unwrap());
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference, pair), Palette::named(Appearance::TokyoNight).unwrap());
+        // And through `resolve`, which must hand the pair on rather than a
+        // default. No test sets the process's scheme, so it is no preference.
+        assert_eq!(resolve(None, Appearance::Auto, pair).bg, "#1a1b26");
+    }
+
+    /// Nothing stored is Daylight and Daylight Dark, which is everything
+    /// `Auto` wore before it could be asked: nobody who never opens the
+    /// setting sees a change.
+    #[test]
+    fn auto_defaults_to_daylight_and_daylight_dark() {
+        assert_eq!(AutoPair::from_stored(None, None), AutoPair::default());
+        assert_eq!((AutoPair::default().light(), AutoPair::default().dark()), (Appearance::Daylight, Appearance::DaylightDark));
+        assert_eq!(Palette::for_system(SystemScheme::Light, AutoPair::default()), Palette::named(Appearance::Daylight).unwrap());
+        assert_eq!(Palette::for_system(SystemScheme::Dark, AutoPair::default()), Palette::named(Appearance::DaylightDark).unwrap());
+    }
+
+    /// A row holding the plain Light or Dark, retired where the pair is worn,
+    /// reads as its successor, as the main choice does off Omarchy, and is
+    /// never worn as itself: each is a theme of its side, so without the
+    /// rule it would pass the side check and paint the retired palette.
+    #[test]
+    fn a_stored_light_or_dark_reads_as_its_successor() {
+        let pair = AutoPair::from_stored(Some("light"), Some("dark"));
+        assert_eq!((pair.light(), pair.dark()), (Appearance::Daylight, Appearance::DaylightDark));
+        assert_eq!(Palette::for_system(SystemScheme::Light, pair), Palette::named(Appearance::Daylight).unwrap());
+        assert_eq!(resolve(None, Appearance::Auto, pair), Palette::named(Appearance::DaylightDark).unwrap());
+        // On a side of its own, beside a choice the other side keeps.
+        let half = AutoPair::from_stored(Some("light"), Some("tokyo-night"));
+        assert_eq!((half.light(), half.dark()), (Appearance::Daylight, Appearance::TokyoNight));
+        let half = AutoPair::from_stored(Some("rose-pine-dawn"), Some("dark"));
+        assert_eq!((half.light(), half.dark()), (Appearance::RosePineDawn, Appearance::DaylightDark));
+    }
+
+    /// A row this version cannot honour falls back on its own side only:
+    /// garbage, a theme a future version names, `auto` (which would resolve
+    /// to itself), and a theme of the other side, which would leave someone
+    /// in dark mode on a white page they never chose.
+    #[test]
+    fn a_stale_or_wrong_sided_choice_falls_back_to_that_sides_default() {
+        let stock = AutoPair::default();
+        assert_eq!(AutoPair::from_stored(Some("solarized"), Some("")), stock);
+        assert_eq!(AutoPair::from_stored(Some("auto"), Some("auto")), stock);
+        assert_eq!(AutoPair::from_stored(Some("tokyo-night"), Some("catppuccin-latte")), stock);
+        assert_eq!(AutoPair::from_stored(Some("dark"), Some("light")), stock);
+        // One bad row does not cost the other side its choice.
+        let half = AutoPair::from_stored(Some("catppuccin-latte"), Some("rose-pine-dawn"));
+        assert_eq!((half.light(), half.dark()), (Appearance::CatppuccinLatte, Appearance::DaylightDark));
+        let half = AutoPair::from_stored(Some("garbage"), Some("catppuccin-mocha"));
+        assert_eq!((half.light(), half.dark()), (Appearance::Daylight, Appearance::CatppuccinMocha));
+    }
+
+    /// The sides are read off each palette's `is_dark`, and `Auto` is on
+    /// neither: it is not a palette.
+    #[test]
+    fn a_theme_suits_the_side_its_palette_is_on() {
+        for a in [Appearance::Light, Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::Daylight] {
+            assert!(a.suits(false) && !a.suits(true), "{a:?}");
+        }
+        for a in [
+            Appearance::Dark,
+            Appearance::TokyoNight,
+            Appearance::CatppuccinMocha,
+            Appearance::RetroBloom,
+            Appearance::DaylightDark,
+        ] {
+            assert!(a.suits(true) && !a.suits(false), "{a:?}");
+        }
+        assert!(!Appearance::Auto.suits(true) && !Appearance::Auto.suits(false));
+        assert_eq!(Appearance::Auto.palette(), None);
+    }
+
+    /// An Omarchy theme still decides `Auto` whatever the pair says, and a
+    /// pinned choice ignores the pair as it ignores the theme.
+    #[test]
+    fn the_omarchy_theme_and_a_pinned_choice_both_outrank_the_pair() {
+        let dir = std::env::temp_dir().join(format!("omacal-auto-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("colors.toml"),
+            "mode = \"dark\"\nbackground = \"#2e3440\"\nforeground = \"#d8dee9\"\n",
+        )
+        .unwrap();
+        let pair = AutoPair::from_stored(Some("rose-pine-dawn"), Some("tokyo-night"));
+        assert_eq!(resolve(Some(&dir), Appearance::Auto, pair).bg, "#2e3440");
+        assert_eq!(resolve(Some(&dir), Appearance::Light, pair), Palette::fallback_light());
+        assert_eq!(resolve(None, Appearance::DaylightDark, pair), Palette::named(Appearance::DaylightDark).unwrap());
+        assert_eq!(resolve(None, Appearance::CatppuccinLatte, pair).bg, "#eff1f5");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With no Omarchy theme, Auto is the system's choice, worn as Daylight
+    /// or Daylight Dark; no preference is dark, as it always was.
     #[test]
     fn auto_without_omarchy_follows_the_system() {
-        assert_eq!(Palette::for_system(SystemScheme::Light), Palette::fallback_light());
-        assert_eq!(Palette::for_system(SystemScheme::Dark), Palette::fallback_dark());
-        assert_eq!(Palette::for_system(SystemScheme::NoPreference), Palette::fallback_dark());
+        let daylight = Palette::named(Appearance::Daylight).unwrap();
+        let daylight_dark = Palette::named(Appearance::DaylightDark).unwrap();
+        assert_eq!(Palette::for_system(SystemScheme::Light, AutoPair::default()), daylight);
+        assert_eq!(Palette::for_system(SystemScheme::Dark, AutoPair::default()), daylight_dark);
+        assert_eq!(Palette::for_system(SystemScheme::NoPreference, AutoPair::default()), daylight_dark);
         assert_eq!(SystemScheme::from_portal(0), SystemScheme::NoPreference);
         assert_eq!(SystemScheme::from_portal(1), SystemScheme::Dark);
         assert_eq!(SystemScheme::from_portal(2), SystemScheme::Light);
         assert_eq!(SystemScheme::from_portal(7), SystemScheme::NoPreference);
     }
 
-    const NAMED: [Appearance; 4] = [
+    const NAMED: [Appearance; 7] = [
         Appearance::TokyoNight, Appearance::CatppuccinMocha,
-        Appearance::CatppuccinLatte, Appearance::RosePineDawn,
+        Appearance::CatppuccinLatte, Appearance::RosePineDawn, Appearance::RetroBloom,
+        Appearance::Daylight, Appearance::DaylightDark,
     ];
+
+    /// Retro Bloom on a Mac is Retro Bloom as Omarchy wears it: the page,
+    /// card, text and accent this app reads from the theme's own
+    /// `colors.toml` (verbatim below, from
+    /// github.com/itscallssh/omarchy-retro-bloom-theme). Only muted is
+    /// chosen rather than read, as `Palette::named` says why.
+    #[test]
+    fn retro_bloom_is_its_omarchy_theme() {
+        const COLORS: &str = r##"mode = "dark"
+background        = "#282828"
+darker_background = "#1d2021"
+dark_background    = "#232323"
+lighter_background = "#3c3836"
+foreground        = "#ebdbb2"
+dark_foreground    = "#a89984"
+light_foreground   = "#f2e5bc"
+bright_foreground  = "#fbf1c7"
+muted   = "#7c6f64"
+accent  = "#fe8019"
+selection = "#504945"
+"##;
+        let omarchy = parse_colors(COLORS).unwrap();
+        let named = Palette::named(Appearance::RetroBloom).unwrap();
+        assert_eq!(named.bg, omarchy.bg);
+        assert_eq!(named.surface, omarchy.surface);
+        assert_eq!(named.text, omarchy.text);
+        assert_eq!(named.accent, omarchy.accent);
+        assert_eq!(named.is_dark, omarchy.is_dark);
+        assert_eq!(named.muted, "#a89984", "Gruvbox fg4, the file's dark_foreground");
+        assert!(named.style.is_none(), "colours only, no Daylight-style knobs");
+    }
 
     /// WCAG contrast of two `#rrggbb` colours.
     fn contrast(a: &str, b: &str) -> f64 {
@@ -829,6 +1185,143 @@ light_foreground = "#adb5c4"
         }
     }
 
+    /// Daylight's event text is the calendar's colour mixed toward the ink and
+    /// laid on the calendar's colour mixed toward the page — the same two
+    /// `color-mix`es the stylesheets write — and it has to clear 4.5:1 for
+    /// every colour a calendar can have, at rest and hovered (the fill is
+    /// `hover` points deeper, 9 as `setThemeStyle` derives it), with the
+    /// second line (the same ink at `sub`% opacity) still readable at 3:1.
+    /// Pale colours (banana, amber, cyan) are what set `ink`; a darker
+    /// theme-wide tint or a lighter ink fails here, not on someone's screen.
+    ///
+    /// Daylight Dark is held to the same bar by the same arithmetic, where it
+    /// runs the other way: the ink is near-white, so `ink` lightens, and a
+    /// stronger tint is what eats the margin. Its fill is mixed in linear
+    /// light (`tint_fill`), where 9 points of hover is a bigger step than in
+    /// sRGB; its worst is the hovered fill (19%) under banana, 4.58:1, then
+    /// cyan, 4.65:1.
+    #[test]
+    fn daylight_event_text_is_legible_on_every_calendar_colour() {
+        for theme in [Appearance::Daylight, Appearance::DaylightDark] {
+            daylight_text_holds_up(theme);
+        }
+    }
+
+    fn daylight_text_holds_up(theme: Appearance) {
+        let p = Palette::named(theme).unwrap();
+        let s = p.style.as_ref().unwrap();
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let mix = |a: [f64; 3], b: [f64; 3], pct: f64| [0, 1, 2].map(|i| (a[i] * pct + b[i] * (100.0 - pct)) / 100.0);
+        let css = |c: [f64; 3]| format!("#{:02x}{:02x}{:02x}", c[0].round() as u8, c[1].round() as u8, c[2].round() as u8);
+        // The app's ten, Google's eleven, and the demo seed's four, plus the
+        // two the demo seed's calendars wear today.
+        let colours = [
+            "#5b8def", "#2aa198", "#5aa84f", "#8a9a3b", "#e2a03f", "#e07b39", "#e2564a", "#e06c9f", "#9a7bd0", "#7b8a9a",
+            "#7986cb", "#33b679", "#8e24aa", "#e67c73", "#f6bf26", "#f4511e", "#039be5", "#616161", "#3f51b5", "#0b8043", "#d50000",
+            "#2dd4bf", "#f472b6", "#c084fc", "#b58900", "#4cc38a", "#c678dd",
+        ];
+        for c in colours {
+            let text = mix(hex(c), hex(&p.text), f64::from(s.ink));
+            for tint in [s.tint, s.tint + 9] {
+                let fill = tint_fill(s, hex(c), hex(&p.bg), f64::from(tint));
+                let title = contrast(&css(text), &css(fill));
+                let sub = contrast(&css(mix(text, fill, f64::from(s.sub))), &css(fill));
+                assert!(title >= 4.5, "{theme:?} {c} title at {tint}%: {title:.2}");
+                assert!(sub >= 3.0, "{theme:?} {c} second line at {tint}%: {sub:.2}");
+            }
+        }
+    }
+
+    /// A block's fill as the stylesheet mixes it: `color-mix(in <tint_space>,
+    /// cal <pct>%, bg)`, channels 0-255. Any space this does not know fails
+    /// loudly rather than being measured as sRGB.
+    fn tint_fill(s: &ThemeStyle, cal: [f64; 3], bg: [f64; 3], pct: f64) -> [f64; 3] {
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let enc = |v: f64| 255.0 * if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        match s.tint_space.as_deref() {
+            None | Some("srgb") => [0, 1, 2].map(|i| (cal[i] * pct + bg[i] * (100.0 - pct)) / 100.0),
+            Some("srgb-linear") => [0, 1, 2].map(|i| enc((lin(cal[i]) * pct + lin(bg[i]) * (100.0 - pct)) / 100.0)),
+            Some(other) => panic!("tint_space {other:?} is not measured here"),
+        }
+    }
+
+    /// OKLab hue angle in degrees of an sRGB colour, channels 0-255.
+    fn oklab_hue(c: [f64; 3]) -> f64 {
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let [r, g, b] = c.map(lin);
+        let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+        let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+        let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+        let a = 1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s;
+        let bb = 0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s;
+        bb.atan2(a).to_degrees().rem_euclid(360.0)
+    }
+
+    /// Over near-black, an sRGB mix pulls a yellow or amber calendar's hue
+    /// toward green as it darkens it, and the block reads olive (banana's
+    /// fill sat 3 degrees greener than banana, Solarized yellow's 5.5). Daylight
+    /// Dark mixes in linear light, where the hue holds or leans warm. Measured
+    /// in OKLab for the warm calendar colours, at rest and hovered.
+    #[test]
+    fn daylight_dark_keeps_warm_calendars_warm() {
+        let p = Palette::named(Appearance::DaylightDark).unwrap();
+        let s = p.style.as_ref().unwrap();
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let round = |c: [f64; 3]| c.map(f64::round);
+        for c in ["#e2a03f", "#e07b39", "#f6bf26", "#f4511e", "#b58900", "#e2564a"] {
+            let hue = oklab_hue(hex(c));
+            for tint in [s.tint, s.tint + 9] {
+                let fill = oklab_hue(round(tint_fill(s, hex(c), hex(&p.bg), f64::from(tint))));
+                assert!(fill <= hue + 1.0, "{c} at {tint}%: fill hue {fill:.1} drifts green of {hue:.1}");
+            }
+        }
+    }
+
+    /// Text drawn in `--on-accent` sits on `accent_fill`, or on `accent` when
+    /// a palette has none, and `setPalette` picks that ink by the fill's
+    /// luminance (`foregroundFor`: near-white below .179, near-black above).
+    /// It has to clear 4.5:1 for every built-in palette. Both Daylights take
+    /// the light ink, as one red with white text on its buttons: Daylight
+    /// Dark's `#ef5350` accent alone would have handed them dark text.
+    #[test]
+    fn the_accent_fill_carries_its_ink() {
+        let hex = |h: &str| [1, 3, 5].map(|i| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap()));
+        let css = |c: [f64; 3]| format!("#{:02x}{:02x}{:02x}", c[0].round() as u8, c[1].round() as u8, c[2].round() as u8);
+        let lin = |v: f64| { let v = v / 255.0; if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+        let palettes = NAMED.into_iter().map(|t| (format!("{t:?}"), Palette::named(t).unwrap()))
+            .chain([("Light".into(), Palette::fallback_light()), ("Dark".into(), Palette::fallback_dark())]);
+        for (name, p) in palettes {
+            let fill_hex = p.style.as_ref().and_then(|s| s.accent_fill.clone()).unwrap_or(p.accent.clone());
+            let fill = hex(&fill_hex);
+            let lum = 0.2126 * lin(fill[0]) + 0.7152 * lin(fill[1]) + 0.0722 * lin(fill[2]);
+            // `--ink-on-dark` is white at .96, `--ink-on-light` black at .88.
+            let light = lum < 0.179;
+            let (ink, alpha) = if light { (255.0, 0.96) } else { (0.0, 0.88) };
+            let ink = css(fill.map(|v| ink * alpha + v * (1.0 - alpha)));
+            let ratio = contrast(&ink, &fill_hex);
+            assert!(ratio >= 4.5, "{name}: on-accent ink on {fill_hex}: {ratio:.2}");
+            if name.starts_with("Daylight") {
+                assert!(light, "{name}: {fill_hex} takes dark text");
+            }
+        }
+    }
+
+    /// **The plain Light and Dark, retired off Omarchy** (2026-11-16): there,
+    /// each is honoured as its successor, and every other choice as itself;
+    /// on Omarchy nothing moves, Light and Dark included, because they are
+    /// the way out of a hard-to-read Omarchy theme.
+    #[test]
+    fn light_and_dark_are_their_successors_off_omarchy_only() {
+        assert_eq!(Appearance::Light.on_this_desktop(false), Appearance::Daylight);
+        assert_eq!(Appearance::Dark.on_this_desktop(false), Appearance::DaylightDark);
+        for a in NAMED.into_iter().chain([Appearance::Auto]) {
+            assert_eq!(a.on_this_desktop(false), a, "{a:?} off Omarchy");
+        }
+        for a in NAMED.into_iter().chain([Appearance::Auto, Appearance::Light, Appearance::Dark]) {
+            assert_eq!(a.on_this_desktop(true), a, "{a:?} on Omarchy");
+        }
+    }
+
     /// Stored as Omarchy spells the theme, sent as the same string, and read
     /// back through one table — so the settings row, the wire and the parse
     /// cannot drift apart.
@@ -840,6 +1333,34 @@ light_foreground = "#adb5c4"
             assert!(theme == Appearance::Auto || theme.is_pinned());
         }
         assert_eq!(Appearance::parse("solarized"), None);
+    }
+
+    /// Only the two Daylights turn the style knobs, and everyone else sends
+    /// nothing — not `null` — so the UI's "absent means stock" holds for every
+    /// built-in palette and for anything resolved from an Omarchy theme file.
+    #[test]
+    fn only_daylight_carries_a_style() {
+        for theme in NAMED {
+            let wire = serde_json::to_value(Palette::named(theme).unwrap()).unwrap();
+            let daylight = matches!(theme, Appearance::Daylight | Appearance::DaylightDark);
+            assert_eq!(wire.get("style").is_some(), daylight, "{theme:?}");
+        }
+        for p in [Palette::fallback_dark(), Palette::fallback_light()] {
+            assert!(serde_json::to_value(p).unwrap().get("style").is_none());
+        }
+        let omarchy = parse_colors("mode = \"light\"\nbackground = \"#ffffff\"\nforeground = \"#111111\"").unwrap();
+        assert!(omarchy.style.is_none());
+        let wire = serde_json::to_value(Palette::named(Appearance::Daylight).unwrap()).unwrap();
+        assert_eq!(wire["style"], serde_json::json!({
+            "tint": 22, "spine": 3, "title_weight": 600, "ink": 48, "sub": 85,
+            "today": "#f2f2f4", "heading_size": 24, "heading_weight": 700,
+        }));
+        let wire = serde_json::to_value(Palette::named(Appearance::DaylightDark).unwrap()).unwrap();
+        assert_eq!(wire["style"], serde_json::json!({
+            "tint": 10, "spine": 3, "title_weight": 600, "ink": 42, "sub": 85,
+            "today": "#1e2024", "heading_size": 24, "heading_weight": 700,
+            "tint_space": "srgb-linear", "accent_fill": "#d32f3a",
+        }));
     }
 
     /// Pre-Omarchy-4 and custom themes may have no `light_foreground`. Preserve
@@ -900,7 +1421,7 @@ muted = "#4c566a"
         )
         .unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#1a1b26");
         assert_eq!(p.text, "#a9b1d6");
         assert_eq!(p.accent, "#e0af68");
@@ -920,7 +1441,7 @@ muted = "#4c566a"
         )
         .unwrap();
 
-        let p = resolve(Some(&temp_dir), Appearance::Auto);
+        let p = resolve(Some(&temp_dir), Appearance::Auto, AutoPair::default());
         assert_eq!(p.bg, "#eff1f5");
         assert_eq!(p.accent, "#1e66f5");
         assert!(!p.is_dark);

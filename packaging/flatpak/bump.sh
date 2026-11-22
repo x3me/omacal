@@ -10,6 +10,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# GNU sed only. Below, `sed -i -e` edits in place and `0,/re/` addresses the
+# first match, both GNU behaviour. BSD sed (macOS) reads `-i -e` as "keep a
+# backup with the suffix -e", which is how `io.extremelabs.omacal.yml-e` once
+# got committed, and has no `0,/re/` at all. Refuse rather than half-work.
+if ! sed --version >/dev/null 2>&1; then
+  echo "bump.sh needs GNU sed (on macOS: brew install gnu-sed, then put gsed's gnubin first on PATH)" >&2
+  exit 1
+fi
+
 repo=x3me/omacal
 manifest=io.extremelabs.omacal.yml
 metainfo=io.extremelabs.omacal.metainfo.xml

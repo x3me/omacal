@@ -16,21 +16,16 @@ pub(crate) enum Reach {
     /// The whole calendar. A WebCal feed arrives whole on every fetch, so
     /// anything it does not name is gone.
     Whole,
-    /// CalDAV's time-range REPORT: rows overlapping `start..end`, and every
-    /// series (a master's own dates say nothing about its occurrences). Runs
-    /// on every successful sync, so it must not reach past what the REPORT
-    /// asked for.
+    /// A fetch bounded to `start..end`: rows overlapping it, and every series
+    /// that starts before `end` (a master's own dates say nothing about its
+    /// occurrences). Both fetches that use it are bounded the same way:
+    /// CalDAV's time-range REPORT, on every successful sync, and Google's
+    /// full resync, whose `timeMin`/`timeMax` exclude an event that ends by
+    /// `start` or starts at `end` or later. A row past either end was never
+    /// asked about, so it must not be swept: the Google sweep once had no
+    /// upper bound, and a meeting more than the window away vanished at
+    /// every daily rollover.
     Overlapping { start_ms: i64, end_ms: i64 },
-    /// Google's full resync: rows ending at or after `start_ms`, and every
-    /// series. No upper bound because it runs only after a *full* fetch of
-    /// the window; rows ending before it were never asked about.
-    EndingFrom { start_ms: i64 },
-    /// Rows whose own start and end overlap the range, series masters
-    /// included only when that first occurrence does. A post-write resync
-    /// asks about the recent window, not every series a long history keeps,
-    /// and [`Overlapping`]'s "every master is in reach" would delete the
-    /// ones that ended before it.
-    Dated { start_ms: i64, end_ms: i64 },
 }
 
 /// Deletes this calendar's events inside `reach` whose `google_id` is not in
@@ -73,21 +68,6 @@ pub(crate) async fn delete_unnamed<S: AsRef<str> + Sync>(
             .bind(start_ms)
             .execute(&mut *conn)
             .await?
-        }
-        Reach::EndingFrom { start_ms } => {
-            sqlx::query(&format!("{UNNAMED} AND (recurrence IS NOT NULL OR end_utc >= ?2)"))
-                .bind(calendar_id)
-                .bind(start_ms)
-                .execute(&mut *conn)
-                .await?
-        }
-        Reach::Dated { start_ms, end_ms } => {
-            sqlx::query(&format!("{UNNAMED} AND start_utc < ?2 AND end_utc > ?3"))
-                .bind(calendar_id)
-                .bind(end_ms)
-                .bind(start_ms)
-                .execute(&mut *conn)
-                .await?
         }
     }
     .rows_affected();
@@ -136,10 +116,6 @@ mod tests {
         for (reach, survivors) in [
             (Reach::Whole, vec!["kept"]),
             (Reach::Overlapping { start_ms: 100, end_ms: 200 }, vec!["after", "before", "kept"]),
-            (Reach::EndingFrom { start_ms: 100 }, vec!["before", "kept"]),
-            // The ancient series' own dates do not overlap, so a narrow
-            // resync leaves it. `inside` does overlap and was not named.
-            (Reach::Dated { start_ms: 100, end_ms: 200 }, vec!["after", "before", "kept", "series"]),
         ] {
             let pool = pool_with(&rows).await;
             let mut conn = pool.acquire().await.unwrap();

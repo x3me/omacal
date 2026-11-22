@@ -241,7 +241,10 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
     let tz = jiff::tz::TimeZone::system();
     let refuse = |m: &str| fail(json, "usage", m, EXIT_USAGE);
 
-    let (request, done_word) = match cmd {
+    // The app answers a task write with the whole list, so the name the line
+    // prints is the one this side sent (or, for a completion, the task as
+    // stored) — see `cli_write::done_line`.
+    let (request, done_word, name) = match cmd {
         TaskCmd::Add { summary, list, due, at, priority } => {
             if summary.trim().is_empty() {
                 return refuse("a task needs a title");
@@ -261,10 +264,17 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 other => resolve_list(other, &[]).unwrap_or(None),
             };
             // 0 and absent both mean "no priority" on a create.
-            (create_request(list, summary, due_ms, all_day, priority.map(PriorityArg::wire)), "Added")
+            (
+                create_request(list, summary, due_ms, all_day, priority.map(PriorityArg::wire)),
+                "Added",
+                Some(summary.clone()),
+            )
         }
         TaskCmd::Complete { id, done } => {
-            (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" })
+            // Best effort: a task that is not here is the app's to refuse,
+            // and a read failure only costs the line its name.
+            let name = omacal_store::task_by_id(pool, *id).await.ok().flatten().and_then(|t| t.summary);
+            (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" }, name)
         }
         TaskCmd::Edit { id, title, due, at, notes, priority } => {
             let task = match omacal_store::task_by_id(pool, *id).await {
@@ -294,11 +304,12 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 Some(word) => Some(word.wire()),
                 None => Some(task.priority),
             };
-            (update_request(*id, &summary, due_ms, all_day, notes.as_deref(), priority), "Saved")
+            let request = update_request(*id, &summary, due_ms, all_day, notes.as_deref(), priority);
+            (request, "Saved", Some(summary))
         }
     };
 
-    crate::cli_write::send(&request, json, done_word)
+    crate::cli_write::send(&request, json, done_word, name.as_deref())
 }
 
 /// The three requests above, in the envelope every socket write speaks —

@@ -9,16 +9,17 @@ pub mod changes;
 pub mod contacts;
 pub mod declines;
 pub mod events;
+pub mod history;
 pub mod invites;
 pub mod reminders;
 pub mod tasks;
 pub use calendars::{
     create_local_list, delete_local_list, ensure_webcal_subscription, ensure_local_task_list,
     is_local_calendar, rename_local_list, WEBCAL_PROVIDER, LOCAL_PROVIDER, calendar_for_write,
-    delete_account, list_calendars, set_color_override, set_label_override, set_selected,
+    delete_account, delete_calendar, list_calendars, set_color_override, set_label_override, set_selected,
     set_selected_exactly, set_sync_enabled, CalendarRow,
 };
-pub use changes::{
+pub use changes::{is_first_sync, forget_baseline_changes, 
     changed_meetings, dismiss_all_changes, dismiss_change, forget_changes, ChangedMeeting,
 };
 pub use contacts::{known_contacts, replace_account_contacts, KnownContact, StoredContact};

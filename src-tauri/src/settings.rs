@@ -92,7 +92,12 @@ const AUTOSTART_KEY: &str = "autostart";
 const AUTOSTART_ASKED_KEY: &str = "autostart_asked";
 const WEATHER_KEY: &str = "weather_enabled";
 const PHOTON_PLACES_KEY: &str = "photon_places";
+const UPDATE_CHECK_KEY: &str = "update_check";
 const APPEARANCE_KEY: &str = "appearance";
+/// The themes `Auto` wears in the system's light and dark mode
+/// ([`crate::theme::AutoPair`]); absent is Daylight and Daylight Dark.
+const AUTO_LIGHT_THEME_KEY: &str = "appearance_auto_light";
+const AUTO_DARK_THEME_KEY: &str = "appearance_auto_dark";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
 const DISPLAY_TZ_KEY: &str = "display_timezone";
@@ -117,17 +122,13 @@ const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
-const HISTORY_SPAN_KEY: &str = "history_span_months";
-/// How far back sync keeps events, in months. `0` is everything (back to
-/// 1900). Ahead is a year for every one of them. A fresh install reads an
-/// absent row as [`DEFAULT_HISTORY_MONTHS`]; migration 0019 writes
-/// [`SPAN_6_MONTHS`] where a calendar already exists, so an update does not
-/// lengthen a calendar that was syncing six months.
-pub(crate) const HISTORY_SPANS: [i64; 4] = [6, 24, 60, 0];
-pub(crate) const DEFAULT_HISTORY_MONTHS: i64 = 24;
-/// Six months: 180 days, the window sync kept before this setting existed,
-/// and the recent slice a save refetches instead of the whole span.
-pub(crate) const SPAN_6_MONTHS: i64 = 6;
+pub(crate) use omacal_store::history::{
+    HISTORY_SPAN_KEY, HISTORY_SPANS, DEFAULT_HISTORY_MONTHS,
+    forget_events_ending_before,
+};
+pub(crate) use omacal_store::history::history_window;
+#[cfg(test)]
+pub(crate) use omacal_store::history::SPAN_6_MONTHS;
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -543,7 +544,7 @@ pub struct AppSettings {
     /// How far back events are kept, in months. One of [`HISTORY_SPANS`]:
     /// 6, 24 (two years), 60 (five years), or 0 for everything back to 1900.
     /// Ahead is a year either way. Absent reads as two years; an install
-    /// that already has a calendar keeps six (migration 0019).
+    /// that already has a calendar keeps six (migration 0020).
     pub history_span: i64,
     /// Whether Day, Week and Month draw as a list rather than a grid — the
     /// filmstrip toggle (filmstrip spec §4).
@@ -642,14 +643,23 @@ pub struct AppSettings {
     /// the Omarchy 4 bar widget being the case this was built for, driving
     /// the app over the single-instance flags (`--sync-now`, `--quit`).
     pub tray_icon: bool,
-    /// Which palette the app wears: the desktop's, or one of the two built
-    /// in. **`Auto` by default**, which is what omacal has always done — the
-    /// Omarchy theme if there is one, the dark fallback if there is not.
+    /// Which palette the app wears: the desktop's, or one of omacal's own
+    /// themes. **`Auto` by default**: the Omarchy theme if there is one, as
+    /// omacal has always done, and otherwise the theme chosen for the side
+    /// the system's light-or-dark is on (`auto_light_theme`,
+    /// `auto_dark_theme`).
     ///
-    /// The setting exists because that second half was a dead end: omacal has
-    /// no theme of its own, so every desktop that is not Omarchy got dark and
-    /// had no way to ask for anything else (issue #30).
+    /// The setting exists because that otherwise used to be a dead end:
+    /// omacal had no theme of its own, so every desktop that is not Omarchy
+    /// got dark and had no way to ask for anything else (issue #30).
     pub appearance: crate::theme::Appearance,
+    /// What `Auto` wears while the system is in light mode, and in dark
+    /// mode, on a desktop with no Omarchy theme. Read through
+    /// [`auto_pair`], so a stale row comes back as that side's default, a
+    /// plain Light or Dark as its successor, and the form never shows a
+    /// choice the app is not wearing.
+    pub auto_light_theme: crate::theme::Appearance,
+    pub auto_dark_theme: crate::theme::Appearance,
     /// Whether the window draws a title bar, or `None` where the choice is
     /// not omacal's to make — macOS, whose `titleBarStyle: "Overlay"` puts
     /// the traffic lights over the content, and where hiding them would
@@ -707,6 +717,10 @@ pub struct AppSettings {
     /// Photon's public server asks for light personal use. History
     /// suggestions stay on regardless — they never leave the machine.
     pub photon_places: bool,
+    /// Whether the daily check for a newer release runs (it asks GitHub's
+    /// public release listing, which sees the version and the IP address).
+    /// See [`update_check_default`] for why it starts off inside Flatpak.
+    pub update_check: bool,
     /// Whether the day headers' forecast high is drawn in Celsius or
     /// Fahrenheit — Celsius by default, so no installed copy changes under
     /// its user. Read by the same components as `weather_enabled` guards,
@@ -930,6 +944,7 @@ pub async fn read_settings(pool: &SqlitePool) -> AppSettings {
 /// tell the Omarchy story and the other one on whichever host runs it.
 pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSettings {
     let (visible_start_hour, visible_end_hour) = visible_hours(pool).await;
+    let auto = auto_pair(pool).await;
     let absolute_transparency = read(pool, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY)
         .await
         .as_deref()
@@ -1119,6 +1134,8 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         tray_icon: read(pool, TRAY_ICON_KEY).await.map(|v| v != "0").unwrap_or(true),
         quit_on_close: quit_on_close(pool).await,
         appearance: appearance(pool).await,
+        auto_light_theme: auto.light(),
+        auto_dark_theme: auto.dark(),
         // `None` is an absence, not a default: on macOS the frame is the
         // system's, and a row that does nothing is worse than no row.
         // `cfg!` rather than `#[cfg]` so both arms compile on the
@@ -1148,6 +1165,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // the setting must keep sending only an IP to the weather service,
         // not typed locations to a third party.
         photon_places: photon_places(pool).await,
+        update_check: update_check(pool).await,
         // Same "only a spelling this version writes moves the setting" rule
         // as `week_start`: absent, garbage and a future spelling all land on
         // Celsius, the unit omacal has always drawn.
@@ -1171,6 +1189,13 @@ pub const EVENT_DURATION_TOO_SHORT: &str =
 
 pub const INTERFACE_SCALE_OUT_OF_RANGE: &str =
     "the interface scale must be between 75 and 200 percent";
+
+/// Refusals for a theme offered to the wrong side of `Auto`. The form only
+/// offers each side its own themes, so these reach a person only through a
+/// stale form or a hand-made call; they say what to pick instead. Shown as
+/// [`SetError::Refused`], so no allowlist entry is needed.
+pub const NOT_A_LIGHT_THEME: &str = "light mode needs a light theme";
+pub const NOT_A_DARK_THEME: &str = "dark mode needs a dark theme";
 
 pub const TRANSPARENCY_OUT_OF_RANGE: &str =
     "background transparency must be between 0 and 50 percent; event transparency between 0 and 25 percent";
@@ -1273,6 +1298,25 @@ pub(crate) async fn weather_enabled(pool: &SqlitePool) -> bool {
 /// means. Absent is off — `list_mode`'s polarity, for the opposite of
 /// weather's reason: a forecast nobody asked to lose is decoration; a
 /// typed location sent off-machine is not.
+/// Whether the update check may run, named for [`weather_enabled`]'s reason:
+/// the update loop and `read_settings` must agree on default and polarity.
+pub(crate) async fn update_check(pool: &SqlitePool) -> bool {
+    read(pool, UPDATE_CHECK_KEY)
+        .await
+        .map(|v| v == "1")
+        .unwrap_or_else(|| update_check_default(std::env::var_os("FLATPAK_ID").is_some()))
+}
+
+/// The update check's default before the user has chosen. On, except inside
+/// a Flatpak: there the package manager delivers updates, and a notice from
+/// GitHub only repeats it late, at the cost of a request to a third party.
+/// The other packaged channels (the .deb, the .rpm, the AUR, all the same
+/// binary) cannot be told apart from a download at run time, so they keep
+/// it on, and anyone can turn it off in Settings.
+pub(crate) fn update_check_default(in_flatpak: bool) -> bool {
+    !in_flatpak
+}
+
 pub(crate) async fn photon_places(pool: &SqlitePool) -> bool {
     read(pool, PHOTON_PLACES_KEY).await.map(|v| v == "1").unwrap_or(false)
 }
@@ -1290,6 +1334,34 @@ pub(crate) async fn appearance(pool: &SqlitePool) -> crate::theme::Appearance {
         .as_deref()
         .and_then(crate::theme::Appearance::parse)
         .unwrap_or(crate::theme::Appearance::Auto)
+}
+
+/// Rewrites a stored Light or Dark as Daylight or Daylight Dark on a desktop
+/// with no Omarchy theme, once, at startup ([`theme::Appearance::
+/// on_this_desktop`] has the rule and the reason). `resolve` already wears
+/// the new palette either way; this is so the picker, which no longer offers
+/// the two off Omarchy, ticks the card that is actually worn. Never on
+/// Omarchy, where both stay. A failed write changes nothing that matters:
+/// the palette is right regardless, and the next launch tries again.
+pub(crate) async fn retire_plain_themes(pool: &SqlitePool, omarchy: bool) {
+    let stored = appearance(pool).await;
+    let honoured = stored.on_this_desktop(omarchy);
+    if honoured != stored {
+        if let Err(e) = write(pool, APPEARANCE_KEY, honoured.as_str()).await {
+            tracing::warn!(%e, "could not move a retired theme choice to its successor");
+        }
+    }
+}
+
+/// The two themes `Auto` chooses between, for [`appearance`]'s reason: every
+/// caller of `theme::resolve` needs them beside it. Each row is checked on
+/// its own (`AutoPair::from_stored`), so a theme renamed by a future version,
+/// or a light theme stored for dark mode by a hand edit, costs that one side.
+pub(crate) async fn auto_pair(pool: &SqlitePool) -> crate::theme::AutoPair {
+    crate::theme::AutoPair::from_stored(
+        read(pool, AUTO_LIGHT_THEME_KEY).await.as_deref(),
+        read(pool, AUTO_DARK_THEME_KEY).await.as_deref(),
+    )
 }
 
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s
@@ -1492,63 +1564,9 @@ pub(crate) async fn history_months(pool: &SqlitePool) -> i64 {
         .unwrap_or(DEFAULT_HISTORY_MONTHS)
 }
 
-const DAY_MS: i64 = 24 * 3_600_000;
-/// 1900-01-01T00:00:00Z. Everything reaches back to here and no further;
-/// the forward edge stays a year out and still slides.
-const EVERYTHING_START_MS: i64 = -2_208_988_800_000;
-
-/// The window sync fetches for `months`, and the one the year views hatch
-/// outside of. Six months is 180 days — the window this app already kept —
-/// and a year is 365 days, the same length the window looks ahead. Anything
-/// that is not an offered span reads as the two-year default.
-pub(crate) fn history_window(now_ms: i64, months: i64) -> (i64, i64) {
-    let ahead = now_ms + 365 * DAY_MS;
-    let back_days: i64 = match months {
-        6 => 180,
-        24 => 2 * 365,
-        60 => 5 * 365,
-        0 => return (EVERYTHING_START_MS, ahead),
-        _ => 2 * 365,
-    };
-    (now_ms - back_days * DAY_MS, ahead)
-}
-
-/// Whether a stored window is no wider than the recent six months.
-///
-/// A save can then resync the way it did before a longer span existed, at
-/// the same cost. Compared by width, so a window recorded yesterday is still
-/// six months after both edges have slid a day.
-pub(crate) fn window_within_recent(start_ms: i64, end_ms: i64, now_ms: i64) -> bool {
-    let (near_start, near_end) = history_window(now_ms, SPAN_6_MONTHS);
-    end_ms.saturating_sub(start_ms) <= near_end.saturating_sub(near_start).saturating_add(DAY_MS)
-}
-
 /// What the user is told when a history span is not one of the four.
 pub(crate) const HISTORY_SPAN_UNOFFERED: &str =
     "Choose 6 months, 2 years, 5 years, or everything.";
-
-/// One-off rows, and exceptions whose occurrence is also outside the window,
-/// that end at or before `window_start_ms`. Series masters stay: their own
-/// dates say nothing about later occurrences, and a shorter span must not
-/// throw a series away. An exception whose original slot is still inside the
-/// window stays too — it is what stops the master expanding a ghost there.
-async fn forget_events_ending_before(
-    conn: &mut sqlx::SqliteConnection,
-    window_start_ms: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "DELETE FROM events
-          WHERE recurrence IS NULL
-            AND end_utc <= ?1
-            AND (recurring_event_id IS NULL
-                 OR original_start_utc IS NULL
-                 OR original_start_utc < ?1)",
-    )
-    .bind(window_start_ms)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
 
 /// Display grouping is opt-in and never changes the stored calendar events.
 pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
@@ -1588,6 +1606,8 @@ pub enum Setting {
     /// Whether Photon may be queried from the Location field. History
     /// suggestions ignore this — they are a local SELECT.
     PhotonPlaces(bool),
+    /// Whether the daily update check runs.
+    UpdateCheck(bool),
     NotificationsEnabled(bool),
     /// The task half of the switch above (#137), stored separately so either
     /// can be off while the other speaks.
@@ -1602,6 +1622,14 @@ pub enum Setting {
     /// Omarchy watcher emits, and moves GTK's dark hint with it: WebKitGTK
     /// draws `<select>` popups from the GTK theme, not the page.
     Appearance(crate::theme::Appearance),
+    /// The theme `Auto` wears in the system's light mode, and in its dark
+    /// mode. A plain Light or Dark is stored as its successor, and anything
+    /// else is refused unless it is a theme of that side, so the stored row
+    /// always means what the picker showed. Each write re-sends the palette
+    /// as `Appearance` does, which changes what is on screen only when it is
+    /// the side the app is wearing.
+    AutoLightTheme(crate::theme::Appearance),
+    AutoDarkTheme(crate::theme::Appearance),
     /// Applied live; the frame is the compositor's or GTK's to draw.
     WindowFrame(WindowFrame),
     /// Also stored in [`AppState::quit_on_close`], a mirror of the row:
@@ -1799,7 +1827,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             // The recorded start moves forward with them, so choosing a longer
             // span later is seen as a window that still has to be fetched.
             if new_start > old_start {
-                forget_events_ending_before(&mut tx, new_start).await?;
+                forget_events_ending_before(&mut tx, None, new_start).await?;
                 sqlx::query(
                     "UPDATE sync_state SET window_start = ?1
                       WHERE window_start IS NOT NULL AND window_start < ?1",
@@ -1816,11 +1844,28 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         }
         S::WeatherEnabled(on) => write(pool, WEATHER_KEY, flag(*on)).await?,
         S::PhotonPlaces(on) => write(pool, PHOTON_PLACES_KEY, flag(*on)).await?,
+        S::UpdateCheck(on) => write(pool, UPDATE_CHECK_KEY, flag(*on)).await?,
         S::NotificationsEnabled(on) => write(pool, NOTIFICATIONS_KEY, flag(*on)).await?,
         S::TaskNotificationsEnabled(on) => write(pool, TASK_NOTIFICATIONS_KEY, flag(*on)).await?,
         S::KeepRemindersOnScreen(on) => write(pool, KEEP_REMINDERS_KEY, flag(*on)).await?,
         S::TrayIcon(on) => write(pool, TRAY_ICON_KEY, flag(*on)).await?,
         S::Appearance(a) => write(pool, APPEARANCE_KEY, a.as_str()).await?,
+        // The pair is only worn off Omarchy, where a plain Light or Dark is
+        // its successor: stored as that, as `AutoPair::from_stored` reads it.
+        S::AutoLightTheme(a) => {
+            let a = a.on_this_desktop(false);
+            if !a.suits(false) {
+                return Err(refused(NOT_A_LIGHT_THEME));
+            }
+            write(pool, AUTO_LIGHT_THEME_KEY, a.as_str()).await?;
+        }
+        S::AutoDarkTheme(a) => {
+            let a = a.on_this_desktop(false);
+            if !a.suits(true) {
+                return Err(refused(NOT_A_DARK_THEME));
+            }
+            write(pool, AUTO_DARK_THEME_KEY, a.as_str()).await?;
+        }
         S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
         S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
         // The answer and the fact of having answered, in one write: whatever
@@ -1997,9 +2042,14 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
             crate::weather::refresh_soon(app.clone(), state.pool.clone(), state.demo, true);
         }
         S::TrayIcon(on) => crate::tray::set_visible(app, *on),
-        S::Appearance(appearance) => {
-            let palette =
-                crate::theme::resolve(crate::theme::omarchy_theme_dir().as_deref(), *appearance);
+        // Re-read rather than taken from the setting: the palette depends on
+        // all three rows, and the one just written is already among them.
+        S::Appearance(_) | S::AutoLightTheme(_) | S::AutoDarkTheme(_) => {
+            let palette = crate::theme::resolve(
+                crate::theme::omarchy_theme_dir().as_deref(),
+                appearance(&state.pool).await,
+                auto_pair(&state.pool).await,
+            );
             let dark = palette.is_dark;
             // GTK settings must not be touched from a command's thread.
             let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
@@ -2089,6 +2139,8 @@ mod tests {
             read(json!({"key": "menubarDateFormat", "value": {"format": "custom", "custom": "%-d"}})),
             Setting::MenubarDateFormat { .. }
         ));
+        assert!(matches!(read(json!({"key": "autoLightTheme", "value": "rose-pine-dawn"})), Setting::AutoLightTheme(crate::theme::Appearance::RosePineDawn)));
+        assert!(matches!(read(json!({"key": "autoDarkTheme", "value": "tokyo-night"})), Setting::AutoDarkTheme(crate::theme::Appearance::TokyoNight)));
         // A key this build does not know is an error, not a silent no-op.
         assert!(serde_json::from_value::<Setting>(json!({"key": "noSuchSetting", "value": 1})).is_err());
     }
@@ -2433,23 +2485,6 @@ mod tests {
         assert!(history_window(now, 6).0 < now && now < history_window(now, 6).1);
     }
 
-    /// A window recorded yesterday is still the recent six months: the edges
-    /// slide, the width does not. Two years, and everything, are wider.
-    #[test]
-    fn a_six_month_window_is_not_wider_than_the_recent_one() {
-        const DAY: i64 = 24 * 3_600_000;
-        let now = 1_786_341_600_000_i64;
-        let (start, end) = history_window(now, 6);
-        assert!(window_within_recent(start, end, now));
-        let yesterday = now - DAY;
-        let (start, end) = history_window(yesterday, 6);
-        assert!(window_within_recent(start, end, now), "recorded yesterday, still six months wide");
-        let (start, end) = history_window(now, 24);
-        assert!(!window_within_recent(start, end, now), "two years is wider");
-        let (start, end) = history_window(now, 0);
-        assert!(!window_within_recent(start, end, now), "everything is wider");
-    }
-
     /// Shortening the span drops one-off rows that end before the new window,
     /// and leaves series masters and exceptions whose occurrence is still
     /// inside it. A longer span deletes nothing: those rows are what the next
@@ -2538,41 +2573,6 @@ mod tests {
         assert!(recorded >= edge - day && recorded <= edge_now + day, "the recorded start moved forward: {recorded}");
     }
 
-    /// Migration 0019, replayed against the databases it meets: an install in
-    /// use keeps six months, a fresh one has no row and reads as two years,
-    /// and a span already chosen is left alone.
-    #[tokio::test]
-    async fn migration_0019_keeps_six_months_for_an_install_already_in_use() {
-        const SQL: &str = include_str!(
-            "../../crates/omacal-store/migrations/0019_history_span_for_existing_installs.sql"
-        );
-        async fn replay(p: SqlitePool) -> SqlitePool {
-            sqlx::raw_sql(SQL).execute(&p).await.unwrap();
-            p
-        }
-
-        let p = pool().await;
-        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
-            .execute(&p).await.unwrap();
-        sqlx::query(
-            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
-             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
-        )
-        .execute(&p).await.unwrap();
-        let p = replay(p).await;
-        assert_eq!(read(&p, HISTORY_SPAN_KEY).await.as_deref(), Some("6"));
-        assert_eq!(history_months(&p).await, SPAN_6_MONTHS, "an existing install stays at six months");
-
-        let p = replay(pool().await).await;
-        assert_eq!(read(&p, HISTORY_SPAN_KEY).await, None, "a fresh database gets no row");
-        assert_eq!(history_months(&p).await, DEFAULT_HISTORY_MONTHS);
-
-        let p = pool().await;
-        write(&p, HISTORY_SPAN_KEY, "60").await.unwrap();
-        let p = replay(p).await;
-        assert_eq!(history_months(&p).await, 60, "a span already chosen stands");
-    }
-
     /// The two questions the mode answers, which are deliberately not the
     /// same question: `Background` still registers the entry.
     #[test]
@@ -2650,6 +2650,28 @@ mod tests {
         }
     }
 
+    /// Off Omarchy a stored Light or Dark becomes its successor once, at
+    /// startup, so the picker (which no longer offers either there) ticks
+    /// what is worn; on Omarchy the row is left exactly as it was.
+    #[tokio::test]
+    async fn a_retired_theme_choice_moves_to_its_successor_off_omarchy_only() {
+        use crate::theme::Appearance;
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for (stored, omarchy, after) in [
+            ("light", false, "daylight"),
+            ("dark", false, "daylight-dark"),
+            ("light", true, "light"),
+            ("dark", true, "dark"),
+            ("catppuccin-latte", false, "catppuccin-latte"),
+            ("auto", false, "auto"),
+        ] {
+            write(&pool, APPEARANCE_KEY, stored).await.unwrap();
+            retire_plain_themes(&pool, omarchy).await;
+            assert_eq!(read(&pool, APPEARANCE_KEY).await.as_deref(), Some(after), "{stored} omarchy={omarchy}");
+        }
+        assert_eq!(appearance(&pool).await, Appearance::Auto);
+    }
+
     #[tokio::test]
     async fn appearance_round_trips_as_one_choice_and_rejects_bad_percentages() {
         let p = pool().await;
@@ -2722,6 +2744,59 @@ mod tests {
             read(&p, APPEARANCE_TRANSPARENCY_SEMANTICS_KEY).await.as_deref(),
             Some(ABSOLUTE_TRANSPARENCY_SEMANTICS),
         );
+    }
+
+    /// Each side of `Auto` stores its own theme, refuses one of the other
+    /// side (or `auto` itself) without touching what was stored, reads a
+    /// stale row back as that side's default rather than as the row, and
+    /// reads, and stores, the retired Light or Dark as its successor.
+    #[tokio::test]
+    async fn the_auto_pair_round_trips_and_refuses_the_wrong_side() {
+        use crate::theme::Appearance as A;
+        let p = pool().await;
+        let fresh = read_settings(&p).await;
+        assert_eq!((fresh.auto_light_theme, fresh.auto_dark_theme), (A::Daylight, A::DaylightDark));
+
+        let s = set(&p, Setting::AutoLightTheme(A::RosePineDawn)).await.unwrap();
+        assert_eq!((s.auto_light_theme, s.auto_dark_theme), (A::RosePineDawn, A::DaylightDark));
+        let s = set(&p, Setting::AutoDarkTheme(A::TokyoNight)).await.unwrap();
+        assert_eq!((s.auto_light_theme, s.auto_dark_theme), (A::RosePineDawn, A::TokyoNight));
+        // As `settings.ts` reads them.
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!((&wire["autoLightTheme"], &wire["autoDarkTheme"]), (&"rose-pine-dawn".into(), &"tokyo-night".into()));
+        assert_eq!(auto_pair(&p).await.for_scheme(crate::theme::SystemScheme::Dark), A::TokyoNight);
+
+        for (setting, refusal) in [
+            (Setting::AutoLightTheme(A::CatppuccinMocha), NOT_A_LIGHT_THEME),
+            (Setting::AutoLightTheme(A::Auto), NOT_A_LIGHT_THEME),
+            (Setting::AutoDarkTheme(A::Light), NOT_A_DARK_THEME),
+            (Setting::AutoDarkTheme(A::Auto), NOT_A_DARK_THEME),
+        ] {
+            assert_eq!(set(&p, setting).await.unwrap_err(), refusal);
+        }
+        let kept = read_settings(&p).await;
+        assert_eq!((kept.auto_light_theme, kept.auto_dark_theme), (A::RosePineDawn, A::TokyoNight));
+
+        // A row no form wrote: a renamed theme, and a dark one in the light slot.
+        write(&p, AUTO_LIGHT_THEME_KEY, "catppuccin-mocha").await.unwrap();
+        write(&p, AUTO_DARK_THEME_KEY, "solarized").await.unwrap();
+        let stale = read_settings(&p).await;
+        assert_eq!((stale.auto_light_theme, stale.auto_dark_theme), (A::Daylight, A::DaylightDark));
+        // And the appearance itself is untouched by either side.
+        assert_eq!(stale.appearance, A::Auto);
+
+        // The plain two, which each pass their side's check, are read as the
+        // themes that replaced them rather than worn as themselves.
+        write(&p, AUTO_LIGHT_THEME_KEY, "light").await.unwrap();
+        write(&p, AUTO_DARK_THEME_KEY, "dark").await.unwrap();
+        let retired = read_settings(&p).await;
+        assert_eq!((retired.auto_light_theme, retired.auto_dark_theme), (A::Daylight, A::DaylightDark));
+        // And sent as a setting, they are stored as those themes, so the row
+        // says what is worn.
+        set(&p, Setting::AutoLightTheme(A::Light)).await.unwrap();
+        set(&p, Setting::AutoDarkTheme(A::Dark)).await.unwrap();
+        assert_eq!(read(&p, AUTO_LIGHT_THEME_KEY).await.as_deref(), Some("daylight"));
+        assert_eq!(read(&p, AUTO_DARK_THEME_KEY).await.as_deref(), Some("daylight-dark"));
     }
 
     #[tokio::test]

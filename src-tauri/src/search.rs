@@ -132,6 +132,10 @@ pub(crate) async fn search_impl(
                 title: src.summary.clone().unwrap_or_else(|| "(no title)".into()),
                 start_ms: iv.start_ms,
                 end_ms: iv.end_ms,
+                // The grid's own reading: the instant in the calendar's zone.
+                all_day_date: src
+                    .is_all_day
+                    .then(|| crate::write::date_in_zone(iv.start_ms, &src.calendar_timezone)),
             }
         })
         .collect();
@@ -211,6 +215,7 @@ mod tests {
             color_hex: None, calendar_timezone: "UTC".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
@@ -242,6 +247,33 @@ mod tests {
 
     async fn insert_task(pool: &SqlitePool, t: &omacal_store::StoredTask) {
         omacal_store::upsert_task(pool, t).await.unwrap();
+    }
+
+    /// An all-day hit says which date it is, read in its own calendar's zone,
+    /// as the grid places the chip. The UI used to format the stored instant
+    /// in its own zone, and an all-day event on a calendar ahead of the
+    /// machine (Auckland's 5 August is 4 August, 12:00 UTC) was listed and
+    /// jumped to a day early. A timed hit carries none: its instant is the
+    /// answer.
+    #[tokio::test]
+    async fn an_all_day_hit_names_its_own_date() {
+        let pool = pool_with_two_calendars().await;
+        // The row's calendar zone is its calendar's, read through the join.
+        sqlx::query("UPDATE calendars SET timezone = 'Pacific/Auckland' WHERE id = 1")
+            .execute(&pool).await.unwrap();
+        let auckland_aug5 = 1_785_844_800_000; // 2026-08-05 00:00 Auckland
+        let mut trip = row(1, "trip", "Sofia trip", auckland_aug5);
+        trip.is_all_day = true;
+        trip.end_utc = auckland_aug5 + 24 * HOUR;
+        trip.calendar_timezone = "Pacific/Auckland".into();
+        trip.start_tz = "Pacific/Auckland".into();
+        insert(&pool, &trip).await;
+        insert(&pool, &row(1, "call", "Sofia call", NOW + HOUR)).await;
+
+        let hits = events(&pool, "sofia").await;
+        let date_of = |t: &str| hits.iter().find(|h| h.title == t).unwrap().all_day_date.clone();
+        assert_eq!(date_of("Sofia trip").as_deref(), Some("2026-08-05"));
+        assert_eq!(date_of("Sofia call"), None);
     }
 
     #[tokio::test]

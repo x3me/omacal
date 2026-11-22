@@ -67,7 +67,9 @@
       "attendees": 0,
       "recurring": false,
       "conference": null,
-      "all_guests_declined": false
+      "all_guests_declined": false,
+      "transparency": "opaque",
+      "visibility": "default"
     }
   ],
   "overflow": []

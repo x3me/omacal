@@ -1,6 +1,8 @@
 <!-- ui/src/lib/AllDayBand.svelte -->
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import type { Lane, UiEvent } from './api';
   import type { Rect } from './position';
   import { gutterWidth } from './secondzone.svelte';
@@ -77,6 +79,8 @@
           class:cl={lane.cont_left}
           class:cr={lane.cont_right}
           class:pending={ev.pending}
+          class:free={isFree(ev)}
+          class:private={isPrivate(ev)}
           class:keyboard={keyboardSelected}
           data-kbd-selected-event={keyboardSelected ? '' : undefined}
           style="
@@ -89,7 +93,8 @@
           title={isUnsaved(ev) ? `${ev.title} · Saving…` : ev.title}
           onclick={(e) => open(ev, e)}
         >
-          {lane.cont_left ? '‹ ' : ''}{ev.title}
+          {lane.cont_left ? '‹ ' : ''}{ev.title}{#if isFree(ev)}<span class="vh">, free</span>{/if}
+          {#if isPrivate(ev)}<span class="lock"><LockGlyph /></span>{/if}
           <CalendarColors colors={ev.copies?.map(copy => copy.color)} thickness={2} />
         </button>
       {/each}
@@ -169,12 +174,12 @@
      artifact worth about 3-4 per corner, so it would not notice. */
   .chip { position: relative; appearance: none; -webkit-appearance: none;
           font: inherit; text-align: left; cursor: pointer;
-          border: 0; border-left: 2px solid var(--cal);
+          border: 0; border-left: var(--event-spine-width, 2px) solid var(--cal);
           /* The same size and near the same weight as a timed block's title
              (EventBlock 11.5px/600): at 10.5px these were the faintest text
              on the grid, on the row least likely to be looked at directly
              (2026-08-17, by request). */
-          font-size: 11.5px; font-weight: 500;
+          font-size: 11.5px; font-weight: var(--event-chip-weight, 500);
           border-radius: var(--event-chip-radius, 4px); padding: 2px 7px; white-space: nowrap;
           overflow: hidden; text-overflow: ellipsis;
           margin: 0 2px 2px 0;
@@ -183,7 +188,7 @@
              as the legacy fallback until startup applies the preference. */
           --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
           background: color-mix(in srgb, var(--cal) 16%, transparent);
-          color: color-mix(in srgb, var(--cal) 60%, var(--text)); }
+          color: color-mix(in srgb, var(--cal) var(--event-ink, 60%), var(--text)); }
   /* Saving (pending-changes spec): faded and dashed until Google confirms. */
   .chip.pending { opacity: .62; outline: 1.5px dashed var(--cal); outline-offset: -1.5px; }
   :global(:root[data-event-transparency]) .chip {
@@ -196,6 +201,23 @@
   /* Flat edges mark a span continuing beyond this week. */
   .chip.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
   .chip.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  /* Free: the spine as an outline (see `EventBlock`'s `.free`). A border can
+     do here what the block needs a pseudo-element for: `double` is two
+     strokes with the fill showing between them. It needs 3px to have a gap
+     at all, so the bar is 3px and the left padding gives back what that
+     adds over the theme's own spine (`--event-spine-width`, 2px stock, 3px
+     in Daylight), keeping the label where it was. After `.cl` on
+     purpose: a free span continuing from last week keeps its outline, and
+     its squared corners still say it continues. */
+  .chip.free { border-left-style: double; border-left-width: 3px;
+               padding-left: calc(4px + var(--event-spine-width, 2px)); }
+  .rows.sliding .chip.free {
+    padding-left: calc(4px + var(--event-spine-width, 2px) + max(0px, var(--offscreen) * 100%)); }
+  /* Private: a trailing lock, centred on the line. The label gives up the
+     glyph's width so its ellipsis ends before the lock rather than under it. */
+  .chip.private { padding-right: 19px; }
+  .chip .lock { position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+                line-height: 0; opacity: .9; pointer-events: none; }
   .chip.keyboard { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .more { font: inherit; font-size: 10px; color: var(--muted); opacity: .7; padding: 2px 4px;

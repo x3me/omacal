@@ -66,6 +66,8 @@
     oncalendarchange,
     onappearancechange,
     onsettingschange,
+    initialTab = 'General',
+    initialAccountForm = null,
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
      *  one through `onSignIn` and cannot remove one, because nothing can yet. */
@@ -85,6 +87,12 @@
      *  backend now holds them. `App` derives the create-default from these,
      *  and without this call its copy is stale until a restart. */
     onsettingschange?: (s: AppSettings) => void;
+    /** The pane the modal opens on. Accounts, when it is opened to enter a
+     *  CalDAV server's password again; General otherwise. */
+    initialTab?: 'General' | 'Appearance' | 'Menu bar' | 'Calendars' | 'Accounts' | 'Notifications' | 'About';
+    /** The connect form Accounts opens with, when the empty state's chooser
+     *  sent the user here for one; none otherwise. */
+    initialAccountForm?: 'icloud' | 'caldav' | 'webcal' | null;
     /** Live appearance preview. Separate from `onsettingschange`: dragging a
      *  range should repaint the calendar behind this modal without causing
      *  every unrelated settings reaction (including a weather cache read). */
@@ -125,6 +133,7 @@
   let menubarBusy = $state(false);
   /** How far ahead the bar may name the next meeting (#167); the backend
    *  refuses any other span. */
+  const HISTORY_SPANS: ListChoice[] = HISTORY_SPAN_OPTIONS.map(([id, name]) => ({ id, name, color: null }));
   const LABEL_HORIZONS: ListChoice[] = [
     { id: 1, name: '1 hour', color: null }, { id: 4, name: '4 hours', color: null },
     { id: 12, name: '12 hours', color: null }, { id: 24, name: '24 hours', color: null },
@@ -605,6 +614,17 @@
     }
   }
 
+  async function toggleUpdateCheck(on: boolean) {
+    aboutNote = null;
+    try {
+      settings = await setSetting('updateCheck', on);
+      if (settings) onsettingschange?.(settings);
+    } catch (e) {
+      aboutNote = String(e);
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function togglePhotonPlaces(on: boolean) {
     note = null;
     try {
@@ -759,6 +779,11 @@
     webcalName = '';
     webcalForm = true;
   }
+  onMount(() => {
+    if (initialAccountForm === 'webcal') openWebcalForm();
+    else if (initialAccountForm) openCaldavForm(initialAccountForm);
+  });
+
 
   async function submitWebcal() {
     if (!webcalForm || webcalBusy) return;
@@ -810,24 +835,72 @@
    *  backend's answer replaces `settings`. The repaint is not this function's
    *  business — the backend emits `theme-changed` and `App`'s existing
    *  listener applies it, the same path an Omarchy theme switch takes. */
-  /** The four named themes are for a desktop with no theme of its own to
+  /** The named themes are for a desktop with no theme of its own to
    *  follow: on Omarchy they are one `omarchy-theme-set` away, and a pinned
    *  choice here would fight it. */
-  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn']);
+  const NAMED_THEMES: ReadonlySet<Appearance> = new Set(['tokyo-night', 'catppuccin-mocha', 'catppuccin-latte', 'rose-pine-dawn', 'retro-bloom', 'daylight', 'daylight-dark']);
+  /** And the plain Light and Dark are the other way round: kept on Omarchy,
+   *  as the way out of a hard-to-read Omarchy theme, and retired everywhere
+   *  else, where Daylight and Daylight Dark do their job better
+   *  (`theme::Appearance::on_this_desktop`, which also moves a stored choice
+   *  of either to its successor). */
+  const PLAIN_THEMES: ReadonlySet<Appearance> = new Set(['light', 'dark']);
   const themeOptions = $derived(
     settings?.desktop === 'omarchy'
       ? APPEARANCE_OPTIONS.filter(([id]) => !NAMED_THEMES.has(id))
-      : APPEARANCE_OPTIONS,
+      : APPEARANCE_OPTIONS.filter(([id]) => !PLAIN_THEMES.has(id)),
   );
   /** Each card's colours, fetched when the pane opens: the backend resolves
    *  them, and "Follow the desktop" is whatever the desktop is right now. */
   let themePreviews = $state<ReadonlyMap<Appearance, Palette>>(new Map());
-  $effect(() => {
-    if (tab !== 'Appearance') return;
+  function loadPreviews() {
     appearancePreviews()
       .then((list) => { themePreviews = new Map(list.map((p) => [p.appearance, p.palette])); })
       .catch(() => { /* cards draw in the app's own colours without it */ });
+  }
+  $effect(() => {
+    if (tab !== 'Appearance') return;
+    loadPreviews();
   });
+
+  /** `ListPicker` names its rows by number, so a theme's row is its place in
+   *  `APPEARANCE_OPTIONS`: one number per theme, whichever side lists it. */
+  const themeIndex = (theme: Appearance) => APPEARANCE_OPTIONS.findIndex(([id]) => id === theme);
+
+  /** The themes each side of "Follow the desktop" may wear: every pinned
+   *  theme but the plain Light and Dark, retired wherever these rows show
+   *  (`PLAIN_THEMES`), sorted onto the side its palette is by the backend's
+   *  own `is_dark` in the previews, so a theme added there joins the right
+   *  list with nothing to remember here. Until the previews arrive a side
+   *  offers only its current choice, so the field never shows a blank. */
+  const autoThemes = $derived.by(() => {
+    const side = (dark: boolean, current: Appearance): ListChoice[] => {
+      const fits = APPEARANCE_OPTIONS.filter(([id]) =>
+        id !== 'auto' && !PLAIN_THEMES.has(id) && themePreviews.get(id)?.is_dark === dark);
+      return (fits.length ? fits : APPEARANCE_OPTIONS.filter(([id]) => id === current))
+        .map(([id, name]) => ({ id: themeIndex(id), name, color: null }));
+    };
+    return {
+      light: side(false, settings?.autoLightTheme ?? 'daylight'),
+      dark: side(true, settings?.autoDarkTheme ?? 'daylight-dark'),
+    };
+  });
+
+  /** `saveAppearance`'s shape, for the row `ListPicker` hands back. A refusal
+   *  (a stale form offering a theme of the other side) leaves the field on
+   *  the stored choice, which it draws from and which has not changed. */
+  async function saveAutoTheme(dark: boolean, row: number | null) {
+    if (row === null) return;
+    note = null;
+    try {
+      settings = await setSetting(dark ? 'autoDarkTheme' : 'autoLightTheme', APPEARANCE_OPTIONS[row][0]);
+      onsettingschange?.(settings);
+      // The "Follow the desktop" card is drawn in what it resolves to now.
+      loadPreviews();
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+    }
+  }
 
   async function saveAppearance(appearance: Appearance) {
     note = null;
@@ -891,7 +964,9 @@
   const TABS = ['General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications', 'About'] as const;
   type Tab = (typeof TABS)[number];
 
-  let tab = $state<Tab>('General');
+  // Read once, at open: the modal is mounted fresh each time it opens.
+  // svelte-ignore state_referenced_locally
+  let tab = $state<Tab>(initialTab);
 
   /** The About pane's own answer, beside its own links, like every other pane's
    *  note. Only a failure has anything to say here: a browser coming up is its
@@ -1035,25 +1110,17 @@
       </p>
 
       <div class="row section-start">
-        <label class="lab" for="history-span">Keep history</label>
+        <span class="lab" aria-hidden="true">Keep history</span>
         <div class="inline">
-          <select
-            id="history-span"
-            disabled={!settings}
-            value={settings?.historySpan ?? 24}
-            onchange={(e) => saveHistorySpan(Number((e.currentTarget as HTMLSelectElement).value) as HistorySpan)}
-          >
-            {#each HISTORY_SPAN_OPTIONS as [months, label] (months)}
-              <option value={months}>{label}</option>
-            {/each}
-          </select>
+          <ListPicker compact noDot label="Keep history" choices={HISTORY_SPANS}
+            value={settings?.historySpan ?? 24} disabled={!settings}
+            onpick={(months) => saveHistorySpan((months ?? 24) as HistorySpan)} />
         </div>
       </div>
       <p class="hint">
         How far back events are fetched. A year ahead is kept either way.
         A longer span downloads more of a calendar when it changes, which
-        takes longer on a large one. Saving an event refetches the recent
-        months and that event, not the whole span.
+        takes longer on a large one, including after a CalDAV save.
       </p>
 
       <div class="row section-start">
@@ -1245,9 +1312,27 @@
           onchange={saveAppearance}
         />
       </div>
+      <!-- Only while following the desktop, and never on Omarchy, where what
+           the desktop wears is its own theme rather than a light or a dark.
+           The app's own picker rather than a <select>: these rows show on
+           Linux without Omarchy, where GTK would draw a select's list
+           outside the theme. -->
+      {#if settings?.appearance === 'auto' && settings.desktop !== 'omarchy'}
+        {#each [false, true] as dark (dark)}
+          {@const label = dark ? 'In dark mode' : 'In light mode'}
+          <div class="row wide">
+            <span class="lab" aria-hidden="true">{label}</span>
+            <div class="inline">
+              <ListPicker noDot wide {label} choices={dark ? autoThemes.dark : autoThemes.light}
+                value={themeIndex(dark ? settings.autoDarkTheme : settings.autoLightTheme)}
+                onpick={(row) => saveAutoTheme(dark, row)} />
+            </div>
+          </div>
+        {/each}
+      {/if}
       <p class="hint">
         {#if settings?.desktop === 'omarchy'}Following the desktop wears your Omarchy theme and follows it as you switch.
-        {:else}Following the desktop wears its light or dark setting, and follows it when that changes.{/if}
+        {:else}Following the desktop wears your light or dark theme as the system is set, and switches when that changes.{/if}
         Any other choice replaces the whole palette, including the accent, without a restart.
       </p>
 
@@ -2006,6 +2091,19 @@
           <a href="https://github.com/x3me/omacal" onclick={e => { e.preventDefault(); openLink('repository'); }}>GitHub repository</a>
           <a href="https://omacal.app" onclick={e => { e.preventDefault(); openLink('site'); }}>omacal.app</a>
         </div>
+        <label class="check section-start">
+          <input
+            type="checkbox"
+            checked={settings?.updateCheck ?? true}
+            disabled={!settings}
+            onchange={(e) => toggleUpdateCheck(e.currentTarget.checked)}
+          />
+          Check for updates
+        </label>
+        <p class="hint">
+          Once a day, asks GitHub's public release list whether a newer
+          version is out. GitHub sees the version and your IP address.
+        </p>
         {#if aboutNote}<p class="note err" role="alert" data-testid="about-note">{aboutNote}</p>{/if}
       </div>
 

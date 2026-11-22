@@ -20,6 +20,7 @@ import {
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
+import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
 const WEEK = 7 * 24 * 3_600_000;
 /** The week the app opens on, and the one a click on › moves to. */
@@ -446,7 +447,8 @@ test.describe('App', () => {
   // line threw away.
   test('the first-run config error is readable in full', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
 
     const err = page.locator('.err');
     await expect(err).toContainText('Create it with client_id and client_secret');
@@ -461,7 +463,8 @@ test.describe('App', () => {
 
   test('the error clears when the user moves to another week', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.err')).toContainText(NO_CONFIG_ERROR);
 
     await page.getByRole('button', { name: 'Next week' }).click();
@@ -496,7 +499,8 @@ test.describe('App', () => {
   // never left syncing behind the user's back without them having seen it.
   test('signing in opens the picker with the new calendars in it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await expect(page.locator('.acct')).toHaveCount(1);
   });
@@ -510,7 +514,8 @@ test.describe('App', () => {
   // true and unable to reopen the (by-then-closed) child.
   test('closing the picker then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('.panel')).toHaveCount(0);
@@ -527,7 +532,8 @@ test.describe('App', () => {
   // reviewer who found this confirmed both propagate up correctly.
   test('clicking away then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     // **The picker's own scrim**, named exactly: the menu it now sits inside
     // has one too, and clicking the wrong one would close the wrong layer.
@@ -1214,6 +1220,27 @@ test.describe('App', () => {
       return { cx, cy };
     };
 
+    /** A drag the window loses mid-gesture (Alt-Tab, a notification taking
+     *  focus, a touchpad palm-rejected) is abandoned, as Escape abandons it.
+     *  It used to stay armed until the next release anywhere, which then
+     *  committed a move the user never finished. */
+    test('a drag the window loses is abandoned, not dropped on the next release', async ({ page }) => {
+      await writable(page);
+      const b = block(page, 'Board prep').first();
+      await b.scrollIntoViewIfNeeded();
+      const box = (await b.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx, cy + 60, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await page.mouse.move(cx, cy + 120, { steps: 4 });
+      await page.mouse.up();
+      await page.waitForTimeout(300);
+      expect(await callsTo(page, 'update_event'), 'nothing was moved').toHaveLength(0);
+    });
+
     /**
      * **A dragged block is drawn as it would land, not as it was packed.**
      * Its lane — second of two, say, beside a meeting it overlapped — belongs
@@ -1384,7 +1411,11 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('none');
     });
 
-    test('an event with guests asks, and Move without notifying sends none', async ({ page }) => {
+    /** A meeting moved is a meeting its guests need to hear about, so the
+     *  notify answer is the default one, the one Enter takes (Plamen,
+     *  2026-11-20: "when rescheduling a meeting the default should be to
+     *  Notify"). The dialog itself still stands between a drag and the mail. */
+    test('an event with guests asks, and notifying is the default Enter takes', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
 
@@ -1396,10 +1427,21 @@ test.describe('App', () => {
       // A one-off: there is no scope to choose, so the chooser is not offered.
       await expect(movePanel(page).getByRole('radiogroup')).toHaveCount(0);
 
-      await expect(
-        movePanel(page).getByRole('button', { name: 'Move without notifying' }),
-      ).toBeFocused();
+      const notify = movePanel(page).getByRole('button', { name: 'Move and notify guests' });
+      await expect(notify).toBeFocused();
+      await expect(notify).toHaveClass(/primary/);
       await page.keyboard.press('Enter');
+
+      await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      const [args] = await callsTo(page, 'update_event');
+      expect(args.sendUpdates).toBe('all');
+    });
+
+    test('Move without notifying is one click away and sends none', async ({ page }) => {
+      await writable(page);
+      await dragBy(page, 'Client call', 60);
+
+      await movePanel(page).getByRole('button', { name: 'Move without notifying' }).click();
 
       await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
       const [args] = await callsTo(page, 'update_event');
@@ -1454,11 +1496,7 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('all');
     });
 
-    /**
-     * **The only route to `all` in the whole drag path.** Sending mail is the
-     * deliberate choice, never the default and never a side effect of a
-     * gesture — which is why the *other* button is the primary one.
-     */
+    /** Clicked, not only by Enter: the notify button sends `all`. */
     test('Move and notify guests is the one path that sends all', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
@@ -1895,6 +1933,17 @@ test.describe('App', () => {
         await expect(block(page, 'Board prep')).toHaveClass(/pending/);
         expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(moved, 0);
         await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      /** The sync a write waits on is the written calendar's, not every
+       *  account's: a full sync fails when any account or feed does, and a
+       *  failed follow-up sync leaves the saved event dimmed and locked. The
+       *  backend half (only that calendar is asked) is `sync_one_calendar`'s
+       *  test; this is the wiring that asks for it. */
+      test("a write's follow-up sync names the written calendar", async ({ page }) => {
+        await writable(page);
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toEqual([{ calendarId: APP_PRIMARY_CALENDAR_ID }]);
       });
 
       test('a background reload while the follow-up sync runs does not undo a move', async ({ page }) => {
@@ -2421,15 +2470,59 @@ test.describe('App', () => {
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toHaveCount(0);
       });
 
-      test('Reopen goes when the banner clears', async ({ page }) => {
+      /** A refused write is news about something the user did, and a
+       *  week step is not an answer to it: the banner, and its Reopen, stay
+       *  until the user dismisses them. It used to clear on the next load,
+       *  so stepping a week erased the only record that a change was lost. */
+      test('a refused write stays through a week step until it is dismissed', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
         await createLunch(page);
         await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
-        await page.getByRole('button', { name: 'Next week' }).click(); // a load clears the banner
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await expect(page.locator('.err')).toContainText('Could not create “Lunch”');
+        await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
+
+        await page.locator('.err').getByRole('button', { name: 'Dismiss' }).click();
         await expect(page.locator('.err')).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+      });
+
+      /** A refused edit is as much typing as a refused create, and gets the
+       *  same way back to it. */
+      test('a refused edit offers to reopen what was typed', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(page.locator('.err')).toContainText('Could not save “Board review”');
+
+        await page.locator('.err').getByRole('button', { name: 'Reopen' }).click();
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+      });
+
+      /** A click beside a form with changes in it is a missed click, not a
+       *  decision to throw them away: the form stays. One with nothing
+       *  changed still closes on it, and Cancel discards either way. */
+      test('a click outside a form keeps what was typed in it', async ({ page }) => {
+        await writable(page);
+        await openBoardPrepForm(page);
+        const outside = page.locator('button.scrim[aria-label="Cancel"]');
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+
+        await editForm(page).getByRole('button', { name: 'Cancel' }).click();
+        await expect(editForm(page)).toHaveCount(0);
+        await openBoardPrepForm(page);
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toHaveCount(0);
       });
 
       test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {
@@ -3250,6 +3343,25 @@ test.describe('App', () => {
     await expect(page.locator('.vswitch button.active')).toHaveText('Month');
   });
 
+  /** A launch fetches the view it will show, once. The app used to start on
+   *  Week, fetch that week, and then switch to the stored default when the
+   *  settings arrived: a flash of the wrong view, and a fetch thrown away.
+   *  The first fetch now waits for the settings. */
+  test('a launch on a stored Month view fetches no week first', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.locator('#default-view').selectOption('month');
+    await page.keyboard.press('Escape');
+
+    await page.reload();
+    await expect(page.locator('.vswitch button.active')).toHaveText('Month');
+    await expect.poll(() => callsTo(page, 'get_month').then((c) => c.length)).toBeGreaterThan(0);
+    expect(await callsTo(page, 'get_week'), 'no week fetched on the way to Month').toHaveLength(0);
+  });
+
   /**
    * `tray::open_plain`'s reason: closing the window only hides it, and
    * hiding never remounts `App`, so nothing re-read `defaultView` on the way
@@ -3541,15 +3653,18 @@ test.describe('App', () => {
     const modal = page.getByRole('dialog', { name: 'Settings' });
     await modal.getByRole('tab', { name: 'Appearance' }).click();
     const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    // Off Omarchy the plain Light and Dark are retired: Daylight and Daylight
+    // Dark do their job (`theme::Appearance::on_this_desktop`).
     await expect(themes.locator('.tname')).toHaveText([
-      'Follow the desktop', 'Light', 'Dark',
-      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn',
+      'Follow the desktop',
+      'Tokyo Night', 'Catppuccin Mocha', 'Catppuccin Latte', 'Rosé Pine Dawn', 'Retro Bloom',
+      'Daylight', 'Daylight Dark',
     ]);
     // The chosen card's tick is drawn, not named: the names are the labels.
     await expect(themes.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
 
-    await themes.getByRole('radio', { name: 'Light', exact: true }).click();
-    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['light']);
+    await themes.getByRole('radio', { name: 'Daylight', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'appearance')).toEqual(['daylight']);
 
     // Reopened, the picker shows what was stored rather than its own default.
     await page.keyboard.press('Escape');
@@ -3557,7 +3672,7 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
-    await expect(modal.getByRole('radio', { name: 'Light', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(modal.getByRole('radio', { name: 'Daylight', exact: true })).toHaveAttribute('aria-checked', 'true');
   });
 
   /** The named themes, for a desktop with no Omarchy theme to follow — macOS
@@ -3601,6 +3716,149 @@ test.describe('App', () => {
     await page.getByRole('button', { name: 'Settings…' }).click();
     await modal.getByRole('tab', { name: 'Appearance' }).click();
     await expect(modal.getByRole('radio', { name: 'Catppuccin Latte' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  /** "Follow the desktop" wears a light theme and a dark one, and which two
+   *  is the user's choice, as a Mac app offers it. The two pickers show only
+   *  while it is chosen; each offers the themes of its own side, sorted by
+   *  the backend's palettes rather than a list of names here; each choice is
+   *  stored, survives a detour through a pinned theme, and is kept. The
+   *  pickers are the app's own (`ListPicker`), so their lists are drawn in
+   *  the theme rather than by GTK. */
+  test('following the desktop, a theme is chosen for light mode and for dark mode', async ({ page }) => {
+    await writable(page);
+    const open = async () => {
+      await page.getByRole('button', { name: 'Menu' }).click();
+      await page.getByRole('button', { name: 'Settings…' }).click();
+      await modal.getByRole('tab', { name: 'Appearance' }).click();
+    };
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await open();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    const dark = modal.getByRole('combobox', { name: 'In dark mode' });
+    const list = (name: string) => page.getByRole('listbox', { name });
+    // Nothing chosen is Daylight and Daylight Dark: what following the
+    // desktop wore before there was a choice.
+    await expect(light).toHaveText('Daylight');
+    await expect(dark).toHaveText('Daylight Dark');
+    // Never the plain Light and Dark, retired where these rows show; Retro
+    // Bloom is dark.
+    await light.click();
+    await expect(list('In light mode').locator('.name')).toHaveText(['Catppuccin Latte', 'Rosé Pine Dawn', 'Daylight']);
+    await expect(list('In light mode').getByRole('option', { name: 'Daylight', exact: true })).toHaveAttribute('aria-selected', 'true');
+    // Escape closes only the list: the pane stays.
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(modal).toBeVisible();
+    await dark.click();
+    await expect(list('In dark mode').locator('.name')).toHaveText(['Tokyo Night', 'Catppuccin Mocha', 'Retro Bloom', 'Daylight Dark']);
+    await page.keyboard.press('Escape');
+
+    // The "Follow the desktop" card is drawn in what it resolves to, so a
+    // new choice fetches the previews again.
+    const previews = () => page.evaluate(() =>
+      window.__harness.calls.filter((c: any) => c.cmd === 'appearance_previews').length);
+    await expect.poll(previews).toBeGreaterThan(0);
+    const before = await previews();
+    await light.click();
+    await list('In light mode').getByRole('option', { name: 'Rosé Pine Dawn', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'autoLightTheme')).toEqual(['rose-pine-dawn']);
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect.poll(previews).toBe(before + 1);
+    await dark.click();
+    await list('In dark mode').getByRole('option', { name: 'Tokyo Night', exact: true }).click();
+    await expect.poll(() => settingValues(page, 'autoDarkTheme')).toEqual(['tokyo-night']);
+
+    // A pinned theme has no sides, so the pickers go, and come back holding
+    // what was chosen.
+    const themes = modal.getByRole('radiogroup', { name: 'Theme' });
+    await themes.getByRole('radio', { name: 'Daylight', exact: true }).click();
+    await expect(light).toHaveCount(0);
+    await expect(dark).toHaveCount(0);
+    await themes.getByRole('radio', { name: 'Follow the desktop', exact: true }).click();
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect(dark).toHaveText('Tokyo Night');
+
+    await page.keyboard.press('Escape');
+    await expect(modal).toHaveCount(0);
+    await open();
+    await expect(light).toHaveText('Rosé Pine Dawn');
+    await expect(dark).toHaveText('Tokyo Night');
+  });
+
+  /** The closed field shows the whole name of the theme it holds: the two
+   *  Catppuccins differ only past the point an ellipsis would cut. Every
+   *  name on each side is picked in turn, so the widest one is covered
+   *  whichever it is in the engine's font. */
+  test('each mode picker shows the whole name of the theme it holds', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    for (const label of ['In light mode', 'In dark mode']) {
+      const field = modal.getByRole('combobox', { name: label });
+      const list = page.getByRole('listbox', { name: label });
+      // Until the previews arrive a side lists only its current choice.
+      await field.click();
+      await expect.poll(() => list.getByRole('option').count()).toBeGreaterThan(1);
+      const names = await list.locator('.name').allTextContents();
+      await page.keyboard.press('Escape');
+      for (const name of names) {
+        if ((await field.textContent())?.trim() !== name) {
+          await field.click();
+          await list.getByRole('option', { name, exact: true }).click();
+        }
+        await expect(field).toHaveText(name);
+        const cut = await field.locator('.name').evaluate((el) => el.scrollWidth > el.clientWidth);
+        expect(cut, `${label}: "${name}" is cut short`).toBe(false);
+      }
+    }
+  });
+
+  /** On Omarchy, following the desktop wears the Omarchy theme, which is
+   *  neither side of anything: there is no pair to choose. */
+  test('on Omarchy there is no light or dark theme to choose', async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ desktop: 'omarchy' })));
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    // Settings have loaded and say Omarchy: until they do, Follow the
+    // desktop is already checked and the rows are already absent, so the
+    // assertions below would pass on a form that has not decided yet.
+    await expect(modal.getByText('wears your Omarchy theme')).toBeVisible();
+    await expect(modal.getByRole('radio', { name: 'Follow the desktop', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(modal.getByRole('combobox', { name: /mode$/ })).toHaveCount(0);
+  });
+
+  /** The form offers each side only its own themes, so a refusal comes from
+   *  a stale form. Played by previews that put Tokyo Night on the light side
+   *  while the stub's backend still reads it as dark: the backend's sentence
+   *  shows, and the field stays on what is stored rather than showing a
+   *  choice that was never kept. */
+  test('a dark theme offered for light mode is refused and the picker keeps what is stored', async ({ page }) => {
+    await writable(page);
+    await page.evaluate(() => {
+      const ipc = (window as any).__TAURI_INTERNALS__;
+      const invoke = ipc.invoke;
+      ipc.invoke = async (cmd: string, ...rest: unknown[]) => {
+        const answer = await invoke(cmd, ...rest);
+        if (cmd !== 'appearance_previews') return answer;
+        return answer.map((p: any) => (p.appearance === 'tokyo-night' ? { ...p, palette: { ...p.palette, is_dark: false } } : p));
+      };
+    });
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    const light = modal.getByRole('combobox', { name: 'In light mode' });
+    await light.click();
+    await page.getByRole('listbox', { name: 'In light mode' }).getByRole('option', { name: 'Tokyo Night', exact: true }).click();
+    await expect(modal.getByText('light mode needs a light theme')).toBeVisible();
+    await expect(light).toHaveText('Daylight');
+    expect(await settingValues(page, 'autoLightTheme')).toEqual(['tokyo-night']);
   });
 
   /**
@@ -4297,6 +4555,75 @@ test.describe('App', () => {
     await expect(results(page)).toHaveCount(0);
   });
 
+  /** Search is keyboard-first like the rest of the app: Enter opens the top
+   *  result, and the arrows move a selection Enter then opens. Before, the
+   *  field took neither, so a result could be reached only by Tab or the
+   *  mouse. The second "standup" hit is the guests fixture, whose details
+   *  are titled "Client call", which is what tells the two picks apart. */
+  test('Enter opens the top result, and the arrows choose another', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    await page.keyboard.press('Enter');
+    await expect(search(page)).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'Standup' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    const hits = search(page).getByRole('option');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(1)).toHaveAttribute('aria-selected', 'true');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowDown'); // the last stays chosen
+    await page.keyboard.press('ArrowUp');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(field(page)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Client call' })).toBeVisible();
+  });
+
+  /** An all-day result is named by its own date, in its calendar's zone.
+   *  Read from its instant in this webview's zone, an Auckland all-day event
+   *  was listed as the day before. */
+  test('an all-day result shows its own date', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('valentines');
+    await expect(results(page)).toHaveCount(1);
+    await expect(results(page).first()).toContainText('14');
+    await expect(results(page).first()).not.toContainText('13');
+  });
+
+  /** A hidden window does not redraw for nobody. Closing the window only
+   *  hides it, and every background sync used to reload the week, the
+   *  calendars, the invitations and the tasks into a window nobody could
+   *  see. Now a sync that finishes while hidden marks it stale, and the
+   *  reload runs once, when the window is shown. */
+  test('a sync that finishes while the window is hidden reloads when it is shown', async ({ page }) => {
+    await writable(page);
+    const setHidden = (hidden: boolean) => page.evaluate((h) => {
+      Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+      Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+    const weeks = async () => (await callsTo(page, 'get_week')).length;
+
+    await setHidden(true);
+    const before = await weeks();
+    await page.evaluate(() => window.__harness.emit('sync-finished', null));
+    await page.waitForTimeout(300);
+    expect(await weeks(), 'no reload into a hidden window').toBe(before);
+
+    await setHidden(false);
+    await expect.poll(weeks).toBeGreaterThan(before);
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');
@@ -4383,11 +4710,11 @@ test.describe('App', () => {
     await writable(page);
     await page.keyboard.press('/');
     await field(page).fill('board');
-    // The **button**, not the `<li>` around it. A list item is not focusable,
+    // The **result** (an option), not the `<li>` around it. A list item is not focusable,
     // so focusing one leaves focus in the field — where `isTypingTarget`
     // already spares the key, and the guard under test never runs. That is
     // what the first version of this spec did, and a mutation is what said so.
-    await results(page).first().getByRole('button').focus();
+    await results(page).first().getByRole('option').focus();
     await expect(field(page)).not.toBeFocused();
 
     await page.keyboard.press('4');
@@ -4436,7 +4763,7 @@ test.describe('App', () => {
     await field(page).fill('milk');
     await expect(results(page)).toHaveCount(1);
     await expect(results(page).first()).toContainText('Buy milk');
-    await results(page).first().getByRole('button').click();
+    await results(page).first().getByRole('option').click();
 
     await expect(search(page), 'search does not linger').toHaveCount(0);
     const side = page.getByRole('complementary', { name: 'Tasks' });
@@ -4806,6 +5133,100 @@ test.describe('App', () => {
     await expect
       .poll(() => page.evaluate(() => document.documentElement.style.colorScheme))
       .toBe('light');
+  });
+
+  test('a theme with a style sets the knobs, and the next theme removes them', async ({ page }) => {
+    // Daylight is the one palette that carries `style`; everything else
+    // must leave the stylesheets on their own fallbacks, which is what keeps
+    // the other themes pixel-identical. Removal is the half that can rot: a
+    // `setPalette` that only ever wrote would leave Daylight's bolder blocks
+    // on every theme chosen after it. Today's column is the exception that
+    // proves the rule: it is not a knob of its own but replaces
+    // `--today-tint`, so it goes back to that variable's stock value.
+    await page.goto(app());
+    const knobs = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint', '--event-tint-hover', '--event-spine-width',
+              '--event-title-weight', '--event-chip-weight', '--event-ink',
+              '--event-sub-opacity', '--heading-size', '--heading-weight',
+              '--title-year', '--today-tint'].map((n) => s.getPropertyValue(n));
+    });
+    expect((await knobs())[10]).not.toBe('');
+    expect((await knobs()).slice(0, 10)).toEqual(Array(10).fill(''));
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+      accent: '#d32f3a', is_dark: false,
+      style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+               today: '#f2f2f4', heading_size: 24, heading_weight: 700 },
+    }));
+    await expect.poll(knobs).toEqual(['22%', '31%', '3px', '600', '500', '48%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#f2f2f4']);
+    // The title keeps its text whole and only the year turns the accent.
+    const h1 = page.locator('header h1');
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(211, 47, 58)');
+    expect(await h1.evaluate((e) => e.textContent)).toMatch(/^[A-Za-z]+\s?\d{4}$/);
+    await expect(h1.locator('span:not(.year)').first()).not.toHaveCSS('color', 'rgb(211, 47, 58)');
+
+    // Daylight Dark turns the same knobs to its own values, straight over
+    // Daylight's: nothing of the bright one may survive the switch.
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+      accent: '#ef5350', is_dark: true,
+      style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+               today: '#1e2024', heading_size: 24, heading_weight: 700,
+               tint_space: 'srgb-linear', accent_fill: '#d32f3a' },
+    }));
+    await expect.poll(knobs).toEqual(['10%', '19%', '3px', '600', '500', '42%',
+                                      '0.85', '24px', '700', 'var(--accent)', '#1e2024']);
+    await expect(h1.locator('.year')).toHaveCSS('color', 'rgb(239, 83, 80)');
+    // Its two knobs of its own. A timed block's fill is mixed in linear
+    // light, which keeps yellow and orange calendars from going olive over
+    // near-black; and the accent's fills (the active view here) take the
+    // deeper red, so their text is the light ink rather than dark text on
+    // a bright red.
+    const extra = () => page.evaluate(() => {
+      const s = document.documentElement.style;
+      return ['--event-tint-space', '--accent-fill', '--on-accent'].map((n) => s.getPropertyValue(n));
+    });
+    await expect.poll(extra).toEqual(['srgb-linear', '#d32f3a', 'var(--ink-on-dark)']);
+    const probe = (css: string) => page.evaluate((c) => {
+      const el = document.createElement('span');
+      el.style.color = c;
+      document.body.append(el);
+      const got = getComputedStyle(el).color;
+      el.remove();
+      return got;
+    }, css);
+    // Compared as sRGB channels: the event-transparency rule re-mixes the
+    // fill in sRGB, so the block reports `color(srgb …)` whichever space the
+    // tint was mixed in, while the probe reports the space it was given.
+    const srgb = (css: string) => {
+      const m = /^color\((srgb(?:-linear)?) ([\d.e-]+) ([\d.e-]+) ([\d.e-]+)/.exec(css);
+      if (!m) return css.match(/[\d.]+/g)!.slice(0, 3).map((v) => Number(v) / 255);
+      const ch = m.slice(2, 5).map(Number);
+      return m[1] === 'srgb' ? ch : ch.map((v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055));
+    };
+    const block = page.locator('.ev').first();
+    const cal = await block.evaluate((el) => getComputedStyle(el).getPropertyValue('--cal').trim());
+    const fill = srgb(await block.evaluate((el) => getComputedStyle(el).backgroundColor));
+    const linear = srgb(await probe(`color-mix(in srgb-linear, ${cal} 10%, #16171a)`));
+    const plain = srgb(await probe(`color-mix(in srgb, ${cal} 10%, #16171a)`));
+    fill.forEach((v, i) => expect(v).toBeCloseTo(linear[i], 2));
+    expect(Math.max(...fill.map((v, i) => Math.abs(v - plain[i])))).toBeGreaterThan(0.02);
+    const view = page.locator('.vswitch button.active');
+    await expect(view).toHaveCSS('background-color', 'rgb(211, 47, 58)');
+    await expect(view).toHaveCSS('color', await probe('var(--ink-on-dark)'));
+
+    await page.evaluate(() => window.__harness.emit('theme-changed', {
+      bg: '#fdfdfb', surface: '#ffffff', text: '#1a1a1a',
+      muted: '#6b6b70', accent: '#c04a2b', is_dark: false,
+    }));
+    await expect.poll(knobs).toEqual([...Array(10).fill(''), 'rgba(0,0,0,.025)']);
+    // And neither of Daylight Dark's own survives: the mix is sRGB again and
+    // the accent fills with the accent.
+    await expect.poll(extra).toEqual(['', '#c04a2b', 'var(--ink-on-dark)']);
+    await expect(view).toHaveCSS('background-color', 'rgb(192, 74, 43)');
   });
 });
 
@@ -5321,6 +5742,18 @@ test.describe('App: one band, not two', () => {
     const controls = handles.filter((h) => CLICKABLE.includes(h.tag));
     expect(controls, 'a header control was turned into a drag handle and stopped clicking')
       .toEqual([]);
+
+    // A press on the title's own text lands on the handle itself, not on a
+    // part inside it: Tauri's script honours a bare attribute only on the
+    // element pressed, and the title is drawn as parts so the year can take
+    // a colour.
+    // Every part is probed, not the box's centre, which can fall on a space.
+    const missed = await page.locator('header h1').evaluate((h1) =>
+      [...h1.querySelectorAll('span')].filter((s) => {
+        const b = s.getBoundingClientRect();
+        return document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) !== h1;
+      }).map((s) => s.textContent));
+    expect(missed, 'a press on these parts of the title lands on something that is not the drag handle').toEqual([]);
   });
 
   /**
@@ -5825,6 +6258,19 @@ test.describe('App: keyboard event navigation', () => {
     expect(await deleteCalls(page)).toEqual([]);
   });
 
+  /** An event opened from the keyboard gets the fresh copy a click gets:
+   *  the popover is drawn from the store at once and then refreshed, so an
+   *  answer or a move made elsewhere since the last sync shows. Opened from
+   *  the keyboard (or search), it used to stay as the store had it. */
+  test('an event opened from the keyboard is refreshed like a clicked one', async ({ page }) => {
+    await page.keyboard.press('j');
+    await page.keyboard.press('j');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Review notes' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      window.__harness.calls.filter((c) => c.cmd === 'refresh_event').length)).toBe(1);
+  });
+
   test('Backspace on an open event asks before deleting', async ({ page }) => {
     await page.keyboard.press('j');
     await page.keyboard.press('j');
@@ -5890,6 +6336,26 @@ test.describe('App: keyboard event navigation', () => {
 
   /* `h` and `l` are the keyboard's own arrows, so they page and keep it
      showing. Fails the moment the hide moves into `step`, which all four share. */
+  /** `n` and `q` create on the day the keyboard has selected, not on the
+   *  day the view is anchored to: moving the selection to Tuesday (`w`) and
+   *  pressing `n` used to open a form for Monday, the anchor. */
+  test('n and q create on the selected day', async ({ page }) => {
+    await page.keyboard.press('w'); // next day: Tuesday 30 January
+    await expect(page.locator('.kbd-status')).toContainText('Selected');
+    await page.keyboard.press('n');
+    const form = page.getByRole('dialog', { name: 'New event' });
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2024-01-30');
+  });
+
+  /** A shortcut does nothing while a menu or a panel of the header is open:
+   *  `n` opened a form behind the open menu, and the view keys moved the
+   *  calendar under an open invitation tray or calendar list. */
+  test('shortcuts wait while a header menu is open', async ({ page }) => {
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.keyboard.press('n');
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
+  });
+
   test('h and l keep the keyboard selection', async ({ page }) => {
     await page.keyboard.press('w');
     await page.keyboard.press('l');
@@ -6053,6 +6519,226 @@ test.describe('App: week panning', () => {
     await expect(page.locator('.col')).toHaveCount(7);
     await page.waitForTimeout(400);
     const moved = (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - aligned) / 86_400_000;
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(7);
+  });
+
+  /** A strong swipe lands on a whole week even after gentle swipes slid the
+   *  window off its Monday. Counted from where the gesture began, the slide
+   *  was kept, and a fast swipe landed, say, Thursday to Wednesday (Plamen,
+   *  2026-11-20: "the strong swipe moves randomly to the next week"). The
+   *  witness is the second step: the first leaves the week slid, which the
+   *  spec checks, or a landing on a Monday would prove nothing. */
+  test('a strong swipe after gentle ones lands on a whole week, not a slid one', async ({ page }) => {
+    // On the paused clock of the Mac replays below (`openWeek`), with a Linux
+    // wheel: neither this machine's load nor a Mac's give can bend it.
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    await replay(page, Array.from({ length: 6 }, (): Wheel => [16, 8])); // the slow scroll above
+    await rest(page);
+    const slid = await startDay();
+    expect(slid, 'the gentle scroll left the week slid off its Monday').toBeGreaterThan(0);
+    expect(slid).toBeLessThan(7);
+    await replay(page, [[0, 60], [8, 60], [8, 60], [8, 60]]); // the flick of "a strong horizontal swipe pages exactly one week"
+    await rest(page);
+    expect(await startDay(), 'next week, from its Monday').toBe(7);
+  });
+
+  /** A Mac's own momentum, replayed from a recording of Plamen's trackpad
+   *  (`macos-trackpad.ts`). macOS keeps sending wheel events for a second
+   *  after the hand lifts, so the settle, waiting for the lull, read the
+   *  tail's speed: no Mac swipe was ever strong, and a flick stopped
+   *  wherever the momentum ran out, ten, twenty, fifty days on (Plamen,
+   *  2026-11-20: "stronger swipe moves random N of days, usually more than
+   *  10-12"). The synthetic flick above has no momentum, which is why it
+   *  passed on a build that failed on the Mac. */
+  /** Each recorded event dispatched after the page's clock (Playwright's,
+   *  installed and paused by `openWeek`) has run on by its recorded gap: the page's
+   *  timers, frames and `performance.now()` all follow the recording exactly,
+   *  however loaded the machine running it. Replayed on the wall clock, a busy
+   *  WebKit fired its timers 75 ms late and the stream arrived in bursts. */
+  const replay = async (page: Page, events: Wheel[], deltaY = 0) => {
+    const prevented: boolean[] = [];
+    let due = 0;
+    let ran = 0;
+    for (const [dt, deltaX] of events) {
+      due += dt;
+      const step = Math.round(due) - ran;
+      if (step > 0) { await page.clock.runFor(step); ran += step; }
+      prevented.push(await page.evaluate(([deltaX, deltaY]) => {
+        const body = document.querySelector('[data-testid="week-body"]')!;
+        const r = body.getBoundingClientRect();
+        const e = new WheelEvent('wheel', {
+          deltaX, deltaY, clientX: r.left + r.width / 2, clientY: r.top + 100, bubbles: true, cancelable: true,
+        });
+        body.dispatchEvent(e);
+        return e.defaultPrevented;
+      }, [deltaX, deltaY] as const));
+    }
+    return prevented;
+  };
+  /** Long enough for any settle to come to rest and any tail to have ended. */
+  const rest = (page: Page) => page.clock.runFor(1_500);
+  const swipe = (gesture: number, i: number) => MACOS_GESTURES[gesture - 1].swipes[i].events;
+  /** The app on a Mac (or `platform`), counting days from the window's first
+   *  day as it opened. The platform is set, not inherited from the machine
+   *  the tests run on, so this Mac and Linux CI run the same thing. */
+  const openWeek = async (
+    page: Page,
+    o: { platform?: string; settings?: Record<string, unknown>; dayView?: boolean } = {},
+  ) => {
+    await page.addInitScript(([platform, settings]) => {
+      Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform });
+      if (settings) sessionStorage.setItem('omacal-stub-settings', JSON.stringify(settings));
+    }, [o.platform ?? 'MacIntel', o.settings ?? null] as const);
+    await page.clock.install({ time: APP_NOW });
+    await page.goto(app());
+    const cols = o.dayView ? 1 : 7;
+    await expect(page.locator('.col')).toHaveCount(7);
+    if (o.dayView) {
+      await page.keyboard.press('1');
+      await expect(page.locator('.col')).toHaveCount(1);
+    }
+    // Paused from here: after `install` the clock also flows with real time,
+    // and a slow round trip between two events would stretch their gap.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 500);
+    const first = Number(await page.locator('.col').first().getAttribute('data-start-ms'));
+    // Read at rest only: while the track moves it also draws the padding,
+    // and its first column is not the window's.
+    const startDay = async () => {
+      if ((await page.locator('.col').count()) !== cols) return NaN;
+      return (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - first) / 86_400_000;
+    };
+    return Object.assign(startDay, { first });
+  };
+  /** `replay`, and the farthest the track was ever drawn from where it began,
+   *  in days, read off the column under the pane's left edge every frame. */
+  const replayWatching = async (page: Page, first: number, events: Wheel[]) => {
+    await page.evaluate((first) => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      w.__reach = [];
+      const look = () => {
+        const track = document.querySelector('[data-testid="week-body"] .track');
+        if (track) {
+          const left = track.getBoundingClientRect().left + 0.5;
+          for (const c of track.querySelectorAll<HTMLElement>('.col')) {
+            const r = c.getBoundingClientRect();
+            if (r.left <= left && left < r.right) {
+              w.__reach.push((Number(c.dataset.startMs) - first) / 86_400_000 + (left - r.left) / r.width);
+              break;
+            }
+          }
+        }
+        w.__watch = requestAnimationFrame(look);
+      };
+      look();
+    }, first);
+    await replay(page, events);
+    await rest(page);
+    return page.evaluate(() => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      cancelAnimationFrame(w.__watch);
+      return { max: Math.max(...w.__reach), min: Math.min(...w.__reach) };
+    });
+  };
+
+  test('a Mac flick, momentum and all, turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    // Rightward on the pad, content leftward: later days. Its momentum runs
+    // down to 10 px an event, so a settle that waits for the lull reads it
+    // as gentle and stops it 17 days on.
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+
+    await replay(page, swipe(7, 0)); // the other way, with a tail all the way down to 1 px
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('a Mac flick there and back, as recorded, lands where it began', async ({ page }) => {
+    // One hand: a flick, 83 ms without events while the fingers touch down
+    // and stop the momentum, then a flick back. The second is a new swipe,
+    // not more of the first one's tail.
+    const startDay = await openWeek(page);
+    await replay(page, MACOS_GESTURES[0].events);
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('two Mac flicks the same way, a touch-down apart, turn two weeks', async ({ page }) => {
+    // The second flick begins as small as the first one's tail has shrunk
+    // to; only the 70 ms pause of the fingers landing tells it apart.
+    const startDay = await openWeek(page);
+    const [, ...rest2] = swipe(2, 2);
+    await replay(page, [...swipe(2, 0), [70, swipe(2, 2)[0][1]], ...rest2]);
+    await rest(page);
+    expect(await startDay()).toBe(14);
+  });
+
+  test('a borderline Mac flick is judged on its speed as the hand lifted', async ({ page }) => {
+    // The gentlest recorded flick at nine tenths: about 2.05 px/ms as its
+    // momentum began, 1.9 by the time five shrinking events prove it is
+    // momentum. Linux judges a swipe at the lift; so does this.
+    const startDay = await openWeek(page);
+    await replay(page, swipe(3, 0).map(([dt, dx]): Wheel => [dt, dx * 0.9]));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac tail with an empty event in it is still the tail', async ({ page }) => {
+    const events = [...swipe(7, 0)];
+    events.splice(30, 0, [16, 0]);
+    const startDay = await openWeek(page);
+    await replay(page, events);
+    await rest(page);
+    expect(await startDay()).toBe(-7);
+  });
+
+  test('a vertical scroll straight after a Mac flick scrolls the hours', async ({ page }) => {
+    await openWeek(page);
+    await replay(page, swipe(7, 0).slice(0, 30));
+    const prevented = await replay(page, [[16, 0], [16, 0], [16, 0], [16, 0]], 40);
+    expect(prevented, 'none of the vertical events is taken for the tail').toEqual([false, false, false, false]);
+  });
+
+  /** The hand alone carries a Mac flick five to thirteen days before it
+   *  lifts; the settle then pulled the week back onto the page it landed on
+   *  ("it visually goes forward and then comes back", Plamen, 2026-11-20).
+   *  Now a fast swipe meets that line and gives only a little past it. */
+  test('a hard Mac flick slows into the next week instead of flying past it', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1)); // the hardest recorded
+    expect(reach.max, 'never drawn more than the give past next Monday').toBeLessThanOrEqual(7.35);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('on Linux a fast swipe is not held at the line: its wheel is not accelerated', async ({ page }) => {
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1));
+    expect(reach.max).toBeGreaterThan(8);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac flick in a rolling week turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page, { settings: { weekStartsToday: true } });
+    const reach = await replayWatching(page, startDay.first, swipe(2, 0));
+    expect(await startDay()).toBe(7);
+    expect(reach.max).toBeLessThanOrEqual(7.35);
+  });
+
+  test('a Mac flick in Day view turns exactly one day', async ({ page }) => {
+    const startDay = await openWeek(page, { dayView: true });
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(1);
+  });
+
+  test('a slow Mac swipe still moves by days, not a week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const slow = MACOS_GESTURES[5].swipes.find((s) => s.kind === 'slow' && s.events.length === 24)!;
+    await replay(page, slow.events);
+    await rest(page);
+    const moved = await startDay();
     expect(moved).toBeGreaterThan(0);
     expect(moved).toBeLessThan(7);
   });
@@ -6543,6 +7229,38 @@ test.describe('App: hiding weekends', () => {
     await expect(columns.last()).toHaveAttribute('data-start-ms', String(APP_MON + 4 * 24 * 3_600_000)); // Friday
   });
 
+  /** With weekends hidden a week is five columns, and a strong swipe crosses
+   *  five; counted as five calendar days, the second swipe from a Monday
+   *  landed on a Thursday (Gemini, 2026-11-20). Each flick turns the week. */
+  test('strong swipes with weekends hidden turn whole weeks, Monday to Monday', async ({ page }) => {
+    const day = 24 * 3_600_000;
+    await openApp(page);
+    await setHideWeekends(page, true);
+    const columns = page.locator('[data-testid="week-body"] .col');
+    await expect(columns).toHaveCount(5);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON));
+    const flick = () => page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
+          bubbles: true, cancelable: true,
+        }));
+        const t = performance.now();
+        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
+      }
+    });
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 7 * day));
+    await page.waitForTimeout(600);
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await page.waitForTimeout(600);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await expect(columns).toHaveCount(5);
+  });
+
   test('Day view\'s arrows step past Saturday and Sunday, landing on the weekday either side', async ({ page }) => {
     const day = 24 * 3_600_000;
     await openApp(page);
@@ -6712,6 +7430,36 @@ test.describe("App: showing today's date", () => {
 
   /** #167: how far ahead the bar names the next meeting. A day unless
    *  chosen, saved with the other bar preferences. */
+  test('Keep history uses the offered spans and remembers Everything as zero', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    const picker = modal.getByRole('combobox', { name: 'Keep history' });
+    await expect(picker).toHaveText(/2 years/);
+    expect(await picker.locator('.name').evaluate(el => el.clientWidth >= el.scrollWidth),
+      'the chosen span must be readable, not squeezed to an arrow').toBe(true);
+    expect(await picker.evaluate(el => el.tagName)).not.toBe('SELECT');
+    for (const [label, value] of [['6 months', 6], ['5 years', 60], ['Everything', 0]] as const) {
+      await picker.click();
+      const list = page.getByRole('listbox', { name: 'Keep history' });
+      const fieldBox = (await picker.boundingBox())!;
+      const listBox = (await list.boundingBox())!;
+      expect(Math.abs(listBox.x - fieldBox.x), 'the popup stays beside its field inside Settings').toBeLessThan(3);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeGreaterThanOrEqual(0);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeLessThan(12);
+      await expect(list.getByRole('option')).toHaveText([/6 months/, /2 years/, /5 years/, /Everything/]);
+      await list.getByRole('option', { name: label, exact: true }).click();
+      await expect(picker).toHaveText(new RegExp(label));
+      const calls = await page.evaluate(() => window.__harness.settingValues('historySpan'));
+      expect(calls[calls.length - 1]).toBe(value);
+    }
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await expect(picker).toHaveText(/Everything/);
+  });
+
   test('the bar names the next meeting only as far ahead as chosen', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();
@@ -7014,6 +7762,21 @@ test.describe('the tasks sidebar', () => {
   const lastCall = (page: import('@playwright/test').Page, cmd: string) => page.evaluate((c) =>
     (window as any).__harness.calls.filter((x: any) => x.cmd === c).pop()?.args, cmd);
 
+  /** Deleting a task removes it from the server at once and there is no
+   *  undo, so the × asks first: one click turns it into "Delete?", and only
+   *  that deletes. Anything else (another row, Escape) leaves the task. */
+  test('the × asks before a task is deleted', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByText('Buy milk').hover(); // the × shows on the row's hover
+    await side.getByRole('button', { name: 'Delete Buy milk' }).click();
+    expect(await lastCall(page, 'delete_task_cmd')).toBeUndefined();
+    await expect(side.getByText('Buy milk')).toBeVisible();
+
+    await side.getByRole('button', { name: 'Confirm delete Buy milk' }).click();
+    await expect.poll(() => lastCall(page, 'delete_task_cmd')).toEqual({ id: 11 });
+    await expect(side.getByText('Buy milk')).toHaveCount(0);
+  });
+
   /** The sidebar sits beside the week rather than over it: tasks are worked
    *  next to the calendar, and a panel covering the grid hides the thing the
    *  dates refer to. */
@@ -7154,6 +7917,84 @@ test.describe('the tasks sidebar', () => {
       (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
     )).toMatchObject({ summary: 'Buy milk', priority: 1 });
     await expect(side.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  /** High, Medium and Low must be told apart in any theme. They used to be the
+   *  error red, the theme's accent and the muted grey, so Daylight (red accent)
+   *  drew High and Medium nearly alike. The mark is the text colour for an
+   *  outlined chip and the fill for High's solid one; the text on that fill is
+   *  held to the same 4.5:1 as the others (10px text). */
+  test('the three priority levels are told apart in a light and a dark theme', async ({ page }) => {
+    const side = await openTasks(page);
+    for (const [task, level] of [['Buy milk', 'High'], ['Ship the release', 'Medium'], ['Answer the issue', 'Low']]) {
+      await side.getByRole('button', { name: task, exact: true }).click();
+      await side.getByRole('combobox', { name: 'Priority' }).click();
+      await side.getByRole('option', { name: level }).click();
+      await side.getByRole('button', { name: 'Save' }).click();
+      await expect(side.locator('.pchip', { hasText: new RegExp(`^${level}$`) })).toHaveCount(1);
+    }
+    const themes = {
+      daylight: { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+                  accent: '#d32f3a', is_dark: false,
+                  style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                           today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
+      latte: { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false },
+      // A dark theme with the same red accent: the accent must not matter.
+      redDark: { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#ff5555', is_dark: true },
+    };
+    for (const [name, palette] of Object.entries(themes)) {
+      await page.evaluate((p) => window.__harness.emit('theme-changed', p), palette);
+      const marks = await side.evaluate((el, bgs) => {
+        const rgb = (c: string) => c.startsWith('#')
+          ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16))
+          : (c.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        const lum = (c: number[]) => {
+          const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a: number[], b: number[]) => {
+          const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        return ['High', 'Medium', 'Low'].map((level) => {
+          const cs = getComputedStyle(el.querySelector(`.pchip.${level.toLowerCase()}`)!);
+          const text = rgb(cs.color), fill = rgb(cs.backgroundColor);
+          const solid = cs.backgroundColor !== 'rgba(0, 0, 0, 0)';
+          return {
+            level, solid, mark: solid ? fill : text,
+            // Text against what is behind it: the fill, or each theme background.
+            text: solid ? ratio(text, fill) : Math.min(...bgs.map((b) => ratio(text, rgb(b)))),
+            mark_vs_bg: Math.min(...bgs.map((b) => ratio(solid ? fill : text, rgb(b)))),
+          };
+        });
+      }, [palette.bg, palette.surface]);
+      const [hi, med, lo] = marks;
+      expect(hi.solid, `${name}: High is the filled one`).toBe(true);
+      expect(med.solid || lo.solid, `${name}: Medium and Low are outlined`).toBe(false);
+      for (const m of marks) {
+        expect(m.text, `${name}: ${m.level} text`).toBeGreaterThanOrEqual(4.5);
+        expect(m.mark_vs_bg, `${name}: ${m.level} mark`).toBeGreaterThanOrEqual(3);
+      }
+      // Pairwise apart as the eye reads colour (CIE76 distance in Lab), which
+      // a channel difference does not: dark red and dark orange are close in RGB.
+      const lab = (c: number[]) => {
+        const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+        const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+        const x = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+        const y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+        const z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+        return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+      };
+      const apart = (a: number[], b: number[]) => Math.hypot(...lab(a).map((v, i) => v - lab(b)[i]));
+      expect(apart(hi.mark, med.mark), `${name}: High vs Medium`).toBeGreaterThan(40);
+      expect(apart(med.mark, lo.mark), `${name}: Medium vs Low`).toBeGreaterThan(40);
+      expect(apart(hi.mark, lo.mark), `${name}: High vs Low`).toBeGreaterThan(40);
+    }
   });
 
   /** The chip must not make the pane scroll sideways, however long the title
@@ -7372,6 +8213,56 @@ test.describe('dropping a file on the calendar', () => {
     await drop(page, ['/home/u/Pictures/shot.png']);
     await drop(page, ['/home/u/a.ics', '/home/u/b.ics']);
     await expect(page.getByRole('dialog', { name: /^Import / })).toHaveCount(0);
+  });
+});
+
+/**
+ * The visible way in (#180): drag-and-drop works, but nobody finds it without
+ * being told, and a new event is where people look for a way to bring events
+ * in. The button asks for a file and then hands it to the panel a drop opens,
+ * so a picked file and a dropped one are imported the same way.
+ */
+test.describe('importing from the new-event form', () => {
+  const newForm = (page: import('@playwright/test').Page) => page.getByRole('dialog', { name: 'New event' });
+  const picks = (page: import('@playwright/test').Page) =>
+    page.evaluate(() => (window as any).__harness.calls.filter((c: any) => c.cmd === 'pick_ics_file').length);
+  /** Mounted, keys and all, before `n` is pressed: the keydown listener is
+   *  attached on mount, and the view switcher is the mark that it has. */
+  const openNew = async (page: import('@playwright/test').Page) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app('writable'));
+    await expect(page.locator('.vswitch button')).toHaveCount(5);
+  };
+
+  test('a picked file closes the form and opens the import panel', async ({ page }) => {
+    await openNew(page);
+    await page.keyboard.press('n');
+    await newForm(page).getByRole('button', { name: 'Import .ics…' }).click();
+    await expect(page.getByRole('dialog', { name: 'Import webinars.ics' })).toBeVisible();
+    await expect(newForm(page)).toHaveCount(0);
+    expect(await picks(page)).toBe(1);
+  });
+
+  test('a dismissed chooser leaves the form as it was', async ({ page }) => {
+    await openNew(page);
+    await page.evaluate(() => (window as any).__harness.pickAnswers(null));
+    await page.keyboard.press('n');
+    await newForm(page).getByLabel('Title', { exact: true }).fill('Half typed');
+    await newForm(page).getByRole('button', { name: 'Import .ics…' }).click();
+    await expect.poll(() => picks(page)).toBe(1);
+    await expect(newForm(page)).toBeVisible();
+    await expect(newForm(page).getByLabel('Title', { exact: true })).toHaveValue('Half typed');
+    await expect(page.getByRole('dialog', { name: /^Import / })).toHaveCount(0);
+  });
+
+  test('an edit offers no import', async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app('writable'));
+    await page.locator('.ev').filter({ hasText: 'Standup' }).first().click();
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    const edit = page.getByRole('dialog', { name: 'Edit event' });
+    await expect(edit).toBeVisible();
+    await expect(edit.getByRole('button', { name: 'Import .ics…' })).toHaveCount(0);
   });
 });
 

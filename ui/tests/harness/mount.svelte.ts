@@ -73,6 +73,9 @@ const FALLBACK_DARK = {
   muted: '#8a8a90', accent: '#5b8def', is_dark: true,
 };
 setPalette(FALLBACK_DARK);
+// And reachable from a spec, for a component whose look depends on a theme's
+// style knobs (`Palette.style`), which the fallback above does not carry.
+(window as any).__setPalette = setPalette;
 document.body.style.background = FALLBACK_DARK.bg;
 document.body.style.color = FALLBACK_DARK.text;
 

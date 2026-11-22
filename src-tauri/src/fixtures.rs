@@ -290,6 +290,7 @@ pub async fn seed_demo(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<usize> 
                 sequence: 0,
                 organizer_email: None,
                 guests_can_modify: false,
+                transparency: "opaque".into(), visibility: "default".into(),
                 attendees,
                 reminders: Default::default(),
                 calendar_default_reminders: Vec::new(),

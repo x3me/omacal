@@ -20,6 +20,7 @@ import type { Appearance, HistorySpan, StartOnLogin, WeekViewDays, WindowFrame }
 import type { View } from '../../src/lib/views';
 import type { TaskSort } from '../../src/lib/tasks';
 import type { EventCornerStyle } from '../../src/lib/appearance';
+import type { Palette } from '../../src/lib/theme';
 import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
@@ -36,6 +37,23 @@ const PALETTE = {
   bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea',
   muted: '#8a8a90', accent: '#5b8def', is_dark: true,
 };
+
+/** `appearance_previews`, with the backend's own palettes
+ *  (`theme::Palette::named` and the built-in two), and Auto as this stub's own
+ *  `get_palette` resolves it. Also what `set_setting` sorts a theme onto a
+ *  side of Auto by, as the backend reads `is_dark` off the same palettes. */
+const STUB_PREVIEWS: ReadonlyArray<[Appearance, Palette]> = [
+  ['auto', PALETTE],
+  ['light', { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false }],
+  ['dark', { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true }],
+  ['tokyo-night', { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#7aa2f7', is_dark: true }],
+  ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
+  ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
+  ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
+  ['retro-bloom', { bg: '#282828', surface: '#2f2f2f', text: '#ebdbb2', muted: '#a89984', accent: '#fe8019', is_dark: true }],
+  ['daylight', { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270', accent: '#d32f3a', is_dark: false, style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85, today: '#f2f2f4', heading_size: 24, heading_weight: 700 } }],
+  ['daylight-dark', { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab', accent: '#ef5350', is_dark: true, style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85, today: '#1e2024', heading_size: 24, heading_weight: 700, tint_space: 'srgb-linear', accent_fill: '#d32f3a' } }],
+];
 
 /** The first-run failure a user is most likely to meet: no config file. */
 export const NO_CONFIG_ERROR =
@@ -156,6 +174,9 @@ export type Harness = {
   /** What the next `export_event` answers: a path, or `null` for a chooser
    *  the user dismissed. Set before the button is pressed. */
   exportAnswers(path: string | null): void;
+  /** What the next `pick_ics_file` answers: a path, or `null` for a chooser
+   *  the user dismissed (#180). */
+  pickAnswers(path: string | null): void;
   /** Every command the app has invoked, in order. */
   calls: { cmd: string; args: unknown }[];
   /** The values `set_setting` was sent for one key, oldest first — what a
@@ -166,6 +187,8 @@ export type Harness = {
 /** What the `export_event` stub answers. A spec sets it through
  *  `window.__harness.exportAnswers(...)` before pressing the button. */
 let exportAnswer: string | null = '/home/u/Documents/Board prep.ics';
+/** What the `pick_ics_file` stub answers; `pickAnswers(...)` sets it. */
+let pickAnswer: string | null = '/home/u/Downloads/webinars.ics';
 
 /** What `set_calendar_sync(id, false)` reports removing, absent a forced failure. */
 export const CALENDAR_SYNC_REMOVED = 143;
@@ -208,7 +231,10 @@ let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = 
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
 let holdWriteOnce: 'update_event' | 'delete_event_cmd' | 'create_event' | null = null;
 let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
-type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[]};
+type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
+  /** The calendar list as the store holds it after a sync — set it, then emit
+   *  `sync-finished`, to stand in for collections made or deleted elsewhere. */
+  calendars?: Calendar[]};
 let responseData: ResponseData = {};
 let parkedSettings: (() => void) | null = null;
 let holdMenubarOnce: string | null = null;
@@ -251,6 +277,9 @@ const harness: Harness = {
   },
   exportAnswers(path) {
     exportAnswer = path;
+  },
+  pickAnswers(path) {
+    pickAnswer = path;
   },
   async emit(event, payload) {
     if (event === 'preferences-requested') preferencesPending = true;
@@ -459,13 +488,13 @@ function statusFor(scenario: string): AppStatus {
     // picker opens after either.
     case 'sign-in-adds-account':
       return {
-        accounts: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
+        accounts: [], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
         overlay_titlebar: false, self_update: false,
       };
     // A newer release, as the daily check would have left it on AppState.
     case 'update-available':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], version: '9.9.9', system_tz_change: null,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], version: '9.9.9', system_tz_change: null,
         update: { version: '0.2.0', url: 'https://github.com/x3me/omacal/releases/tag/v0.2.0' },
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
@@ -473,7 +502,7 @@ function statusFor(scenario: string): AppStatus {
     // token, discovered by a sync, waiting on a re-consent.
     case 'needs-reauth':
       return {
-        accounts: ['me@x.com'], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
     // A macOS window whose controls are drawn over the webview. The default
@@ -482,12 +511,12 @@ function statusFor(scenario: string): AppStatus {
     // since none of them is about the title bar.
     case 'overlay-titlebar':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: true, self_update: false,
       };
     default:
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: false, self_update: false,
       };
   }
@@ -748,11 +777,14 @@ type StubSettings = {
   weatherEnabled: boolean;
   weatherLocation: string | null;
   photonPlaces: boolean;
+  updateCheck: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
   startOnLoginAsked: boolean;
   quitOnClose: boolean;
   appearance: Appearance;
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   // `WindowFrame | null` on the wire; the stub is Linux-shaped, so a spec
   // that wants the macOS answer seeds `null` explicitly.
   windowFrame: WindowFrame | null;
@@ -845,6 +877,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   // Off until asked: typed locations do not leave the machine on a
   // fresh install, and Photon's public server asks for light use.
   photonPlaces: false,
+  updateCheck: true,
   // The backend's default: Celsius, so no installed copy changes under its user.
   temperatureUnit: 'celsius',
   // The backend's default too, and for a reason the stub has to reproduce
@@ -861,6 +894,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   // The backend's default: whatever the desktop says, which off Omarchy is
   // the dark fallback — the behaviour every install already has.
   appearance: 'auto',
+  // The backend's defaults: Auto wears Daylight and Daylight Dark.
+  autoLightTheme: 'daylight',
+  autoDarkTheme: 'daylight-dark',
   // The backend's default, Linux-shaped: the row exists (macOS reports none)
   // and follows the desktop.
   windowFrame: 'auto',
@@ -917,15 +953,15 @@ function saveSettings(s: StubSettings): StubSettings {
 const SEARCHABLE = [
   {
     eventId: APP_SERIES_ID, title: 'Standup',
-    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000,
+    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_ONE_OFF_ID, title: 'Board prep',
-    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000,
+    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_GUESTS_ID, title: 'Standup review',
-    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000,
+    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000, allDayDate: null,
   },
   // **A different month from the one the app opens on**, which is what makes
   // "the calendar moves to that date" witnessable at all: every other entry
@@ -933,7 +969,16 @@ const SEARCHABLE = [
   // one moves nothing and a version that never moved would pass.
   {
     eventId: APP_SOLO_SERIES_ID, title: 'Dentist',
-    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000,
+    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000, allDayDate: null,
+  },
+  // An all-day event on an Auckland calendar: its 14 February is 13 February
+  // 11:00 UTC, and the suite runs in UTC, so a result dated from `startMs`
+  // reads the 13th. `allDayDate` is the backend's own reading of the day.
+  {
+    // Its own id: a query matching it and Dentist ("e") would otherwise
+    // hand the overlay's keyed list two equal keys.
+    eventId: 9_901, title: 'Valentines dinner',
+    startMs: Date.UTC(2024, 1, 13, 11), endMs: Date.UTC(2024, 1, 14, 11), allDayDate: '2024-02-14',
   },
 ];
 
@@ -1003,19 +1048,9 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'get_palette':
         return PALETTE;
-      // The theme picker's cards: `appearance_previews`, with the backend's
-      // own palettes (`theme::Palette::named` and the built-in two), and Auto
-      // as this stub's own `get_palette` resolves it.
+      // The theme picker's cards (`STUB_PREVIEWS`).
       case 'appearance_previews':
-        return [
-          ['auto', PALETTE],
-          ['light', { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false }],
-          ['dark', { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true }],
-          ['tokyo-night', { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#7aa2f7', is_dark: true }],
-          ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
-          ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
-          ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
-        ].map(([appearance, palette]) => ({ appearance, palette }));
+        return STUB_PREVIEWS.map(([appearance, palette]) => ({ appearance, palette }));
       // Recorded in `calls` like everything else; the real one opens a
       // browser, which a test can only assert was *asked for*.
       case 'open_latest_release':
@@ -1028,6 +1063,7 @@ export function installTauriStub(scenario: string): Harness {
       // URL from its own store by id and spawns sanitized. The test's fact
       // is the call and its id, in `harness.calls`.
       case 'open_conference':
+      case 'open_link':
         return null;
       // The export's file chooser is the platform's, so a spec can only ever
       // assert the call and what the popover does with the answer. Both
@@ -1036,6 +1072,8 @@ export function installTauriStub(scenario: string): Harness {
       // second, so the "says nothing for a cancel" rule has a way to fail.
       case 'export_event':
         return exportAnswer;
+      case 'pick_ics_file':
+        return pickAnswer;
       case 'get_status':
         return status;
       // The date a dated fresh launch parked on the backend. One scenario
@@ -1103,6 +1141,7 @@ export function installTauriStub(scenario: string): Harness {
       // assertion undisturbed. CalendarPopover specs never take this path —
       // they mount the component directly with fixture props instead.
       case 'get_calendars':
+        if (responseData.calendars) return structuredClone(responseData.calendars);
         // `cross-zone` needs a writable list for the same reason `writable`
         // does: without one the form's calendar select has nothing to seed
         // from and Save refuses, so the edit half of its agreement spec could
@@ -1291,6 +1330,17 @@ export function installTauriStub(scenario: string): Harness {
           case 'defaultView':
             settings = saveSettings({ ...settings, defaultView: value, defaultViewFollowsLast: false });
             return { ...settings };
+          // `Appearance::suits`, mirrored on the stub's own previews: a theme
+          // of the other side is refused, as the backend refuses it.
+          case 'autoLightTheme':
+          case 'autoDarkTheme': {
+            const dark = key === 'autoDarkTheme';
+            if (value === 'auto' || STUB_PREVIEWS.find(([a]) => a === value)?.[1].is_dark !== dark) {
+              throw new Error(dark ? 'dark mode needs a dark theme' : 'light mode needs a light theme');
+            }
+            settings = saveSettings({ ...settings, [key]: value });
+            return { ...settings };
+          }
           // Any answer is an answer: the backend writes the mode and "asked"
           // together, so the first-run card does not come back.
           case 'startOnLogin':

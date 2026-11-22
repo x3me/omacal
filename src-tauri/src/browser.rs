@@ -197,6 +197,20 @@ pub(crate) fn is_zoom_host(host: &str) -> bool {
 /// The same launcher list and first-success-wins loop as `open::that`, which
 /// this replaces at every call site; the additions are [`sanitize`] and
 /// [`launch`]'s bounded wait.
+/// Keeps OmaCal's own display zone out of a browser it starts.
+///
+/// Choosing a display time zone in Settings exports `TZ` and restarts, so
+/// every process this one starts inherits it, and a browser opened from a
+/// Join button ran every page in the zone the user picked for their
+/// calendar. Removed only when the marker says OmaCal set it: a `TZ` the
+/// user launched OmaCal under is theirs and passes through.
+fn drop_own_tz(cmd: &mut Command, set_by_us: bool) {
+    if set_by_us {
+        cmd.env_remove("TZ");
+        cmd.env_remove(crate::TZ_MARKER);
+    }
+}
+
 fn open_one(url: &str) -> std::io::Result<()> {
     let appdir = std::env::var_os("APPDIR");
     let mut last_err = None;
@@ -204,6 +218,7 @@ fn open_one(url: &str) -> std::io::Result<()> {
         if let Some(dir) = appdir.as_deref() {
             sanitize(&mut cmd, dir);
         }
+        drop_own_tz(&mut cmd, std::env::var_os(crate::TZ_MARKER).is_some());
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         match launch(&mut cmd) {
             Ok(()) => return Ok(()),
@@ -249,18 +264,75 @@ fn scheme_has_handler(_scheme: &str) -> bool {
 /// own protocol when something claims it, avoiding the disposable browser
 /// handoff page; otherwise — and if the handler still fails — the original
 /// HTTPS link is the fallback. All other URLs take their existing path.
+///
+/// **Web links only.** Every link the user can click ends here (a Join
+/// button, a reminder's Join, a link in a description, the form's "Open"),
+/// and the system opener runs whatever a scheme is registered to: `file:`
+/// opens a local file or app, `smb:` mounts a share, a custom scheme starts
+/// whatever claimed it. Their sources are an event's own data, which anyone
+/// who can invite the user writes. So anything but `http`/`https` is
+/// refused before a process is spawned. The Zoom rewrite above is derived
+/// from a link that passed, so it is the one other scheme that leaves.
 pub(crate) fn open_external(url: &str) -> std::io::Result<()> {
+    open_external_with(url, &open_one)
+}
+
+/// [`open_external`] with the spawner passed in, so a test can watch what
+/// would have been opened without opening it.
+fn open_external_with(url: &str, open: &dyn Fn(&str) -> std::io::Result<()>) -> std::io::Result<()> {
+    let web = reqwest::Url::parse(url.trim())
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+    if !web {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "only web links are opened"));
+    }
     if let Some(direct) = zoom_join_uri(url) {
-        if scheme_has_handler("zoommtg") && open_one(&direct).is_ok() {
+        if scheme_has_handler("zoommtg") && open(&direct).is_ok() {
             return Ok(());
         }
     }
-    open_one(url)
+    open(url)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser started from here does not inherit the display zone OmaCal
+    /// exported for itself (Settings → display time zone sets `TZ` and
+    /// restarts). Every page in that browser would otherwise run in the
+    /// zone the user picked for their calendar. A `TZ` the user launched
+    /// OmaCal under is theirs and passes through: only ours, which the
+    /// marker says we set, is removed.
+    #[test]
+    fn our_own_tz_is_not_handed_to_a_browser_and_the_users_is() {
+        let removed = |set_by_us: bool| {
+            let mut cmd = Command::new("true");
+            drop_own_tz(&mut cmd, set_by_us);
+            cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_owned()).collect::<Vec<_>>()
+        };
+        let ours = removed(true);
+        assert!(ours.iter().any(|k| k == "TZ") && ours.iter().any(|k| k == crate::TZ_MARKER), "{ours:?}");
+        assert!(removed(false).is_empty(), "the user's own TZ is kept");
+    }
+
+    /// Only a web link leaves the app. Every link a user can click (a Join
+    /// button, a link in a description, the form's "Open") ends here, and
+    /// the system opener runs whatever a scheme is registered to: `file:`
+    /// opens a local file or app, `smb:` mounts a share. Refused before
+    /// anything is spawned, which the recording opener witnesses.
+    #[test]
+    fn only_a_web_link_is_handed_to_the_system() {
+        let opened = std::cell::RefCell::new(Vec::<String>::new());
+        let record = |u: &str| { opened.borrow_mut().push(u.to_string()); Ok(()) };
+        for refused in ["file:///etc/passwd", "smb://host/share", "javascript:alert(1)", "zoommtg://x", "not a url"] {
+            assert!(open_external_with(refused, &record).is_err(), "{refused}");
+        }
+        assert!(opened.borrow().is_empty(), "nothing refused was opened: {:?}", opened.borrow());
+
+        open_external_with("https://example.com/a", &record).unwrap();
+        open_external_with("HTTP://example.com/b", &record).unwrap();
+        assert_eq!(opened.borrow().len(), 2);
+    }
 
     /// Issue #100, as the reporter timed it: with the browser not already
     /// running, `xdg-open` execs it in the foreground and does not come back

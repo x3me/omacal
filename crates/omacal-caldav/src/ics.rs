@@ -363,6 +363,13 @@ pub struct CalEvent {
     pub conference_uri: Option<String>,
     pub last_modified_ms: Option<i64>,
     pub attendees: Vec<CalAttendee>,
+    /// `TRANSP`, trimmed and uppercased: `OPAQUE` or `TRANSPARENT` in
+    /// practice. `None` when the line is absent, which the RFC reads as
+    /// `OPAQUE`; the store mapping applies that default, not this parser.
+    pub transp: Option<String>,
+    /// `CLASS`, trimmed and uppercased: `PUBLIC`, `PRIVATE`, `CONFIDENTIAL`
+    /// or an extension value. `None` when the line is absent.
+    pub class: Option<String>,
 }
 
 /// One invitee off an `ATTENDEE` line.
@@ -474,10 +481,15 @@ fn read_event(c: &Component) -> Option<CalEvent> {
         organizer_email: c.prop_value("ORGANIZER").map(|v| {
             v.trim().strip_prefix("mailto:").unwrap_or(v.trim()).to_string()
         }),
-        conference_uri: c
-            .prop_value("URL")
+        // RFC 7986 `CONFERENCE` is the property that says "join here", and
+        // the one the export writes; `URL` is the older place servers put the
+        // link. Only a web link becomes the Join button — a `tel:` dial-in
+        // in either is not one.
+        conference_uri: ["CONFERENCE", "URL"]
+            .iter()
+            .filter_map(|name| c.prop_value(name))
             .map(str::trim)
-            .filter(|v| v.starts_with("http"))
+            .find(|v| v.starts_with("http"))
             .map(str::to_string),
         last_modified_ms: c
             .prop("LAST-MODIFIED")
@@ -490,6 +502,8 @@ fn read_event(c: &Component) -> Option<CalEvent> {
             .filter(|p| p.name == "ATTENDEE")
             .filter_map(read_attendee)
             .collect(),
+        transp: c.prop_value("TRANSP").map(|v| v.trim().to_ascii_uppercase()),
+        class: c.prop_value("CLASS").map(|v| v.trim().to_ascii_uppercase()),
         start,
     })
 }
@@ -575,6 +589,15 @@ fn logical_lines(raw: &str) -> Vec<Logical> {
         }
     }
     out
+}
+
+/// Whether an unfolded `line` is the property `name` itself, not merely one
+/// whose name starts with the same letters. `TRANSP` must not claim a
+/// `TRANSPORT` line, nor `CLASS` some future `CLASSIFICATION`; the name ends
+/// at the first `:` or `;`.
+fn is_prop(line: &str, name: &str) -> bool {
+    let u = line.to_ascii_uppercase();
+    u.strip_prefix(name).is_some_and(|rest| rest.starts_with(':') || rest.starts_with(';'))
 }
 
 /// What an edit does to the task's own alarms.
@@ -1190,6 +1213,44 @@ pub struct AttendeeWrite {
     pub optional: bool,
 }
 
+/// `TRANSP`, as a write sets it: "Show as" busy or free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transp {
+    Opaque,
+    Transparent,
+}
+
+/// `CLASS`, as a write sets it. `Default` writes no line at all, which is how
+/// an event says it never chose; `Confidential` exists for the export and for
+/// carrying a stored value through, not because the dialog can pick it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Default,
+    Public,
+    Private,
+    Confidential,
+}
+
+/// The line `transp` renders as.
+fn transp_line(t: Transp) -> String {
+    match t {
+        Transp::Opaque => "TRANSP:OPAQUE",
+        Transp::Transparent => "TRANSP:TRANSPARENT",
+    }
+    .to_string()
+}
+
+/// The line `class` renders as, or nothing for `Default`.
+fn class_line(c: Class) -> Option<String> {
+    match c {
+        Class::Default => None,
+        Class::Public => Some("CLASS:PUBLIC"),
+        Class::Private => Some("CLASS:PRIVATE"),
+        Class::Confidential => Some("CLASS:CONFIDENTIAL"),
+    }
+    .map(str::to_string)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventWrite {
     pub uid: String,
@@ -1227,6 +1288,14 @@ pub struct EventWrite {
     /// not, which is what makes this the difference between a whole event
     /// and most of one.
     pub conference: Option<String>,
+    /// "Show as", or `None` for "not touched": the resource's own `TRANSP`
+    /// line stays exactly as the server has it. The same three-state as
+    /// `attendees`, and for the same reason: a drag must not rewrite a field
+    /// the user never looked at.
+    pub transp: Option<Transp>,
+    /// Visibility, or `None` for "not touched". `Some(Class::Default)` removes
+    /// any `CLASS` line, which is what choosing Default means.
+    pub class: Option<Class>,
 }
 
 /// The CAL-ADDRESS to write for an authored address.
@@ -1329,13 +1398,36 @@ fn merge_attendee_lines(existing: &[String], want: &[AttendeeWrite]) -> Vec<Stri
         .collect()
 }
 
-/// Every `ATTENDEE` line of one block, in the order it has them.
-fn attendee_lines_of(lines: &[String]) -> Vec<String> {
-    lines
-        .iter()
-        .filter(|l| l.to_ascii_uppercase().starts_with("ATTENDEE"))
-        .cloned()
+/// Every `ATTENDEE` property of one block, in the order it has them: its
+/// **own**, so the recipient an email alarm names (RFC 5545 §3.6.6) is not
+/// read as a guest of the event.
+fn attendee_lines_of<'a>(lines: &'a [Logical], block: &EventBlock) -> Vec<&'a Logical> {
+    own_props(lines, block)
+        .into_iter()
+        .map(|k| &lines[k])
+        .filter(|l| is_prop(&l.text, "ATTENDEE"))
         .collect()
+}
+
+/// The physical lines to write for `texts`, unfolded content lines a decision
+/// produced. One that is still exactly a line of `source` goes back as the
+/// physical lines it came in as, folding included, so a property an edit
+/// merely carried is the same bytes on the server afterwards; anything new
+/// or changed is written as the one line it is.
+fn respell(texts: Vec<String>, source: &[&Logical]) -> Vec<String> {
+    let mut spelled: std::collections::HashMap<&str, std::collections::VecDeque<&[String]>> =
+        std::collections::HashMap::new();
+    for l in source {
+        spelled.entry(l.text.as_str()).or_default().push_back(&l.physical);
+    }
+    let mut out = Vec::new();
+    for text in texts {
+        match spelled.get_mut(text.as_str()).and_then(|q| q.pop_front()) {
+            Some(physical) => out.extend(physical.iter().cloned()),
+            None => out.push(text),
+        }
+    }
+    out
 }
 
 fn vevent_lines(ev: &EventWrite, now: Timestamp) -> Vec<String> {
@@ -1362,10 +1454,24 @@ fn vevent_lines(ev: &EventWrite, now: Timestamp) -> Vec<String> {
         // RFC 7986 §5.11, the property every modern client reads for this —
         // rather than a line appended to the description, which would put a
         // link in prose and call it data.
-        lines.push(format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{}", escape(uri)));
+        // A URI value, not TEXT (RFC 5545 §3.3.13): written verbatim, since
+        // backslashing a `;` or `,` in it would hand clients a different link.
+        // A line break is the one thing still taken out: it would end the
+        // property and start a line of the caller's choosing.
+        let uri: String = uri.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        lines.push(format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{uri}"));
     }
     for r in &ev.recurrence {
         lines.push(r.clone());
+    }
+    // Only when the write owns them. A `None` renders nothing, which on a new
+    // event means the server's own defaults (busy, no class) and on a rewrite
+    // means the line already on the resource stays.
+    if let Some(t) = ev.transp {
+        lines.push(transp_line(t));
+    }
+    if let Some(line) = ev.class.and_then(class_line) {
+        lines.push(line);
     }
     if ev.sequence > 0 {
         lines.push(format!("SEQUENCE:{}", ev.sequence));
@@ -1401,9 +1507,16 @@ pub fn new_event_ics(ev: &EventWrite, now: Timestamp) -> String {
     lines.join("\r\n")
 }
 
-/// The physical lines of one VEVENT block, with its position, plus whether it
-/// is an exception (carries RECURRENCE-ID) — the unit every resource edit
-/// below works in.
+/// One VEVENT block, as a range of content lines, plus whether it is an
+/// exception (carries RECURRENCE-ID) — the unit every resource edit below
+/// works in.
+///
+/// The edits work in **logical** lines ([`logical_lines`]), never physical
+/// ones, for the reason [`patch_todo`] gives: servers fold long lines, and a
+/// decision made on a physical line drops or keeps half a property. Found
+/// 2026-11-05, the event side of the 2026-09-17 task fix: a
+/// rewrite dropped a folded DESCRIPTION's first line, kept its continuation,
+/// and the UID above it read back as `f1opqrstuvwxyz and more text here`.
 struct EventBlock {
     start: usize,
     end: usize, // inclusive, the END:VEVENT line
@@ -1411,19 +1524,59 @@ struct EventBlock {
     uid: Option<String>,
 }
 
-fn split_lines(raw: &str) -> Vec<String> {
-    raw.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect()
+impl AsRef<str> for Logical {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
 }
 
-fn event_blocks(lines: &[String]) -> Vec<EventBlock> {
+/// `out`, physical lines, back into a resource, ending with a line break when
+/// `raw` did so an edit does not change the bytes after the last line.
+fn rejoin(mut out: Vec<String>, raw: &str) -> String {
+    if raw.ends_with('\n') {
+        out.push(String::new());
+    }
+    out.join("\r\n")
+}
+
+/// The indices of a block's own properties: between its BEGIN and END lines
+/// and outside every nested component, whose lines are that component's.
+fn own_props<T: AsRef<str>>(lines: &[T], block: &EventBlock) -> Vec<usize> {
+    let mut own = Vec::new();
+    let mut depth = 0usize;
+    for (k, line) in lines.iter().enumerate().take(block.end).skip(block.start + 1) {
+        let u = line.as_ref().to_ascii_uppercase();
+        if u.starts_with("BEGIN:") {
+            depth += 1;
+        } else if u.starts_with("END:") && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            own.push(k);
+        }
+    }
+    own
+}
+
+/// Whether `block` carries a `RECURRENCE-ID` whose value is the one `rendered`
+/// (a whole rendered property line) names. The values are compared, so
+/// parameter order and spelling do not matter.
+fn names_occurrence<T: AsRef<str>>(lines: &[T], block: &EventBlock, rendered: &str) -> bool {
+    own_props(lines, block).into_iter().any(|k| {
+        let l = lines[k].as_ref();
+        is_prop(l, "RECURRENCE-ID") && l.rsplit(':').next() == rendered.rsplit(':').next()
+    })
+}
+
+fn event_blocks<T: AsRef<str>>(lines: &[T]) -> Vec<EventBlock> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
+        let line = line.as_ref();
         if line.eq_ignore_ascii_case("BEGIN:VEVENT") {
             start = Some(i);
         } else if line.eq_ignore_ascii_case("END:VEVENT") {
             if let Some(s) = start.take() {
-                let body = lines[s..=i].join("\n");
+                let body = lines[s..=i].iter().map(|l| l.as_ref()).collect::<Vec<_>>().join("\n");
                 let parsed = parse(&format!("BEGIN:VCALENDAR\n{body}\nEND:VCALENDAR"));
                 let (uid, is_exception) = parsed
                     .as_ref()
@@ -1454,7 +1607,7 @@ pub fn rewrite_master(
     now: Timestamp,
     drop_exceptions: bool,
 ) -> Option<String> {
-    let lines = split_lines(raw);
+    let lines = logical_lines(raw);
     let blocks = event_blocks(&lines);
     let master = blocks
         .iter()
@@ -1462,7 +1615,8 @@ pub fn rewrite_master(
 
     // The master block, with the properties the edit owns removed and the
     // fresh ones inserted. Unknown lines (X-…, ORGANIZER, ATTENDEE, CLASS…)
-    // pass through untouched.
+    // pass through untouched. Decided on the unfolded name, so a folded
+    // property goes or stays as one unit.
     let owned = |l: &str| {
         let u = l.to_ascii_uppercase();
         u.starts_with("SUMMARY") || u.starts_with("LOCATION") || u.starts_with("DESCRIPTION:")
@@ -1472,31 +1626,51 @@ pub fn rewrite_master(
             // Only when this edit owns the list. An edit that does not touch
             // attendees leaves every line where it is, exactly as before.
             || (ev.attendees.is_some() && u.starts_with("ATTENDEE"))
+            // Same rule for "Show as" and visibility: owned only when set, so
+            // an edit that leaves them alone keeps the server's lines.
+            || (ev.transp.is_some() && is_prop(l, "TRANSP"))
+            || (ev.class.is_some() && is_prop(l, "CLASS"))
     };
 
     // Reconciled against the block's own lines, so an attendee who stays keeps
     // their answer. Rendered here rather than by `vevent_lines`, which has
     // nothing to reconcile against.
-    let merged = ev
-        .attendees
-        .as_ref()
-        .map(|want| merge_attendee_lines(&attendee_lines_of(&lines[master.start..=master.end]), want));
+    let merged = ev.attendees.as_ref().map(|want| {
+        let existing = attendee_lines_of(&lines, master);
+        let texts: Vec<String> = existing.iter().map(|l| l.text.clone()).collect();
+        respell(merge_attendee_lines(&texts, want), &existing)
+    });
     // A time change invalidates EXDATEs too (they name occurrence starts).
     let drop_exdates = drop_exceptions;
 
-    let mut patched: Vec<String> = Vec::new();
-    let mut in_alarm = false;
-    for l in &lines[master.start..=master.end] {
-        let u = l.to_ascii_uppercase();
-        if u == "BEGIN:VALARM" {
-            in_alarm = true;
+    let mut patched: Vec<String> = lines[master.start].physical.clone();
+    // Nested components are weighed whole: the master's alarms are replaced
+    // by the edit's, and anything else nested passes through untouched — its
+    // DESCRIPTION is its own, not one this edit owns.
+    let mut nested: Option<(bool, Vec<String>)> = None;
+    let mut depth = 0usize;
+    for l in &lines[master.start + 1..=master.end] {
+        let u = l.text.to_ascii_uppercase();
+        if u.starts_with("BEGIN:") {
+            depth += 1;
+            if depth == 1 {
+                nested = Some((u == "BEGIN:VALARM", Vec::new()));
+            }
+        }
+        if let Some((_, body)) = nested.as_mut() {
+            body.extend(l.physical.iter().cloned());
+            if u.starts_with("END:") {
+                depth -= 1;
+                if depth == 0 {
+                    let (is_alarm, body) = nested.take().unwrap();
+                    if !is_alarm {
+                        patched.extend(body);
+                    }
+                }
+            }
             continue;
         }
-        if u == "END:VALARM" {
-            in_alarm = false;
-            continue;
-        }
-        if in_alarm || owned(l) || (drop_exdates && u.starts_with("EXDATE")) {
+        if owned(&l.text) || (drop_exdates && u.starts_with("EXDATE")) {
             continue;
         }
         if u == "END:VEVENT" {
@@ -1512,7 +1686,7 @@ pub fn rewrite_master(
                 patched.extend(m.iter().cloned());
             }
         }
-        patched.push(l.clone());
+        patched.extend(l.physical.iter().cloned());
     }
 
     let mut out: Vec<String> = Vec::new();
@@ -1529,9 +1703,9 @@ pub fn rewrite_master(
             }
             continue;
         }
-        out.push(l.clone());
+        out.extend(l.physical.iter().cloned());
     }
-    Some(out.join("\r\n"))
+    Some(rejoin(out, raw))
 }
 
 /// Inserts (or replaces) the exception component for one occurrence — scope
@@ -1540,41 +1714,66 @@ pub fn rewrite_master(
 pub fn upsert_exception(raw: &str, ev: &EventWrite, now: Timestamp) -> Option<String> {
     let rid = ev.recurrence_id.as_ref()?;
     let rid_value = rid.prop("RECURRENCE-ID");
-    let lines = split_lines(raw);
+    let lines = logical_lines(raw);
     let blocks = event_blocks(&lines);
     // An existing exception for the same occurrence: match on the rendered
     // RECURRENCE-ID value's date-time part, ignoring parameter order.
-    let same_occurrence = |b: &EventBlock| {
+    let replaced: Option<&EventBlock> = blocks.iter().find(|b| {
         b.is_exception
             && b.uid.as_deref() == Some(ev.uid.as_str())
-            && lines[b.start..=b.end].iter().any(|l| {
-                l.to_ascii_uppercase().starts_with("RECURRENCE-ID")
-                    && l.rsplit(':').next() == rid_value.rsplit(':').next()
-            })
-    };
-    let replaced: Option<(usize, usize)> =
-        blocks.iter().find(|b| same_occurrence(b)).map(|b| (b.start, b.end));
+            && names_occurrence(&lines, b, &rid_value)
+    });
 
-    // The exception block is rewritten wholesale, so its `ATTENDEE` lines have
-    // to be carried across by hand or editing one occurrence would empty its
-    // guest list. `None` keeps them verbatim, which is the promise every other
-    // path already makes; `Some` reconciles against them.
-    let existing = replaced
-        .map(|(s, e)| attendee_lines_of(&lines[s..=e]))
-        .unwrap_or_default();
+    // The block is rewritten wholesale, and an exception replaces its
+    // occurrence whole (RFC 5545 §3.8.4.4): whatever is not carried across is
+    // gone from that date. So the fields this write does not own come from the
+    // exception being replaced, or, for a new one, from the master. An
+    // occurrence detached by moving it is still the meeting it was.
+    let source = replaced.or_else(|| {
+        blocks
+            .iter()
+            .find(|b| !b.is_exception && b.uid.as_deref() == Some(ev.uid.as_str()))
+    });
+
+    // Its people. A new exception used to start from nobody, so dragging one
+    // occurrence of a meeting sent that date out with no guests, which a
+    // scheduling server reads as everyone uninvited. `None` keeps the
+    // source's `ATTENDEE` lines verbatim, the promise every other path
+    // already makes; `Some` reconciles against them, PARTSTATs included.
+    let existing = source.map(|b| attendee_lines_of(&lines, b)).unwrap_or_default();
+    let existing_texts: Vec<String> = existing.iter().map(|l| l.text.clone()).collect();
     let merged = match &ev.attendees {
-        Some(want) => merge_attendee_lines(&existing, want),
-        None => existing,
+        Some(want) => respell(merge_attendee_lines(&existing_texts, want), &existing),
+        None => respell(existing_texts, &existing),
     };
+
+    // `ORGANIZER`, which no write owns, and `TRANSP` / `CLASS` when this
+    // write does not own them (a field it does own is rendered by
+    // `vevent_lines`). Free or private, and whose meeting it is, survive the
+    // move.
+    let carried: Vec<String> = source
+        .map(|b| {
+            own_props(&lines, b)
+                .into_iter()
+                .map(|k| &lines[k])
+                .filter(|l| {
+                    is_prop(&l.text, "ORGANIZER")
+                        || (ev.transp.is_none() && is_prop(&l.text, "TRANSP"))
+                        || (ev.class.is_none() && is_prop(&l.text, "CLASS"))
+                })
+                .flat_map(|l| l.physical.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let close = lines
         .iter()
-        .rposition(|l| l.eq_ignore_ascii_case("END:VCALENDAR"))?;
+        .rposition(|l| l.text.eq_ignore_ascii_case("END:VCALENDAR"))?;
 
     let mut out: Vec<String> = Vec::new();
     for (i, l) in lines.iter().enumerate() {
-        if let Some((s, e)) = replaced {
-            if i >= s && i <= e {
+        if let Some(b) = replaced {
+            if i >= b.start && i <= b.end {
                 continue;
             }
         }
@@ -1582,35 +1781,29 @@ pub fn upsert_exception(raw: &str, ev: &EventWrite, now: Timestamp) -> Option<St
             let fresh = vevent_lines(&EventWrite { attendees: None, ..ev.clone() }, now);
             // Before END:VEVENT, where every other property of the block sits.
             out.extend(fresh[..fresh.len() - 1].iter().cloned());
+            out.extend(carried.iter().cloned());
             out.extend(merged.iter().cloned());
             out.push("END:VEVENT".to_string());
         }
-        out.push(l.clone());
+        out.extend(l.physical.iter().cloned());
     }
-    Some(out.join("\r\n"))
+    Some(rejoin(out, raw))
 }
 
 /// Removes one occurrence from a series: an EXDATE on the master (matching
 /// DTSTART's form) plus the removal of any exception component that named
 /// that occurrence.
 pub fn exclude_occurrence(raw: &str, uid: &str, occurrence: &WriteTime) -> Option<String> {
-    let lines = split_lines(raw);
+    let lines = logical_lines(raw);
     let blocks = event_blocks(&lines);
     let master = blocks
         .iter()
         .find(|b| !b.is_exception && b.uid.as_deref() == Some(uid))?;
     let exdate = occurrence.prop("EXDATE");
-    let rid_tail = occurrence.prop("RECURRENCE-ID");
+    let rid_line = occurrence.prop("RECURRENCE-ID");
     let doomed: Vec<(usize, usize)> = blocks
         .iter()
-        .filter(|b| {
-            b.is_exception
-                && b.uid.as_deref() == Some(uid)
-                && lines[b.start..=b.end].iter().any(|l| {
-                    l.to_ascii_uppercase().starts_with("RECURRENCE-ID")
-                        && l.rsplit(':').next() == rid_tail.rsplit(':').next()
-                })
-        })
+        .filter(|b| b.is_exception && b.uid.as_deref() == Some(uid) && names_occurrence(&lines, b, &rid_line))
         .map(|b| (b.start, b.end))
         .collect();
 
@@ -1622,9 +1815,9 @@ pub fn exclude_occurrence(raw: &str, uid: &str, occurrence: &WriteTime) -> Optio
         if i == master.end {
             out.push(exdate.clone()); // just before the master's END:VEVENT
         }
-        out.push(l.clone());
+        out.extend(l.physical.iter().cloned());
     }
-    Some(out.join("\r\n"))
+    Some(rejoin(out, raw))
 }
 
 /// Ends a series before the `cut` occurrence — scope "following": the RRULE
@@ -1635,15 +1828,18 @@ pub fn exclude_occurrence(raw: &str, uid: &str, occurrence: &WriteTime) -> Optio
 /// what makes the exception comparison below chronological: two basic
 /// date-times in the same zone order lexicographically.
 pub fn truncate_series(raw: &str, uid: &str, until_render: &str, cut: &WriteTime) -> Option<String> {
-    let lines = split_lines(raw);
+    let lines = logical_lines(raw);
     let blocks = event_blocks(&lines);
     let master = blocks
         .iter()
         .find(|b| !b.is_exception && b.uid.as_deref() == Some(uid))?;
-    let rrule_idx = (master.start..=master.end)
-        .find(|&i| lines[i].to_ascii_uppercase().starts_with("RRULE"))?;
+    // The rule read whole: a long one (every weekday, an interval, a week
+    // start) is folded like any other line.
+    let rrule_idx = own_props(&lines, master)
+        .into_iter()
+        .find(|&i| lines[i].text.to_ascii_uppercase().starts_with("RRULE"))?;
 
-    let rule = lines[rrule_idx].clone();
+    let rule = lines[rrule_idx].text.clone();
     // Drop COUNT and any existing UNTIL, then append ours.
     let (head, params) = rule.split_at(rule.find(':')? + 1);
     let kept: Vec<&str> = params
@@ -1662,9 +1858,9 @@ pub fn truncate_series(raw: &str, uid: &str, until_render: &str, cut: &WriteTime
         .filter(|b| {
             b.is_exception
                 && b.uid.as_deref() == Some(uid)
-                && lines[b.start..=b.end].iter().any(|l| {
-                    l.to_ascii_uppercase().starts_with("RECURRENCE-ID")
-                        && l.rsplit(':').next().unwrap_or("") >= cut_tail.as_str()
+                && own_props(&lines, b).into_iter().any(|k| {
+                    let l = &lines[k].text;
+                    is_prop(l, "RECURRENCE-ID") && l.rsplit(':').next().unwrap_or("") >= cut_tail.as_str()
                 })
         })
         .map(|b| (b.start, b.end))
@@ -1678,10 +1874,10 @@ pub fn truncate_series(raw: &str, uid: &str, until_render: &str, cut: &WriteTime
         if i == rrule_idx {
             out.push(rule.clone());
         } else {
-            out.push(l.clone());
+            out.extend(l.physical.iter().cloned());
         }
     }
-    Some(out.join("\r\n"))
+    Some(rejoin(out, raw))
 }
 
 /// Whether an unfolded content line is this attendee's own `ATTENDEE`
@@ -2497,10 +2693,60 @@ END:VEVENT\r\nEND:VCALENDAR";
             alarms: vec![("popup".into(), 10)],
             sequence: 0,
             conference: None,
+            // Untouched, like `attendees`: the existing cases are all edits
+            // that never looked at "Show as" or visibility.
+            transp: None,
+            class: None,
         }
     }
 
     const NOW: i64 = 1_786_352_400_000;
+
+    /// A join link written as RFC 7986 `CONFERENCE` reads back as the
+    /// event's conference: what the export writes, and what other clients
+    /// put on a CalDAV event, is the link the popover offers to join. The
+    /// URI carries a `;` and a `,` because escaping them is what a URI value
+    /// must not do (RFC 5545 §3.3.13: a URI is not TEXT), so a link holding
+    /// neither could not tell an escaped write from a verbatim one.
+    #[test]
+    fn a_conference_link_round_trips_verbatim() {
+        let uri = "https://meet.example.com/j/123;type=video?pwd=a,b";
+        let ev = EventWrite { conference: Some(uri.into()), ..write_sample("conf-1") };
+        let raw = new_event_ics(&ev, Timestamp::from_millisecond(NOW).unwrap());
+        assert!(
+            raw.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{uri}")),
+            "written verbatim:\n{raw}"
+        );
+        let read = events_in(&parse(&raw).unwrap()).remove(0);
+        assert_eq!(read.conference_uri.as_deref(), Some(uri));
+
+        let smuggled = EventWrite {
+            conference: Some("https://meet.example.com/x\r\nATTENDEE:mailto:eve@example.com".into()),
+            ..write_sample("conf-2")
+        };
+        let raw = new_event_ics(&smuggled, Timestamp::from_millisecond(NOW).unwrap());
+        assert!(!raw.lines().any(|l| l.starts_with("ATTENDEE")), "a line break cannot start a property:\n{raw}");
+    }
+
+    /// `URL` stays the fallback, for the servers that put the link there, and
+    /// `CONFERENCE` wins when both are present — it is the property that says
+    /// "join here", where `URL` is only "more about this event".
+    #[test]
+    fn conference_wins_over_url_and_url_is_the_fallback() {
+        let with = |props: &str| {
+            format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTART:20260820T100000Z\r\n\
+                 DTEND:20260820T110000Z\r\n{props}END:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+        };
+        let read = |props: &str| events_in(&parse(&with(props)).unwrap()).remove(0).conference_uri;
+        assert_eq!(
+            read("URL:https://example.com/about\r\nCONFERENCE;VALUE=URI:https://meet.example.com/x\r\n").as_deref(),
+            Some("https://meet.example.com/x")
+        );
+        assert_eq!(read("URL:https://meet.example.com/y\r\n").as_deref(), Some("https://meet.example.com/y"));
+        assert_eq!(read("CONFERENCE;VALUE=URI:tel:+15551234\r\n"), None, "a dial-in is not a join link");
+    }
 
     #[test]
     fn a_new_event_serializes_and_reparses() {
@@ -2579,6 +2825,185 @@ END:VEVENT\r\nEND:VCALENDAR";
         assert_eq!(out2.matches("BEGIN:VEVENT").count(), 3);
         assert!(out2.contains("SUMMARY:Changed twice"));
         assert!(!out2.contains("SUMMARY:One-off change"));
+    }
+
+    /// A new event writes `TRANSP`/`CLASS` only when the write owns them, and
+    /// `Class::Default` writes no `CLASS` at all.
+    #[test]
+    fn a_new_event_writes_transp_and_class_only_when_set() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let ics = new_event_ics(&write_sample("w1"), now);
+        assert!(!ics.contains("TRANSP"), "untouched writes no TRANSP: {ics}");
+        assert!(!ics.contains("CLASS"), "untouched writes no CLASS: {ics}");
+
+        let mut ev = write_sample("w1");
+        ev.transp = Some(Transp::Transparent);
+        ev.class = Some(Class::Private);
+        let ics = new_event_ics(&ev, now);
+        let e = &events_in(&parse(&ics).unwrap())[0];
+        assert_eq!(e.transp.as_deref(), Some("TRANSPARENT"));
+        assert_eq!(e.class.as_deref(), Some("PRIVATE"));
+
+        ev.class = Some(Class::Default);
+        assert!(!new_event_ics(&ev, now).contains("CLASS"), "Default is the absence of CLASS");
+    }
+
+    const CLASSED_RAW: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:s1\r\nSUMMARY:Standup\r\nDTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\nRRULE:FREQ=DAILY;COUNT=10\r\nTRANSP:TRANSPARENT\r\nCLASS:CONFIDENTIAL\r\nTRANSPORT:bus\r\nCLASSROOM:4b\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:s1\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260819T091500\r\nSUMMARY:Standup (moved)\r\nDTSTART;TZID=Europe/Sofia:20260819T140000\r\nDTEND;TZID=Europe/Sofia:20260819T141500\r\nTRANSP:OPAQUE\r\nCLASS:PUBLIC\r\nEND:VEVENT\r\nEND:VCALENDAR";
+
+    /// The master's `TRANSP`/`CLASS` are owned only when the write sets them:
+    /// `None` keeps the server's lines byte for byte (a confidential event
+    /// stays confidential), `Some` replaces them, and `Class::Default` removes
+    /// `CLASS`. Look-alike names are never claimed.
+    #[test]
+    fn rewriting_a_master_owns_transp_and_class_only_when_set() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let mut ev = write_sample("s1");
+        ev.recurrence = vec!["RRULE:FREQ=DAILY;COUNT=10".into()];
+
+        let untouched = rewrite_master(CLASSED_RAW, "s1", &ev, now, false).unwrap();
+        let master = &events_in(&parse(&untouched).unwrap())[0];
+        assert_eq!(master.transp.as_deref(), Some("TRANSPARENT"));
+        assert_eq!(master.class.as_deref(), Some("CONFIDENTIAL"));
+        assert_eq!(untouched.matches("TRANSP:").count(), 2, "one per block, nothing doubled");
+
+        ev.transp = Some(Transp::Opaque);
+        ev.class = Some(Class::Private);
+        let set = rewrite_master(CLASSED_RAW, "s1", &ev, now, false).unwrap();
+        let master = &events_in(&parse(&set).unwrap())[0];
+        assert_eq!(master.transp.as_deref(), Some("OPAQUE"));
+        assert_eq!(master.class.as_deref(), Some("PRIVATE"));
+        assert!(!set.contains("TRANSP:TRANSPARENT") && !set.contains("CONFIDENTIAL"));
+        assert!(set.contains("TRANSPORT:bus") && set.contains("CLASSROOM:4b"),
+                "a property that merely starts with the same letters is not owned");
+        assert!(set.contains("CLASS:PUBLIC"), "the exception's own CLASS is not the master's");
+
+        ev.class = Some(Class::Default);
+        let cleared = rewrite_master(CLASSED_RAW, "s1", &ev, now, false).unwrap();
+        let master = &events_in(&parse(&cleared).unwrap())[0];
+        assert_eq!(master.class, None, "Default removes the line");
+    }
+
+    /// The exception block is rewritten wholesale, so `TRANSP`/`CLASS` are
+    /// carried across when the write does not own them: from the exception
+    /// itself when it exists, and from the master when the occurrence is
+    /// detached for the first time.
+    #[test]
+    fn an_exception_keeps_or_inherits_transp_and_class_it_does_not_own() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let exception_of = |out: &str, day: i8| {
+            events_in(&parse(out).unwrap())
+                .into_iter()
+                .find(|e| matches!(&e.recurrence_id,
+                    Some(IcsTime::Zoned { dt, .. }) if dt.day() == day))
+                .expect("exception present")
+        };
+
+        // Existing exception, untouched fields: its own lines survive.
+        let mut ev = write_sample("s1");
+        ev.summary = Some("Moved again".into());
+        ev.recurrence_id = Some(WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 19).at(9, 15, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        });
+        let out = upsert_exception(CLASSED_RAW, &ev, now).unwrap();
+        let ex = exception_of(&out, 19);
+        assert_eq!(ex.summary.as_deref(), Some("Moved again"));
+        assert_eq!((ex.transp.as_deref(), ex.class.as_deref()), (Some("OPAQUE"), Some("PUBLIC")));
+
+        // The same exception, now owning Show as: replaced, and CLASS kept.
+        ev.transp = Some(Transp::Transparent);
+        let out = upsert_exception(CLASSED_RAW, &ev, now).unwrap();
+        let ex = exception_of(&out, 19);
+        assert_eq!((ex.transp.as_deref(), ex.class.as_deref()), (Some("TRANSPARENT"), Some("PUBLIC")));
+        assert_eq!(out.matches("TRANSP:").count(), 2, "nothing doubled");
+
+        // A new exception inherits the master's lines.
+        let mut ev = write_sample("s1");
+        ev.recurrence_id = Some(WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 18).at(9, 15, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        });
+        let out = upsert_exception(CLASSED_RAW, &ev, now).unwrap();
+        let ex = exception_of(&out, 18);
+        assert_eq!((ex.transp.as_deref(), ex.class.as_deref()),
+                   (Some("TRANSPARENT"), Some("CONFIDENTIAL")));
+    }
+
+    const MEETING_RAW: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m1\r\nSUMMARY:Weekly sync\r\nDTSTART;TZID=Europe/Sofia:20260817T091500\r\nDTEND;TZID=Europe/Sofia:20260817T093000\r\nRRULE:FREQ=WEEKLY;COUNT=10\r\nORGANIZER;CN=Ana:mailto:ana@example.com\r\nATTENDEE;CN=Ana;PARTSTAT=ACCEPTED:mailto:ana@example.com\r\nATTENDEE;CN=Bo;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mailto:bo@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:cy@example.com\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:m1\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260831T091500\r\nSUMMARY:Weekly sync (moved)\r\nDTSTART;TZID=Europe/Sofia:20260831T140000\r\nDTEND;TZID=Europe/Sofia:20260831T141500\r\nORGANIZER;CN=Ana:mailto:ana@example.com\r\nATTENDEE;CN=Ana;PARTSTAT=ACCEPTED:mailto:ana@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR";
+
+    /// **An occurrence moved on its own is still the same meeting, with the
+    /// same people.** An exception replaces its occurrence whole (RFC 5545
+    /// §3.8.4.4), and `upsert_exception` writes the block afresh, so what it
+    /// does not carry is gone from that date: a first exception used to go
+    /// out with no `ATTENDEE` at all (they came only from an exception being
+    /// replaced) and every rewrite dropped `ORGANIZER`. A server that
+    /// schedules (iCloud, Fastmail) reads that as everyone uninvited from the
+    /// day. A drag (`attendees: None`) now carries the master's people, as
+    /// they were, onto a new exception; a replaced exception keeps its own,
+    /// its own decline included; and an edit that names the guests reconciles
+    /// against those, not against nobody.
+    #[test]
+    fn an_occurrence_detached_on_its_own_keeps_its_organizer_and_guests() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let exception_of = |out: &str, day: i8| {
+            events_in(&parse(out).unwrap())
+                .into_iter()
+                .find(|e| matches!(&e.recurrence_id,
+                    Some(IcsTime::Zoned { dt, .. }) if dt.day() == day))
+                .expect("exception present")
+        };
+        let people = |e: &CalEvent| {
+            e.attendees.iter().map(|a| (a.email.clone(), a.response_status.clone())).collect::<Vec<_>>()
+        };
+        let drag = |day: i8| {
+            let mut ev = write_sample("m1");
+            ev.recurrence_id = Some(WriteTime::Zoned {
+                dt: jiff::civil::date(2026, 8, day).at(9, 15, 0, 0),
+                tzid: "Europe/Sofia".into(),
+            });
+            ev
+        };
+
+        // First time this occurrence is detached: the master's people, verbatim.
+        let out = upsert_exception(MEETING_RAW, &drag(24), now).unwrap();
+        let ex = exception_of(&out, 24);
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
+        assert_eq!(people(&ex), vec![
+            ("ana@example.com".into(), "accepted".into()),
+            ("bo@example.com".into(), "accepted".into()),
+            ("cy@example.com".into(), "needsAction".into()),
+        ]);
+        assert!(out.contains("ATTENDEE;CN=Bo;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mailto:bo@example.com"),
+                "carried as the server wrote it, parameters and all");
+        let master = events_in(&parse(&out).unwrap()).into_iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        assert_eq!(master.attendees.len(), 3, "the master is untouched");
+
+        // An exception that already exists keeps its own people, Bo's decline
+        // for that one date included, and its organizer.
+        let out = upsert_exception(MEETING_RAW, &drag(31), now).unwrap();
+        let ex = exception_of(&out, 31);
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
+        assert_eq!(people(&ex), vec![
+            ("ana@example.com".into(), "accepted".into()),
+            ("bo@example.com".into(), "declined".into()),
+        ]);
+        assert_eq!(out.matches("ORGANIZER").count(), 2, "one per block, nothing doubled");
+
+        // An edit naming the guests reconciles against the master's list for a
+        // new exception: Bo stays (answer kept), Cy is removed, Dee is added.
+        let mut ev = drag(24);
+        ev.attendees = Some(vec![
+            AttendeeWrite { address: "ana@example.com".into(), display_name: Some("Ana".into()), optional: false },
+            AttendeeWrite { address: "bo@example.com".into(), display_name: Some("Bo".into()), optional: false },
+            AttendeeWrite { address: "dee@example.com".into(), display_name: None, optional: false },
+        ]);
+        let out = upsert_exception(MEETING_RAW, &ev, now).unwrap();
+        let ex = exception_of(&out, 24);
+        let got = people(&ex);
+        assert!(got.contains(&("bo@example.com".into(), "accepted".into())), "Bo's answer kept: {got:?}");
+        assert!(got.iter().any(|(e, _)| e == "dee@example.com"), "Dee added: {got:?}");
+        assert!(!got.iter().any(|(e, _)| e == "cy@example.com"), "Cy removed: {got:?}");
+        assert_eq!(ex.organizer_email.as_deref(), Some("ana@example.com"));
     }
 
     #[test]
@@ -2936,5 +3361,222 @@ END:VEVENT\r\nEND:VCALENDAR";
         let out = patch_todo_fields(&timed(relative), "t-9", &keep, "Europe/Sofia", now).unwrap();
         assert_eq!(out.matches("BEGIN:VALARM").count(), 1);
         assert!(out.contains("TRIGGER:-PT15M"), "the user's lead, not ours: {out}");
+    }
+
+    /// Every physical line of `out` that begins a property: none may be a
+    /// continuation that lost the line it belonged to, which is what a
+    /// physical-line edit leaves behind when it drops a folded property.
+    fn continuations_follow(out: &str, expected: &[&str]) {
+        let physical: Vec<&str> = out.split("\r\n").collect();
+        for (i, l) in physical.iter().enumerate() {
+            if l.starts_with(' ') || l.starts_with('\t') {
+                assert!(
+                    expected.contains(l) && i > 0,
+                    "a stray continuation line {l:?} in:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// Servers fold long lines (RFC 5545 §3.1), and a rewrite that decided on
+    /// physical lines dropped a folded DESCRIPTION's first line but kept its
+    /// continuation, which then joined the line above it: the UID read back
+    /// as `f1opqrstuvwxyz and more text here`, and a folded LOCATION after
+    /// `CLASS:PRIVATE` left it `CLASS:PRIVATEle of a word`, a value no client
+    /// knows. Found 2026-11-05; the task side had the same bug fixed on
+    /// 2026-09-17.
+    #[test]
+    fn a_master_rewrite_drops_and_keeps_folded_lines_whole() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DESCRIPTION:Join Zoom Meeting https://zoom.us/j/123456789?pwd=abcdefghijklmn\r\n opqrstuvwxyz and more text here\r\n\
+            CLASS:PRIVATE\r\n\
+            LOCATION:A very long room name that a server folded somewhere in the midd\r\n le of a word\r\n\
+            X-OTHER-CLIENT:kept exactly as the server folded it, all the way to the e\r\n nd\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            RRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let mut ev = write_sample("f1");
+        ev.description = Some("new desc".into());
+        let out = rewrite_master(raw, "f1", &ev, now, false).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        assert_eq!(evs.len(), 1, "{out}");
+        let e = &evs[0];
+        assert_eq!(e.uid, "f1", "{out}");
+        assert!(logical_lines(&out).iter().any(|l| l.text == "CLASS:PRIVATE"), "{out}");
+        assert_eq!(e.description.as_deref(), Some("new desc"));
+        assert_eq!(e.location.as_deref(), Some("Room 2; annex"));
+        assert!(!out.contains("opqrstuvwxyz") && !out.contains("le of a word"), "{out}");
+        // A line the edit does not own goes back folded as it came.
+        assert!(
+            out.contains("X-OTHER-CLIENT:kept exactly as the server folded it, all the way to the e\r\n nd\r\n"),
+            "{out}"
+        );
+        continuations_follow(&out, &[" nd"]);
+    }
+
+    /// A long `ATTENDEE` is the line iCloud folds most, often inside the
+    /// mailbox. Carried across a rewritten exception it kept only its first
+    /// physical line, and the guest's address became `mai`.
+    #[test]
+    fn an_exception_rewrite_carries_a_folded_attendee_whole() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            RRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:f1\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260821T100000\r\n\
+            DTSTART;TZID=Europe/Sofia:20260821T120000\r\nDTEND;TZID=Europe/Sofia:20260821T130000\r\n\
+            ATTENDEE;CN=\"Some Long Name Person\";PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mai\r\n lto:someone@example.com\r\n\
+            CLASS:PRIVATE\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let mut ev = write_sample("f1");
+        ev.recurrence_id = Some(WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 21).at(10, 0, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        });
+        let out = upsert_exception(raw, &ev, now).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        assert_eq!(evs.len(), 2, "replaced, not added: {out}");
+        let exc = evs.iter().find(|e| e.recurrence_id.is_some()).unwrap();
+        let emails: Vec<&str> = exc.attendees.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(emails, vec!["someone@example.com"], "{out}");
+        assert_eq!(exc.attendees[0].response_status, "accepted");
+        assert_eq!(exc.class.as_deref(), Some("PRIVATE"), "{out}");
+        assert!(out.contains(":mai\r\n lto:someone@example.com\r\n"), "kept as folded: {out}");
+        continuations_follow(&out, &[" lto:someone@example.com"]);
+
+        // And an edit that owns the list reconciles against the whole line.
+        ev.attendees = Some(vec![AttendeeWrite {
+            address: "someone@example.com".into(),
+            display_name: Some("Some Long Name Person".into()),
+            optional: false,
+        }]);
+        let out = upsert_exception(raw, &ev, now).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        let exc = evs.iter().find(|e| e.recurrence_id.is_some()).unwrap();
+        assert_eq!(exc.attendees.len(), 1, "{out}");
+        assert_eq!(exc.attendees[0].email, "someone@example.com");
+        assert_eq!(exc.attendees[0].response_status, "accepted", "their answer survives: {out}");
+    }
+
+    /// A VALARM's lines are the alarm's, not the event's. An email alarm
+    /// carries its own `ATTENDEE` (RFC 5545 §3.6.6: who gets the reminder),
+    /// and reading every line of the block made that recipient a guest of
+    /// the rewritten occurrence. A folded line inside the alarm must not
+    /// leak out either.
+    #[test]
+    fn an_exception_rewrite_reads_only_the_events_own_lines() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let alarm = "BEGIN:VALARM\r\nACTION:EMAIL\r\nSUMMARY:Reminder\r\n\
+            DESCRIPTION:A reminder long enough that the server folded it right befor\r\n e the attendee\r\n\
+            ATTENDEE:mailto:me@example.com\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\n";
+        let raw = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            RRULE:FREQ=DAILY;COUNT=5\r\nTRANSP:TRANSPARENT\r\n{alarm}END:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:f1\r\nRECURRENCE-ID;TZID=Europe/Sofia:20260821T100000\r\n\
+            DTSTART;TZID=Europe/Sofia:20260821T120000\r\nDTEND;TZID=Europe/Sofia:20260821T130000\r\n\
+            ATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.com\r\n{alarm}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let mut ev = write_sample("f1");
+        ev.recurrence_id = Some(WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 21).at(10, 0, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        });
+        let out = upsert_exception(&raw, &ev, now).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        assert_eq!(evs.len(), 2, "{out}");
+        let exc = evs.iter().find(|e| e.recurrence_id.is_some()).unwrap();
+        let emails: Vec<&str> = exc.attendees.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(emails, vec!["guest@example.com"], "the alarm's recipient is no guest: {out}");
+        assert_eq!(out.matches("ATTENDEE:mailto:me@example.com").count(), 1, "only the master's alarm: {out}");
+        // The master itself is untouched, folded alarm and all.
+        assert!(out.contains("right befor\r\n e the attendee\r\n"), "{out}");
+        continuations_follow(&out, &[" e the attendee"]);
+
+        // The master rewrite drops the alarm whole, continuation included.
+        let out = rewrite_master(&raw, "f1", &write_sample("f1"), now, false).unwrap();
+        let master = &out[..out.find("RECURRENCE-ID").unwrap()];
+        assert!(!master.contains("e the attendee") && !master.contains("me@example.com"), "{out}");
+        continuations_follow(&out, &[" e the attendee"]);
+        let evs = events_in(&parse(&out).unwrap());
+        let master = evs.iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        assert_eq!(master.alarms, vec![("popup".to_string(), 10)]);
+        assert_eq!(master.transp.as_deref(), Some("TRANSPARENT"));
+    }
+
+    /// A long `RRULE` (every weekday, an interval, a week start) is folded
+    /// like any other line. Ending the series rewrote its first physical
+    /// line and left the continuation to join the new `UNTIL`.
+    #[test]
+    fn ending_a_series_rewrites_a_folded_rrule_whole() {
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;INTERVAL=1;WKST=MO;BYHOUR=10;COUN\r\n T=40\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let cut = WriteTime::Zoned { dt: jiff::civil::date(2026, 9, 1).at(10, 0, 0, 0), tzid: "Europe/Sofia".into() };
+        let out = truncate_series(raw, "f1", "20260831T235959Z", &cut).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        let rule = evs[0].recurrence.iter().find(|r| r.starts_with("RRULE")).unwrap();
+        assert!(rule.ends_with(";UNTIL=20260831T235959Z"), "{rule}");
+        assert!(!rule.contains("COUN"), "{rule}");
+        continuations_follow(&out, &[]);
+    }
+
+    /// A `RECURRENCE-ID` with a long zone name folds too; matched on its
+    /// first physical line, deleting that occurrence left its exception in
+    /// place, and the occurrence came straight back.
+    #[test]
+    fn deleting_an_occurrence_finds_a_folded_recurrence_id() {
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=America/Argentina/ComodRivadavia:20260820T100000\r\n\
+            DTEND;TZID=America/Argentina/ComodRivadavia:20260820T110000\r\n\
+            RRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:f1\r\nRECURRENCE-ID;TZID=America/Argentina/ComodRivadavia;X-SOME-PARAM=pad:20\r\n 260821T100000\r\n\
+            DTSTART;TZID=America/Argentina/ComodRivadavia:20260821T120000\r\n\
+            DTEND;TZID=America/Argentina/ComodRivadavia:20260821T130000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let occ = WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 8, 21).at(10, 0, 0, 0),
+            tzid: "America/Argentina/ComodRivadavia".into(),
+        };
+        let out = exclude_occurrence(raw, "f1", &occ).unwrap();
+        let evs = events_in(&parse(&out).unwrap());
+        assert_eq!(evs.len(), 1, "the exception goes with its occurrence: {out}");
+        continuations_follow(&out, &[]);
+    }
+
+    /// Reading in content lines drops the empty piece after a final line
+    /// break, so the rewrites put it back by hand: a resource that ended
+    /// with one still does, and one that did not gains nothing.
+    #[test]
+    fn a_rewrite_leaves_the_end_of_the_resource_as_it_was() {
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            RRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT\r\nEND:VCALENDAR";
+        let occ = WriteTime::Zoned { dt: jiff::civil::date(2026, 8, 21).at(10, 0, 0, 0), tzid: "Europe/Sofia".into() };
+        let out = exclude_occurrence(&format!("{body}\r\n"), "f1", &occ).unwrap();
+        assert!(out.ends_with("END:VCALENDAR\r\n"), "{out:?}");
+        let out = exclude_occurrence(body, "f1", &occ).unwrap();
+        assert!(out.ends_with("END:VCALENDAR"), "{out:?}");
+    }
+
+    /// A component nested in the master that is not an alarm (RFC 9073's
+    /// VLOCATION, say) is its own: its DESCRIPTION is not the event's, so an
+    /// edit that owns the event's description leaves the location's alone.
+    #[test]
+    fn a_master_rewrite_leaves_a_nested_component_whole() {
+        let now = Timestamp::from_millisecond(NOW).unwrap();
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+            DTSTART;TZID=Europe/Sofia:20260820T100000\r\nDTEND;TZID=Europe/Sofia:20260820T110000\r\n\
+            DESCRIPTION:old desc\r\n\
+            BEGIN:VLOCATION\r\nUID:loc1\r\nNAME:Annex\r\nDESCRIPTION:the room's own words\r\nEND:VLOCATION\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let mut ev = write_sample("f1");
+        ev.description = Some("new desc".into());
+        let out = rewrite_master(raw, "f1", &ev, now, false).unwrap();
+        assert!(
+            out.contains("BEGIN:VLOCATION\r\nUID:loc1\r\nNAME:Annex\r\nDESCRIPTION:the room's own words\r\nEND:VLOCATION\r\n"),
+            "{out}"
+        );
+        assert!(!out.contains("old desc"), "{out}");
+        assert_eq!(events_in(&parse(&out).unwrap())[0].description.as_deref(), Some("new desc"));
     }
 }

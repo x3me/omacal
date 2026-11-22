@@ -1,6 +1,6 @@
 [package]
 name = "omacal"
-version = "6.3.0"
+version = "6.7.0"
 description = "A minimal desktop Google Calendar client for Omarchy Linux"
 authors = ["Extreme Labs"]
 edition.workspace = true
@@ -20,7 +20,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 # One-click update, offered only when the process is an AppImage (update.rs):
 # the one channel where the running binary is a single user-writable file.
@@ -47,7 +46,7 @@ tracing-subscriber = "0.3.23"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
 # `net` + `io-util` joined for the CLI write socket (ipc.rs): a Unix
 # listener and buffered line reads, nothing more.
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process", "sync"] }
 anyhow.workspace = true
 thiserror.workspace = true
 # The *file watcher* for live theme reload. Not `notify-rust`, which is the

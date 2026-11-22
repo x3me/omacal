@@ -88,7 +88,34 @@ fn conference_join_uri(ev: &Event) -> Option<String> {
         .iter()
         .find(|p| p.get("entryPointType").and_then(|t| t.as_str()) == Some("video"))
         .and_then(|p| p.get("uri")?.as_str())
+        // A web link, or no Join button at all: this URI is handed to the
+        // system opener, and the event's author chose it.
+        .filter(|u| {
+            let u = u.trim().to_ascii_lowercase();
+            u.starts_with("https://") || u.starts_with("http://")
+        })
         .map(str::to_string)
+}
+
+/// "Show as" in the store's vocabulary. Google omits `transparency` for a
+/// busy event, so absence is `opaque`; so is any value it might add later,
+/// since busy is what every other client assumes when it cannot tell.
+pub fn transparency_of(ev: &Event) -> String {
+    match ev.transparency.as_deref() {
+        Some("transparent") => "transparent",
+        _ => "opaque",
+    }
+    .to_string()
+}
+
+/// Visibility in the store's vocabulary, which is Google's own. Absent or
+/// unrecognised reads as `default`, the value Google itself omits.
+pub fn visibility_of(ev: &Event) -> String {
+    ev.visibility
+        .as_deref()
+        .filter(|v| matches!(*v, "public" | "private" | "confidential"))
+        .unwrap_or("default")
+        .to_string()
 }
 
 /// Converts a wire event into a storable row. Returns `None` for tombstones and
@@ -150,6 +177,8 @@ pub fn to_stored(ev: &Event, calendar_id: i64, cal_tz: &str) -> Option<StoredEve
         sequence: ev.sequence,
         organizer_email: (!ev.organizer.email.is_empty()).then(|| ev.organizer.email.clone()),
         guests_can_modify: ev.guests_can_modify,
+        transparency: transparency_of(ev),
+        visibility: visibility_of(ev),
         attendees: ev.attendees.iter().map(from_google_attendee).collect(),
         reminders: event_reminders(&ev.reminders),
         // Joined in from `calendars` on read, like `color_hex`; nothing to
@@ -217,6 +246,8 @@ pub fn to_cancelled_exception(ev: &Event, calendar_id: i64, cal_tz: &str) -> Opt
         sequence: ev.sequence,
         organizer_email: (!ev.organizer.email.is_empty()).then(|| ev.organizer.email.clone()),
         guests_can_modify: ev.guests_can_modify,
+        transparency: transparency_of(ev),
+        visibility: visibility_of(ev),
         attendees: ev.attendees.iter().map(from_google_attendee).collect(),
         // Usually absent on a tombstone, and nothing fires for a cancelled
         // occurrence anyway — mapped rather than hardcoded for the same reason
@@ -256,7 +287,27 @@ mod tests {
             organizer: Organizer::default(),
             guests_can_modify: false,
             reminders: Default::default(),
+            transparency: None,
+            visibility: None,
         }
+    }
+
+    /// Both fields ride through, and their absence reads as busy and default:
+    /// Google leaves each key out for exactly that value.
+    #[test]
+    fn show_as_and_visibility_ride_through_and_default_when_absent() {
+        let mut ev = timed("2026-08-05T09:00:00+03:00", "2026-08-05T10:00:00+03:00");
+        let row = to_stored(&ev, 1, "Europe/Sofia").unwrap();
+        assert_eq!((row.transparency.as_str(), row.visibility.as_str()), ("opaque", "default"));
+
+        ev.transparency = Some("transparent".into());
+        ev.visibility = Some("confidential".into());
+        let row = to_stored(&ev, 1, "Europe/Sofia").unwrap();
+        assert_eq!(row.transparency, "transparent");
+        assert_eq!(row.visibility, "confidential", "confidential is kept, not flattened");
+
+        ev.visibility = Some("something-new".into());
+        assert_eq!(to_stored(&ev, 1, "Europe/Sofia").unwrap().visibility, "default");
     }
 
     /// The mapping used by every call site — `to_stored`, `to_cancelled_exception`,
@@ -386,6 +437,22 @@ mod tests {
         }));
         let s = to_stored(&ev, 1, "Europe/Sofia").unwrap();
         assert!(s.conference_uri.is_none());
+    }
+
+    /// A video entry point is only a Join button when it is a web link: the
+    /// button hands its URI to the system opener, and `file:`, `smb:` or an
+    /// app's custom scheme there would run whatever the event's author chose.
+    #[test]
+    fn a_video_entry_point_that_is_not_a_web_link_is_no_join_button() {
+        for uri in ["file:///Applications/Calculator.app", "smb://host/share", "zoommtg://zoom.us/join?confno=1"] {
+            let mut ev = timed("2026-08-03T09:00:00+03:00", "2026-08-03T09:30:00+03:00");
+            ev.hangout_link = None;
+            ev.conference_data = Some(serde_json::json!({
+                "entryPoints": [{ "entryPointType": "video", "uri": uri }]
+            }));
+            let s = to_stored(&ev, 1, "Europe/Sofia").unwrap();
+            assert!(s.conference_uri.is_none(), "{uri}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 <!-- ui/src/lib/Header.svelte -->
 <script lang="ts">
-  import { reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
+  import { caldavReauthMessage, reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
   import { zoneName } from './zonename.svelte';
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
@@ -19,7 +19,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, syncing = false, error, errorAction = null, calendars, view, onpick,
+    busy, syncing = false, error, errorAction = null, onDismissError, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     groups = [], onapplygroup = () => {}, onsavegroups = async () => {},
@@ -56,6 +56,9 @@
     /** A button beside the error, for a failure with a next step (a refused
      *  create's Reopen, part 3 spec §6). */
     errorAction?: { label: string; run: () => void } | null;
+    /** Clears the error banner. A write's failure stays until this runs:
+     *  nothing else on screen answers it. */
+    onDismissError?: () => void;
     calendars: Calendar[];
     /** The view the switcher shows as current — `App`'s own `view` state,
      *  passed straight through. */
@@ -140,10 +143,14 @@
   // like they were doing nothing to the title (reported 2026-09-03). Formatted
   // through the same locale call as the month titles, so a locale that
   // writes its years with a suffix keeps it here too.
-  const title = $derived(
+  // Held as the locale's own pieces rather than one string, so the year can
+  // take its own colour (`--title-year`, set by a theme that wants one). The
+  // `<h1>` renders them as spans that add no text of their own, so it still
+  // reads exactly what `toLocaleDateString` would give.
+  const titleParts = $derived(
     view === 'year' || view === 'bigyear'
-      ? new Date(yearShown, 0, 1).toLocaleDateString(undefined, { year: 'numeric' })
-      : new Date(titleMs).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+      ? new Intl.DateTimeFormat(undefined, { year: 'numeric' }).formatToParts(new Date(yearShown, 0, 1))
+      : new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).formatToParts(new Date(titleMs))
   );
 
   // Every month's title in this locale, for the slot the title sits in to
@@ -170,6 +177,25 @@
    *  them and re-consent is the only fix, so this is the one failure with a
    *  button on it. */
   const reauth = $derived(status?.needs_reauth ?? []);
+  /** CalDAV accounts whose server rejects the stored password. Their fix is
+   *  the password entered again under Settings → Accounts, so their banner
+   *  opens that pane rather than starting a Google sign-in. */
+  const caldavReauth = $derived(status?.caldav_reauth ?? []);
+  /** The pane Settings opens on: Accounts when a CalDAV banner opened it. */
+  let settingsTab = $state<'General' | 'Accounts'>('General');
+  /** The connect form Accounts opens with, when the empty state's chooser
+   *  sent the user there for one. */
+  let settingsForm = $state<'icloud' | 'caldav' | 'webcal' | null>(null);
+  /** Whether the empty state's "Connect calendar…" menu is open. */
+  let connectOpen = $state(false);
+
+  function connectWith(kind: 'icloud' | 'caldav' | 'webcal') {
+    connectOpen = false;
+    menuOpen = false;
+    settingsTab = 'Accounts';
+    settingsForm = kind;
+    settingsOpen = true;
+  }
   /** The newer release, if the backend's daily check found one. */
   const update = $derived(status?.update ?? null);
   /** Dismissal is session-local on purpose: the notice returns on the next
@@ -225,7 +251,7 @@
   const light = $derived(
     syncLight(
       {
-        connected, busy: busy || syncing, error, reauth: reauth.length > 0,
+        connected, busy: busy || syncing, error, reauth: reauth.length + caldavReauth.length > 0,
         lastSyncMs: status?.last_sync_ms ?? null,
       },
       now,
@@ -241,6 +267,8 @@
 
   function openSettings() {
     menuOpen = false;
+    settingsTab = 'General';
+    settingsForm = null;
     settingsOpen = true;
   }
 
@@ -321,7 +349,7 @@
       <div class="sizers" aria-hidden="true">
         {#each TITLE_SIZERS as sizer}<span>{sizer}</span>{/each}
       </div>
-      <h1 data-tauri-drag-region>{title}</h1>
+      <h1 data-tauri-drag-region>{#each titleParts as part}<span class:year={part.type === 'year'}>{part.value}</span>{/each}</h1>
     </div>
     <div class="nav">
       <button onclick={onPrev} aria-label="Previous {unit}">‹</button>
@@ -415,9 +443,25 @@
       <!-- Stays in the header rather than moving behind the hamburger. The
            three controls §1 moves are all *rare*; this is the one thing a new
            user has to find, and it is the whole of the app until they do. -->
-      <button class="primary" onclick={onSignIn} disabled={busy}>
-        {busy ? 'Connecting…' : 'Connect Google Calendar'}
-      </button>
+      <!-- Every kind of calendar the app connects, not only Google's: the
+           other three used to wait behind ☰ → Settings → Accounts, which a new
+           user has no reason to look in. Google starts its sign-in here; the
+           others open Accounts with their own form already open. -->
+      <div class="connectwrap">
+        <button class="primary" aria-haspopup="menu" aria-expanded={connectOpen}
+                onclick={() => (connectOpen = !connectOpen)} disabled={busy}>
+          {busy ? 'Connecting…' : 'Connect calendar…'}
+        </button>
+        {#if connectOpen}
+          <button class="scrim" aria-label="Close" tabindex="-1" onclick={() => (connectOpen = false)}></button>
+          <div class="connectmenu" role="menu" aria-label="Connect a calendar" data-overlay>
+            <button role="menuitem" onclick={() => { connectOpen = false; onSignIn(); }}>Google Calendar</button>
+            <button role="menuitem" onclick={() => connectWith('icloud')}>iCloud</button>
+            <button role="menuitem" onclick={() => connectWith('caldav')}>CalDAV server</button>
+            <button role="menuitem" onclick={() => connectWith('webcal')}>WebCal feed</button>
+          </div>
+        {/if}
+      </div>
     {/if}
 
     <button class="quick" aria-label="Quick add event" title="Quick add (Q)" onclick={onQuickAdd}>＋</button>
@@ -445,7 +489,7 @@
              which is the honest behaviour for two nested layers. -->
         <button class="scrim" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
 
-        <div class="menu" role="group" aria-label="Menu">
+        <div class="menu" role="group" aria-label="Menu" data-overlay>
           {#if calendars.length > 0}
             <!-- **Rehomed, not rewritten.** The whole component moves inside
                  the menu with its trigger, its panel and its `bind:open`
@@ -487,6 +531,8 @@
     {oncalendarchange}
     {onappearancechange}
     {onsettingschange}
+    initialTab={settingsTab}
+    initialAccountForm={settingsForm}
     onSignIn={() => {
       settingsOpen = false;
       onSignIn();
@@ -506,9 +552,10 @@
   </p>
 {/if}
 {#if error}
-  <p class="err" class:with-action={!!errorAction}>
+  <p class="err" class:with-action={!!errorAction || !!onDismissError}>
     <span>{error}</span>
     {#if errorAction}<button type="button" onclick={errorAction.run}>{errorAction.label}</button>{/if}
+    {#if onDismissError}<button type="button" class="dismiss" aria-label="Dismiss" onclick={onDismissError}>×</button>{/if}
   </p>
 {/if}
 
@@ -523,6 +570,16 @@
     <span>{reauthMessage(reauth)}</span>
     <button class="primary" onclick={onSignIn} disabled={busy}>
       {busy ? 'Connecting…' : 'Reconnect'}
+    </button>
+  </p>
+{/if}
+<!-- Its CalDAV twin. Same rules, a different fix: the server's password,
+     entered again where the account was connected. -->
+{#if caldavReauth.length > 0 && !status?.demo}
+  <p class="err reauth" data-testid="caldav-reauth-banner">
+    <span>{caldavReauthMessage(caldavReauth)}</span>
+    <button class="primary" onclick={() => { settingsTab = 'Accounts'; settingsForm = null; menuOpen = false; settingsOpen = true; }}>
+      Reconnect
     </button>
   </p>
 {/if}
@@ -615,13 +672,19 @@
      padding would be a dead gap. */
   header.overlay { padding-left: 60px; }
   .left, .right { display: flex; align-items: center; gap: 8px; }
-  h1 { font-size: 20px; font-weight: 600; letter-spacing: -.025em; margin: 0; white-space: nowrap; }
+  h1 { font-size: var(--heading-size, 20px); font-weight: var(--heading-weight, 600); letter-spacing: -.025em; margin: 0; white-space: nowrap; }
+  h1 .year { color: var(--title-year, inherit); }
+  /* The parts are only there to colour the year. Tauri's drag script honours
+     a bare `data-tauri-drag-region` only on the element pressed itself, so a
+     press on a span would not move the window, nor a double-click maximise
+     it: the spans let the press through to the `<h1>`. */
+  h1 span { pointer-events: none; }
   /* The slot — see the markup. Tabular digits so the year never nudges it
      either; every sizer shares the h1's face so the widest of them is the
      widest title this locale can show. */
   .title { display: grid; font-variant-numeric: tabular-nums; }
   .title > * { grid-area: 1 / 1; }
-  .sizers { visibility: hidden; display: grid; font-size: 20px; font-weight: 600;
+  .sizers { visibility: hidden; display: grid; font-size: var(--heading-size, 20px); font-weight: var(--heading-weight, 600);
             letter-spacing: -.025em; white-space: nowrap; }
   .sizers > span { grid-area: 1 / 1; }
   .nav { display: flex; gap: 1px; }
@@ -631,7 +694,7 @@
   button:disabled { opacity: .5; cursor: default; }
   .nav button { width: 22px; padding: 3px 0; font-size: 14px; }
   .today { border: 1px solid color-mix(in srgb, var(--text) 12%, transparent); background: none; }
-  .primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .primary { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
   .demo { font-size: 11.5px; }
 
   /* Spec §2, amended in the field. Eight pixels, no label. Healthy is a
@@ -656,7 +719,7 @@
      a view you can be in. Pressed takes the same accent fill the active view
      slot does, because that is what "on" already looks like in this header. */
   .filmstrip { font-size: 13px; line-height: 1; padding: 4px 8px; }
-  .filmstrip[aria-pressed='true'] { background: var(--accent); color: var(--on-accent); }
+  .filmstrip[aria-pressed='true'] { background: var(--accent-fill); color: var(--on-accent); }
 
   .menuwrap { position: relative; }
   .burger { font-size: 14px; line-height: 1; padding: 3px 8px; }
@@ -710,6 +773,8 @@
             gap: 12px; flex-wrap: wrap; }
   .reauth button, .with-action button { border: none; border-radius: 6px; padding: 5px 12px;
                    font-size: 12.5px; cursor: pointer; }
+  /* The dismiss ×: quieter than the banner's one action. */
+  .with-action button.dismiss { background: transparent; color: inherit; padding: 2px 8px; font-size: 15px; }
   /* The .err shape in the accent's clothes: same box, calmer colours,
      because this banner reports an option rather than a problem. */
   .notice { color: var(--text); font-size: 12.5px; line-height: 1.45;
@@ -723,4 +788,14 @@
                    background: color-mix(in srgb, var(--accent) 18%, transparent);
                    color: var(--text); }
   .notice button:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  /* The empty state's chooser: anchored under its button, above the grid. */
+  .connectwrap { position: relative; }
+  .connectmenu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 61; min-width: 170px;
+                 display: flex; flex-direction: column; padding: 4px; border-radius: 8px;
+                 background: var(--surface); border: 1px solid var(--hairline);
+                 box-shadow: 0 8px 24px rgba(0, 0, 0, .25); }
+  .connectmenu button { text-align: left; background: none; border: 0; color: var(--text);
+                        padding: 6px 10px; border-radius: 5px; font: inherit; cursor: pointer; }
+  .connectmenu button:hover, .connectmenu button:focus-visible { background: color-mix(in srgb, var(--text) 8%, transparent); }
+  .connectwrap .scrim { position: fixed; inset: 0; z-index: 60; background: none; border: 0; }
 </style>

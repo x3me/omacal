@@ -1,5 +1,7 @@
 <script lang="ts">
   import CalendarColors from './CalendarColors.svelte';
+  import LockGlyph from './LockGlyph.svelte';
+  import { isFree, isPrivate } from './showas';
   import type { ColorSegment } from './combined';
   import { clockFormat } from './clock.svelte';
   import { RESIZE_EDGE_PX, beganDrag, hasResizeEdges } from './drag';
@@ -205,6 +207,8 @@
   data-combined-count={event.copies?.length || undefined}
   style:color={event.copies?.length ? "var(--text)" : undefined}
   class:nobodycoming={event.all_guests_declined}
+  class:free={isFree(event)}
+  class:private={isPrivate(event)}
   class:dragging={preview !== null}
   class:keyboard={keyboardSelected}
   class:create-mode={createMode}
@@ -227,7 +231,7 @@
     left:calc({left}% + 3px); width:calc({width}% - 6px);
     --cal:{event.color}; z-index:{placed.column + 1};
   "
-  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
+  aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{isFree(event) ? ', free' : ''}{isPrivate(event) ? ', private' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
   onclick={open}
   onpointerup={(e) => {
     if (e.button !== 2 || !rightPress) return;
@@ -263,6 +267,9 @@
        Outlook both use for it (2026-08-10, by request). An unanswered invite
        carries no letter: its dashed ring is the whole of "nothing yet". -->
   {#if event.response === 'tentative'}<i class="rs">?</i>{/if}
+  <!-- Fantastical's mark for a private event, in the same corner. Hidden
+       from readers because the button's label already ends ", private". -->
+  {#if isPrivate(event)}<span class="lock" aria-hidden="true"><LockGlyph /></span>{/if}
   <b>{event.title}</b>
   {#if showTime}<em>{hhmm(shownStartMs)} – {hhmm(shownEndMs)}</em>{/if}
   <!-- Words, not a mark. A strike through the title and a ✕ in the corner
@@ -352,7 +359,7 @@
   .copy-color { flex: 1; min-width: 0;
     --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
     background: var(--event-fill);
-    box-shadow: inset 2px 0 var(--cal), 0 -1px 0 var(--bg), 0 1px 0 var(--bg); }
+    box-shadow: inset var(--event-spine-width, 2px) 0 var(--cal), 0 -1px 0 var(--bg), 0 1px 0 var(--bg); }
   .copy-backdrop { position: absolute; left: 3px; right: 3px; z-index: 25;
     border: 0; padding: 0; border-radius: var(--event-card-radius, 6px);
     cursor: pointer; background: transparent; }
@@ -420,17 +427,32 @@
        otherwise a whole-hour boundary also exposes `.rule`, making hourly
        gaps look heavier than half-hour gaps. */
     --spine: var(--cal);
-    box-shadow: inset 2px 0 0 0 var(--spine),
+    /* The spine's own width, a variable so a free event can thin it to the
+       outline's outer stroke without restating either shadow below. A theme
+       style may widen it (`--event-spine-width`, Daylight's 3px); a free
+       event's outline stays 3px across either way. */
+    --spine-width: var(--event-spine-width, 2px);
+    box-shadow: inset var(--spine-width) 0 0 0 var(--spine),
                 0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg);
     background-clip: padding-box;
     /* Composited over --bg, not `transparent`. Blocks overlap constantly, and a
        translucent fill lets the one behind read through — its title, and its
        rounded corners poking past this one's. Against the column background the
        result is indistinguishable from a 7% wash, because the column background
-       IS --bg. */
-    --event-fill: color-mix(in srgb, var(--cal) 7%, var(--bg));
-    background: color-mix(in srgb, var(--cal) 7%, var(--bg));
-    color: color-mix(in srgb, var(--cal) 65%, var(--text));
+       IS --bg.
+
+       The 7%, the 2px spine above and the title's 600 below are the stock
+       look (as are the 65% of the calendar's colour in the text and the
+       second line's .62) and the fallbacks of `--event-tint`,
+       `--event-spine-width`, `--event-title-weight`, `--event-ink` and
+       `--event-sub-opacity`, which `setPalette` sets only for a theme that
+       carries a `ThemeStyle` (the two Daylights) and removes for every other.
+       `--event-tint-space` is the space the tint is mixed in, `srgb` unless a
+       theme says otherwise (Daylight Dark's linear light, which keeps a
+       yellow block gold over near-black instead of olive). */
+    --event-fill: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint, 7%), var(--bg));
+    background: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint, 7%), var(--bg));
+    color: color-mix(in srgb, var(--cal) var(--event-ink, 65%), var(--text));
     font: inherit;
   }
   /* Hover lifts the block to full width so a squeezed 3-way pile stays
@@ -444,27 +466,51 @@
      one; this rule had been losing the same fight invisibly until a dense
      iCloud week made it obvious. */
   .ev.hovered { left: 3px !important; width: calc(100% - 6px) !important; z-index: 20 !important;
-              box-shadow: inset 2px 0 0 0 var(--spine),
+              box-shadow: inset var(--spine-width) 0 0 0 var(--spine),
                           0 -1px 0 0 var(--bg), 0 1px 0 0 var(--bg),
                           0 4px 14px rgba(0, 0, 0, .5); }
   /* Keep every saved event below the creation preview, regardless of its
      overlap column or keyboard selection. Alt must also override edge grips. */
   .ev.obscured { z-index: 1 !important; }
-  .ev.obscured b, .ev.obscured em, .ev.obscured .rs { visibility: hidden; }
+  .ev.obscured b, .ev.obscured em, .ev.obscured .rs, .ev.obscured .lock { visibility: hidden; }
   .ev.create-mode { cursor: crosshair; z-index: 1 !important; }
 
   /* 11.5/10.5, up from 10/9 (2026-08-14): at 10px the grid read as decoration
      on a 14" screen, and Google's own week view sits at ~12px. The density
      ladder holds with room to spare — a 45-minute block is 52px at the
      grid's 70px/hour and two lines at these sizes need 33. */
-  .ev b { display: block; font-size: 11.5px; font-weight: 600; line-height: 1.3;
+  .ev b { display: block; font-size: 11.5px; font-weight: var(--event-title-weight, 600); line-height: 1.3;
           letter-spacing: -.01em; white-space: nowrap; overflow: hidden;
           text-overflow: ellipsis; }
-  .ev em { font-style: normal; display: block; font-size: 10.5px; opacity: .62;
+  .ev em { font-style: normal; display: block; font-size: 10.5px; opacity: var(--event-sub-opacity, .62);
            line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .rs { position: absolute; top: 1px; right: 4px; font-size: 9px;
         font-style: normal; font-weight: 700; opacity: .8; }
+
+  /* Free (Show as: free): the spine drawn as an outline, Fantastical's mark
+     for time you are still available in. The inset shadow above thins to a
+     1px outer stroke, which keeps following the rounded corners, and this
+     1px line is the inner stroke; between them the block's own fill shows,
+     so the bar reads hollow in every state that recolours `--spine`. It
+     spans 3px, a pixel wider than the solid spine: at 2px there is no room
+     for a gap between two strokes. The bar is paint only, so the title does
+     not move. */
+  .ev.free { --spine-width: 1px; }
+  .ev.free::before { content: ''; position: absolute; top: 0; bottom: 0; width: 1px;
+                     left: 2px; background: var(--spine); pointer-events: none; }
+  .ev.copies-open::before { display: none; }
+
+  /* Private or confidential: a lock in the top-right corner, in the block's
+     ink, centred on the title's first line (2px padding + half of the 15px
+     line, less half the glyph). The title gives up the glyph's width so its
+     ellipsis stops short of the lock instead of running under it, and the
+     tentative `?` steps left of it. A block too short or narrow to hold it
+     clips it like any other content. */
+  .lock { position: absolute; top: 4.5px; right: 5px; line-height: 0; opacity: .9;
+          pointer-events: none; }
+  .ev.private > b { padding-right: 12px; }
+  .ev.private .rs { right: 18px; }
 
   /* Everyone else said no (2026-09-04). Half the usual fill, and nothing
      else: the block recedes a step without changing shape, which is as much
@@ -512,8 +558,15 @@
      ones it covers. Every state is already opaque at rest, so this is emphasis
      rather than the occlusion fix itself. Last among the state rules so it
      wins over the per-state backgrounds above at equal specificity. */
-  .ev:hover { --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
-              background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
+  .ev:hover { --event-fill: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint-hover, 16%), var(--bg));
+              background-color: color-mix(in var(--event-tint-space, srgb), var(--cal) var(--event-tint-hover, 16%), var(--bg)); }
+  /* A declined block hovers to the stock 16% whatever the theme's tint. Its
+     spine is the calendar's colour at 45%, and a theme's deeper hover fill
+     (Daylight's 31%) all but matched it: the one coloured edge a declined
+     block keeps vanished under the pointer. The muted, struck-through title
+     was also chosen against a faint fill, not a strong one. */
+  .ev.declined:hover { --event-fill: color-mix(in srgb, var(--cal) 16%, var(--bg));
+                       background-color: color-mix(in srgb, var(--cal) 16%, var(--bg)); }
 
   /* The preference fades the fill colour, never the element: opacity here
      would also fade the title, RSVP mark, outline and colour spine. Hover

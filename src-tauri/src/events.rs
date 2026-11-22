@@ -86,6 +86,12 @@ pub struct EventDetail {
     /// Google's `guestsCanModify`: the organizer let guests change the event
     /// for everyone. Meaningful only when `is_organizer` is false.
     pub guests_can_modify: bool,
+    /// "Show as": `opaque` (busy) or `transparent` (free), the store's own
+    /// strings, whichever provider the event came from.
+    pub transparency: String,
+    /// `default` | `public` | `private` | `confidential`. The form offers the
+    /// first three and shows the fourth only when it is already the value.
+    pub visibility: String,
     /// Whether this event's provider emails the people on it when a write
     /// asks it to. Google does, because Google is the mail server; CalDAV
     /// has nothing of the kind in the protocol OmaCal speaks, so a notify
@@ -305,6 +311,8 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         can_edit: can_edit(state.demo, &access_role),
         is_organizer,
         guests_can_modify: event.guests_can_modify,
+        transparency: event.transparency,
+        visibility: event.visibility,
         mails_guests,
         attendees: event.attendees,
         reminders: event.reminders,
@@ -579,11 +587,16 @@ pub(crate) fn resolve_instance_id(
 /// Google now has; and `self_response`, derived the same way sync derives it
 /// — Google does not return it as a field of its own — so the week grid's
 /// block styling updates immediately instead of waiting for the next sync.
+/// `transparency` and `visibility` too: a PATCH response is the whole event,
+/// so when an edit that changed them falls back to this, the dialog reopens
+/// showing what Google now holds rather than what the row last said.
 pub(crate) fn merge_patched(row: &mut omacal_store::StoredEvent, patched: &omacal_google::model::Event) {
     row.etag = patched.etag.clone();
     row.sequence = patched.sequence;
     row.attendees = patched.attendees.iter().map(omacal_sync::from_google_attendee).collect();
     row.self_response = row.attendees.iter().find(|a| a.is_self).map(|a| a.response_status.clone());
+    row.transparency = omacal_sync::transparency_of(patched);
+    row.visibility = omacal_sync::visibility_of(patched);
 }
 
 /// `occurrence_start_ms` is the `start_ms` of the block the user actually
@@ -858,6 +871,21 @@ async fn refresh_event_impl(state: &AppState, id: i64) -> Result<EventDetail, St
 /// open. Its failures are the caller's to ignore: whatever `EventDetail` is
 /// already on screen is still valid if this does not succeed.
 async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> {
+    // Google's events only. A CalDAV or WebCal event's "calendar id" is a
+    // collection or feed URL, and an address shared with a Google account
+    // found that account's token: the popover sent the URL and the event's
+    // UID to googleapis.com on every open. On a CalDAV-only install it just
+    // failed at the missing Google config. Its stored details are the answer.
+    let provider: Option<String> = sqlx::query_scalar(
+        "SELECT a.provider FROM events e JOIN calendars c ON c.id = e.calendar_id
+         JOIN accounts a ON a.id = c.account_id WHERE e.id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if !provider.as_deref().is_some_and(refreshes_from_google) {
+        return event_detail_impl(state, id).await;
+    }
     let (ev, _access_role, cal_google_id, account_email) = omacal_store::event_for_write(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
@@ -872,6 +900,12 @@ async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> 
         crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     }
     event_detail_impl(state, id).await
+}
+
+/// Whether opening an event of this account's provider asks Google for a
+/// fresher copy: only a Google account's. See [`refresh_impl`].
+fn refreshes_from_google(provider: &str) -> bool {
+    provider == "google"
 }
 
 /// The Google half of [`refresh_impl`], split out so it runs against a
@@ -911,7 +945,7 @@ pub async fn create_event(
     fields: crate::write::EventInput,
     send_updates: String,
 ) -> Result<EventDetail, String> {
-    create_event_body(&state, calendar_id, fields, &send_updates).await
+    create_event_body(&state, calendar_id, fields, &send_updates, None).await
 }
 
 /// The whole of `create_event` minus the Tauri `State` wrapper — guards,
@@ -922,14 +956,20 @@ pub async fn create_event(
 /// in the house. `fields_from_input` is fallible since #12 (a weekly
 /// pattern or ending that cannot serialize refuses here), and the refusal
 /// reaches the CLI's socket exactly as it reaches the form.
+///
+/// `uid` is an identity the event already has, which only an `.ics` import
+/// supplies (see [`crate::caldav_write::create`]). A CalDAV calendar keeps
+/// it; Google mints its own ids on insert and ignores it, which is the limit
+/// `import::existing_uids` already states.
 pub(crate) async fn create_event_body(
     state: &AppState,
     calendar_id: i64,
     fields: crate::write::EventInput,
     send_updates: &str,
+    uid: Option<&str>,
 ) -> Result<EventDetail, String> {
     let fields = crate::write::fields_from_input(fields)?;
-    create_impl(state, calendar_id, fields, send_updates)
+    create_impl(state, calendar_id, fields, send_updates, uid)
         .await
         .map_err(|e| crate::errors::user_facing(&e))
         .inspect(|_| crate::upcoming::refresh_soon(state.pool.clone(), state.demo))
@@ -975,6 +1015,7 @@ async fn create_impl(
     calendar_id: i64,
     fields: crate::write::EventFields,
     send_updates: &str,
+    uid: Option<&str>,
 ) -> anyhow::Result<EventDetail> {
     if state.demo {
         anyhow::bail!("demo mode — there is nothing to create");
@@ -997,9 +1038,9 @@ async fn create_impl(
     // and the form never asks one on these calendars.
     if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
         if fields.conference.is_some() {
-            anyhow::bail!("Google Meet can only be added to a Google calendar");
+            anyhow::bail!(MEET_ONLY_ON_GOOGLE);
         }
-        return crate::caldav_write::create(state, calendar_id, fields).await;
+        return crate::caldav_write::create(state, calendar_id, fields, uid).await;
     }
 
     let (cal_google_id, access_role, account_email, cal_tz) =
@@ -1098,6 +1139,15 @@ async fn create_via_client(
     if let Some(conference) = &f.conference {
         body["conferenceData"] = crate::write::conference_json(conference);
     }
+    // "Show as" and visibility only when they are not what Google assumes for
+    // an absent key. Sending `opaque` or `default` would produce the same event
+    // and say more than the user did.
+    if let Some(t) = f.transparency.filter(|t| *t != crate::write::Transparency::Opaque) {
+        body["transparency"] = t.as_str().into();
+    }
+    if let Some(v) = f.visibility.filter(|v| *v != crate::write::Visibility::Default) {
+        body["visibility"] = v.as_str().into();
+    }
 
     // **The guest list, through the edit path's own builder.**
     //
@@ -1176,6 +1226,33 @@ pub(crate) const CREATED_NOT_STORED: &str =
 pub(crate) const SAVED_NOT_STORED: &str =
     "The change was saved, but OmaCal could not record it locally. \
      The next sync will bring it in.";
+
+/// A Meet link asked for on a calendar that is not Google's, which cannot
+/// make one. Raised before anything is sent; allowlisted in `errors.rs`.
+pub(crate) const MEET_ONLY_ON_GOOGLE: &str = "Google Meet can only be added to a Google calendar";
+
+/// A "this and following" split refused because the series ends after a set
+/// number of times: the rest would need the original's count minus what the
+/// first half used, a number only a full expansion knows. Shared by the
+/// Google and CalDAV splits so both refuse in the same words. Raised by
+/// `bail!` before either write; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_REFUSES_COUNT: &str =
+    "OmaCal cannot split a series that ends after a set number of times — \
+     edit all events instead";
+
+/// A split refused because later occurrences were changed on their own and
+/// would be lost; the count follows. Shared by both splits; a prefix in
+/// `errors.rs`'s `SAFE_PREFIXES`.
+pub(crate) const SPLIT_STRANDS_PREFIX: &str =
+    "some later occurrences of this series were moved or deleted on their own, and a \
+     split cannot carry them across — edit all events instead, or re-create them \
+     afterwards. Occurrences affected: ";
+
+/// A split whose new series landed but whose original would not shorten.
+/// Shared by both splits; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_LEFT_TWO_SERIES: &str =
+    "the new series was created but the original could not be shortened — \
+     you now have two overlapping series and should delete one";
 
 /// What a CalDAV move reports when the copy landed and the original would not
 /// go — the one partial outcome the PUT-then-DELETE order can produce.
@@ -1296,6 +1373,9 @@ pub(crate) fn edit_patch_body(
         // own settings, not against a before-side this struct would carry.
         reminders: None,
         conference: None,
+        // Compared below against the row's own strings, the same way.
+        transparency: None,
+        visibility: None,
     };
 
     let anchor = if is_recurring(&ev.recurrence, &ev.recurring_event_id) {
@@ -1370,6 +1450,23 @@ pub(crate) fn edit_patch_body(
     // CalendarClient for every modifying request.
     if let Some(conference) = &after.conference {
         body["conferenceData"] = crate::write::conference_json(conference);
+    }
+
+    // **"Show as" and visibility, and only when they actually changed**, by
+    // the reminders rule above: both are plain strings on the row in Google's
+    // own vocabulary, so equality is exact. Choosing Default on an event that
+    // was private sends `"default"` explicitly, since an absent key would
+    // leave it private. A confidential event the dialog cannot express comes
+    // back as `None` and is never touched.
+    if let Some(t) = after.transparency {
+        if t.as_str() != ev.transparency {
+            body["transparency"] = serde_json::json!(t.as_str());
+        }
+    }
+    if let Some(v) = after.visibility {
+        if v.as_str() != ev.visibility {
+            body["visibility"] = serde_json::json!(v.as_str());
+        }
     }
 
     body
@@ -1622,7 +1719,7 @@ async fn update_impl(
         if let Some(cal_id) = cal_id {
             if crate::caldav_write::is_caldav_calendar(&state.pool, cal_id).await? {
                 if fields.conference.is_some() {
-                    anyhow::bail!("Google Meet can only be added to a Google calendar");
+                    anyhow::bail!(MEET_ONLY_ON_GOOGLE);
                 }
                 let detail =
                     crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields)
@@ -2223,10 +2320,7 @@ async fn split_series(
     // not valid iCalendar and Google does not emit it, but checking one and
     // truncating both is the shape a real bug hides in.
     if rules.iter().any(|r| crate::write::has_count(r)) {
-        anyhow::bail!(
-            "OmaCal cannot split a series that ends after a set number of times — \
-             edit all events instead"
-        );
+        anyhow::bail!(SPLIT_REFUSES_COUNT);
     }
 
     // Occurrences in the tail that somebody has already changed on their own.
@@ -2265,11 +2359,7 @@ async fn split_series(
     )
     .await?;
     if stranded > 0 {
-        anyhow::bail!(
-            "some later occurrences of this series were moved or deleted on their own, and a \
-             split cannot carry them across — edit all events instead, or re-create them \
-             afterwards. Occurrences affected: {stranded}"
-        );
+        anyhow::bail!("{SPLIT_STRANDS_PREFIX}{stranded}");
     }
 
     // ---- 1. The tail. -----------------------------------------------------
@@ -2302,6 +2392,22 @@ async fn split_series(
             kept.extend(lines.iter().filter(|l| !crate::write::is_rrule(l)).cloned());
             body["recurrence"] = serde_json::json!(kept);
         }
+    }
+
+    // Reminders, by the same rule as "Show as" further down: the form's when
+    // it set them, and otherwise what the dialog showed, the clicked
+    // occurrence's own (the exception's row for a moved occurrence, the
+    // series' for any other). This body is an INSERT, so leaving `reminders`
+    // out does not leave them alone: it gives the tail the calendar's
+    // defaults. Sent only when they are not those defaults, the create path's
+    // rule.
+    let reminders = match &after.reminders {
+        Some(wanted) => wanted.clone(),
+        None if ev.original_start_utc.is_some() => reminders_as_input(&ev.reminders),
+        None => reminders_as_input(&master_row.reminders),
+    };
+    if !reminders.use_default {
+        body["reminders"] = crate::write::reminders_json(&reminders);
     }
 
     // **The tail carries the guest list the user asked for.**
@@ -2345,6 +2451,36 @@ async fn split_series(
     // key creates an event with no attendees, which is what they asked for.
     if !attendees.is_empty() {
         body["attendees"] = serde_json::json!(attendees);
+    }
+
+    // "Show as" and visibility: the form's choice when it made one, and
+    // otherwise what the dialog showed, which is the clicked occurrence's own.
+    // This body is an INSERT like `conferenceData` above, so an untouched
+    // field left out would quietly turn the rest of a free or private series
+    // busy and default. For an ordinary occurrence that is the series', copied
+    // from the wire master rather than `master_row`, so a value this app
+    // cannot set (confidential) travels as Google spelled it. For an exception
+    // (`original_start_utc` set) it is the exception's stored row: a moved
+    // occurrence set to Free on a busy series splits into a free series. Busy
+    // and default stay absent, the create path's rule.
+    let (own_transparency, own_visibility) = if ev.original_start_utc.is_some() {
+        (Some(ev.transparency.clone()), Some(ev.visibility.clone()))
+    } else {
+        (master.transparency.clone(), master.visibility.clone())
+    };
+    let transparency = after
+        .transparency
+        .map(|t| t.as_str().to_string())
+        .or(own_transparency);
+    if let Some(t) = transparency.filter(|t| t != "opaque") {
+        body["transparency"] = t.into();
+    }
+    let visibility = after
+        .visibility
+        .map(|v| v.as_str().to_string())
+        .or(own_visibility);
+    if let Some(v) = visibility.filter(|v| v != "default") {
+        body["visibility"] = v.into();
     }
 
     // **The caller's choice, not a constant.** Both writes below carried
@@ -2400,10 +2536,7 @@ async fn split_series(
         .map_err(|e| {
             tracing::error!(master = %master.id, created = %created.id, %e,
                 "series split created the new series but could not shorten the original");
-            anyhow::anyhow!(
-                "the new series was created but the original could not be shortened — \
-                 you now have two overlapping series and should delete one"
-            )
+            anyhow::anyhow!(SPLIT_LEFT_TWO_SERIES)
         })?;
 
     // ---- 3. Only now, the local store. ------------------------------------
@@ -3408,6 +3541,7 @@ mod tests {
             hangout_link: None, conference_data: None, attendees: vec![], sequence: 0,
             organizer: Default::default(),
             guests_can_modify: false,
+            transparency: None, visibility: None,
             reminders: Default::default(),
         }
     }
@@ -3469,6 +3603,7 @@ mod tests {
             description: None,
             etag: Some("\"old\"".into()), sequence: 1, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees,
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
@@ -3496,11 +3631,13 @@ mod tests {
             sequence: 5,
             organizer: Default::default(),
             guests_can_modify: false,
+            transparency: Some("transparent".into()), visibility: Some("private".into()),
             reminders: Default::default(),
         };
         merge_patched(&mut row, &patched);
         assert_eq!(row.etag.as_deref(), Some("\"new\""));
         assert_eq!(row.sequence, 5);
+        assert_eq!((row.transparency.as_str(), row.visibility.as_str()), ("transparent", "private"));
         assert_eq!(row.attendees.len(), 1);
         assert_eq!(
             row.self_response.as_deref(), Some("declined"),
@@ -4119,6 +4256,21 @@ mod tests {
         assert!(d.can_edit);
     }
 
+    /// The CLI's text line after a write (`cli_write::done_line`) names the
+    /// event from this very answer, serialised the way the socket sends it.
+    /// It read `data.summary` for as long as event writes existed, and
+    /// `EventDetail` calls the name `title`, so every event write printed a
+    /// bare "Created.".
+    #[tokio::test]
+    async fn a_cli_write_names_the_event_from_the_apps_own_answer() {
+        let mut ev = stored(vec![]);
+        ev.summary = Some("Standup".into());
+        let (pool, id) = seeded_pool_with(&ev).await;
+        let detail = event_detail_impl(&state_with(pool, false), id).await.unwrap();
+        let envelope = serde_json::json!({ "ok": true, "data": detail });
+        assert_eq!(crate::cli_write::done_line(&envelope, "Created", None), "Created: Standup");
+    }
+
     /// The other half of the same payload: the raw rule tells the form what to
     /// *show*, this tells it whether the Repeat control may be used at all.
     ///
@@ -4280,7 +4432,7 @@ mod tests {
             "is_all_day", "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
             "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit", "is_organizer", "guests_can_modify",
-            "mails_guests", "attendees", "reminders", "calendar_default_reminders",
+            "transparency", "visibility", "mails_guests", "attendees", "reminders", "calendar_default_reminders",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "the UI reads these by name off `invoke`'s result");
@@ -4360,8 +4512,38 @@ mod tests {
     /// An `AppState` a test can hold: demo mode's whole point is that nothing
     /// below the gate runs, so the token cache starts empty and stays that
     /// way.
+    /// Only a Google event is refreshed from Google.
+    #[test]
+    fn only_a_google_event_is_refreshed_from_google() {
+        assert!(refreshes_from_google("google"));
+        for other in ["caldav", "webcal", "local", ""] {
+            assert!(!refreshes_from_google(other), "{other}");
+        }
+    }
+
+    /// A CalDAV event's refresh is its stored details, reached without the
+    /// Google config at all. (Run only against the fixed path: the unfixed
+    /// one reads the machine's real `~/.config/omacal/config.toml`, which a
+    /// test must not touch, so the call-site is proven by the rule above and
+    /// by this returning Ok.)
+    #[tokio::test]
+    async fn a_caldav_event_refreshes_to_its_stored_details() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider) VALUES ('caldav:e@x','e@x',0,'caldav')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1,'https://dav.example.com/cal/','Home','UTC','owner')")
+            .execute(&pool).await.unwrap();
+        let mut ev = stored(vec![]);
+        ev.calendar_id = 1;
+        let id = omacal_store::upsert_event(&pool, &ev).await.unwrap();
+        let state = state_with(pool, false);
+
+        let detail = refresh_impl(&state, id).await.unwrap();
+        assert_eq!(detail.id, id);
+    }
+
     fn state_with(pool: SqlitePool, demo: bool) -> AppState {
-        AppState { pool, demo, tokens: Default::default(), reauth: Default::default(), update: Default::default(), update_checked_at: Default::default(), system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(), history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS), sync_gate: std::sync::Arc::new(crate::sync_loop::SyncGate::new()) }
+        AppState { pool, demo, tokens: Default::default(), reauth: Default::default(), update: Default::default(), update_checked_at: Default::default(), system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(), history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS) }
     }
 
     /// "Demo mode must never write to the real database or reach Google",
@@ -4497,6 +4679,8 @@ mod tests {
                 }],
             }),
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -4523,7 +4707,7 @@ mod tests {
     async fn creating_refuses_in_demo_mode_without_touching_config_keyring_or_google() {
         let pool = omacal_store::connect_memory().await.unwrap();
         let err =
-            create_impl(&state_with(pool, true), 1, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, true), 1, sample_fields(), "none", None).await.unwrap_err();
         assert!(err.to_string().contains("demo"), "got: {err}");
         // Binds the emitter to `errors.rs`'s allowlist: checking only
         // `.contains` above would leave this green even if the two literals
@@ -4542,7 +4726,7 @@ mod tests {
         let pool = omacal_store::connect_memory().await.unwrap();
         let cal = seed_calendar(&pool, "reader").await;
         let err =
-            create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, false), cal, sample_fields(), "none", None).await.unwrap_err();
         assert!(err.to_string().contains("not writable"), "got: {err}");
         assert_eq!(crate::errors::user_facing(&err), "this calendar is not writable from OmaCal");
     }
@@ -4560,7 +4744,7 @@ mod tests {
             .await
             .unwrap();
         let err =
-            create_impl(&state_with(pool, false), cal, sample_fields(), "none").await.unwrap_err();
+            create_impl(&state_with(pool, false), cal, sample_fields(), "none", None).await.unwrap_err();
         assert_eq!(crate::errors::user_facing(&err), NOT_AN_EVENT_CALENDAR);
     }
 
@@ -4624,6 +4808,60 @@ mod tests {
         create_via_client(&pool, cal, "cal@x.com", "UTC", fields, "none", &client)
             .await
             .unwrap();
+    }
+
+    /// A create sends "Show as" and visibility only when they are not what
+    /// Google assumes for an absent key. `body_json` matches the whole
+    /// document, so the busy/default case asserts the keys are absent.
+    #[tokio::test]
+    async fn creating_sends_show_as_and_visibility_only_when_not_the_default() {
+        use crate::write::{Transparency, Visibility};
+        for (t, v, extra) in [
+            (Transparency::Opaque, Visibility::Default, serde_json::json!({})),
+            (Transparency::Transparent, Visibility::Private,
+             serde_json::json!({ "transparency": "transparent", "visibility": "private" })),
+        ] {
+            let fields = crate::write::EventFields {
+                transparency: Some(t),
+                visibility: Some(v),
+                ..sample_fields()
+            };
+            let (start, end) = crate::write::when_json(&fields.when, &fields.tz);
+            let mut expected_body = serde_json::json!({
+                "start": start,
+                "end":   end,
+                "summary": "Lunch",
+                "recurrence": ["RRULE:FREQ=WEEKLY"],
+                "reminders": { "useDefault": false,
+                               "overrides": [{ "method": "popup", "minutes": 10 }] },
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                expected_body[k] = val.clone();
+            }
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .and(wiremock::matchers::body_json(expected_body))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "g-new", "status": "confirmed", "etag": "\"e1\"",
+                    "summary": "Lunch", "transparency": "transparent",
+                    "start": {"dateTime": "2026-08-10T12:00:00+03:00"},
+                    "end":   {"dateTime": "2026-08-10T13:00:00+03:00"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let pool = omacal_store::connect_memory().await.unwrap();
+            let cal = seed_calendar(&pool, "owner").await;
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let id = create_via_client(&pool, cal, "cal@x.com", "UTC", fields, "none", &client)
+                .await
+                .unwrap();
+            let (row, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+            assert_eq!(row.transparency, "transparent", "the stored row is Google's answer");
+        }
     }
 
     /// An **empty** list sends no `attendees` key at all.
@@ -5044,6 +5282,8 @@ mod tests {
             // Likewise untouched, for the same reason.
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -5882,6 +6122,47 @@ mod tests {
         let body =
             edit_patch_body(&ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", &untouched);
         assert_eq!(body, serde_json::json!({}));
+    }
+
+    /// "Show as" and visibility reach the PATCH only when they differ from
+    /// the row, and each alone: changing one sends that one key and nothing
+    /// else. Echoing the stored values back, or not sending them at all (a
+    /// drag), sends nothing. Choosing Default on a private event sends
+    /// `"default"` explicitly, since an absent key would leave it private.
+    #[test]
+    fn show_as_and_visibility_are_patched_only_when_they_change() {
+        use crate::write::{Transparency, Visibility};
+        let mut ev = stored(three());
+        ev.summary = Some("Lunch".into());
+        ev.start_utc = OCCURRENCE;
+        ev.end_utc = OCCURRENCE + HOUR;
+        ev.transparency = "opaque".into();
+        ev.visibility = "private".into();
+        let patch = |after: &crate::write::EventFields| {
+            edit_patch_body(&ev, OCCURRENCE, OCCURRENCE + HOUR, OCCURRENCE, "UTC", after)
+        };
+
+        let untouched = form("Lunch", OCCURRENCE, OCCURRENCE + HOUR);
+        assert_eq!(patch(&untouched), serde_json::json!({}));
+
+        let echoed = crate::write::EventFields {
+            transparency: Some(Transparency::Opaque),
+            visibility: Some(Visibility::Private),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&echoed), serde_json::json!({}), "unchanged values reached the wire");
+
+        let free = crate::write::EventFields {
+            transparency: Some(Transparency::Transparent),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&free), serde_json::json!({ "transparency": "transparent" }));
+
+        let back_to_default = crate::write::EventFields {
+            visibility: Some(Visibility::Default),
+            ..untouched.clone()
+        };
+        assert_eq!(patch(&back_to_default), serde_json::json!({ "visibility": "default" }));
     }
 
     /// Reminders the user did not touch send **no `reminders` at all** —
@@ -7001,6 +7282,8 @@ mod tests {
             "summary": "Standup",
             "recurrence": rules,
             "attendees": wire_guests(),
+            // What Google returns for an event on the calendar's defaults.
+            "reminders": {"useDefault": true},
             "start": {"dateTime": omacal_sync::to_rfc3339(DTSTART)},
             "end":   {"dateTime": omacal_sync::to_rfc3339(DTSTART + HOUR)}
         })
@@ -7714,6 +7997,255 @@ mod tests {
         let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
         let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
         assert_eq!(body["conferenceData"], conference);
+    }
+
+    /// Reminders travel to the tail like "Show as" does: the form's when it
+    /// set them, and the series' own otherwise. The tail is an INSERT, so
+    /// leaving them out quietly swapped a series' own reminders for the
+    /// calendar's defaults, and dropped a reminder change made on this save.
+    #[tokio::test]
+    async fn the_new_series_carries_the_series_reminders_or_the_forms() {
+        let popup = |minutes| crate::write::ReminderInput { method: "popup".into(), minutes };
+        for (form_r, want) in [
+            (
+                None,
+                serde_json::json!({"useDefault": false, "overrides": [
+                    {"method": "popup", "minutes": 25}, {"method": "email", "minutes": 1440},
+                ]}),
+            ),
+            (
+                Some(crate::write::RemindersInput { use_default: false, overrides: vec![popup(5)] }),
+                serde_json::json!({"useDefault": false, "overrides": [
+                    {"method": "popup", "minutes": 5},
+                ]}),
+            ),
+        ] {
+            let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+            let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+            let mut master = wire_master(&["RRULE:FREQ=WEEKLY"]);
+            master["reminders"] = serde_json::json!({"useDefault": false, "overrides": [
+                {"method": "popup", "minutes": 25}, {"method": "email", "minutes": 1440},
+            ]});
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(master))
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                    UNTIL_BEFORE_OCCURRENCE,
+                ])))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let after = crate::write::EventFields {
+                reminders: form_r,
+                ..form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR)
+            };
+            update_via_client(
+                &pool, "following", OCCURRENCE, ev, "cal@x.com", "UTC", after, "all", &client,
+            )
+            .await
+            .unwrap();
+
+            let sent = requests(&server).await;
+            let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+            let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+            assert_eq!(body["reminders"], want, "{body}");
+        }
+    }
+
+    /// Splitting from a moved occurrence with reminders of its own: the
+    /// dialog showed that occurrence's reminders, so the tail keeps them
+    /// rather than taking the series'.
+    #[tokio::test]
+    async fn a_split_from_a_moved_occurrence_carries_its_own_reminders() {
+        let mut ev = exception_row("master1_20260810T090000Z", OCCURRENCE, "confirmed");
+        ev.start_utc = OCCURRENCE + 5 * HOUR;
+        ev.end_utc = OCCURRENCE + 6 * HOUR;
+        ev.reminders = omacal_store::Reminders {
+            use_default: false,
+            overrides: vec![omacal_store::Reminder { method: "popup".into(), minutes: 45 }],
+        };
+        let clicked = ev.start_utc;
+        let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let server = wiremock::MockServer::start().await;
+        mount_master(&server, &["RRULE:FREQ=WEEKLY"]).await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(clicked)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                UNTIL_BEFORE_OCCURRENCE,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            clicked,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Standup", clicked, clicked + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let sent = requests(&server).await;
+        let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+        let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        assert_eq!(
+            body["reminders"],
+            serde_json::json!({"useDefault": false, "overrides": [{"method": "popup", "minutes": 45}]}),
+            "{body}"
+        );
+    }
+
+    /// "Show as" and visibility the form did not touch travel to the tail
+    /// from the master, as Google spelled them (confidential included, which
+    /// the form cannot set); a value the form did set wins.
+    #[tokio::test]
+    async fn the_new_series_carries_the_masters_show_as_and_visibility() {
+        for (form_t, want_t) in [
+            (None, "transparent"),
+            (Some(crate::write::Transparency::Opaque), "absent"),
+        ] {
+            let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+            ev.transparency = "transparent".into();
+            ev.visibility = "confidential".into();
+            let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+            let mut master = wire_master(&["RRULE:FREQ=WEEKLY"]);
+            master["transparency"] = serde_json::json!("transparent");
+            master["visibility"] = serde_json::json!("confidential");
+
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(master))
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+                .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                    UNTIL_BEFORE_OCCURRENCE,
+                ])))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+            let after = crate::write::EventFields {
+                transparency: form_t,
+                ..form("Standup (from here)", OCCURRENCE, OCCURRENCE + HOUR)
+            };
+            update_via_client(
+                &pool, "following", OCCURRENCE, ev, "cal@x.com", "UTC", after, "all", &client,
+            )
+            .await
+            .unwrap();
+
+            let sent = requests(&server).await;
+            let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+            let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+            assert_eq!(body["visibility"], "confidential", "untouched visibility is the master's");
+            match want_t {
+                "absent" => assert!(body.get("transparency").is_none(), "{body}"),
+                t => assert_eq!(body["transparency"], t),
+            }
+        }
+    }
+
+    /// Splitting from a moved occurrence that was set to Free and Private, on
+    /// a busy series: the dialog showed Free and Private, and the user left
+    /// both alone, so the tail is free and private too. Falling back to the
+    /// master instead turned the rest of the series busy and default.
+    #[tokio::test]
+    async fn a_split_from_a_moved_occurrence_carries_its_own_show_as_and_visibility() {
+        let mut ev = exception_row("master1_20260810T090000Z", OCCURRENCE, "confirmed");
+        ev.start_utc = OCCURRENCE + 5 * HOUR;
+        ev.end_utc = OCCURRENCE + 6 * HOUR;
+        ev.transparency = "transparent".into();
+        ev.visibility = "private".into();
+        let clicked = ev.start_utc;
+        let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let server = wiremock::MockServer::start().await;
+        mount_master(&server, &["RRULE:FREQ=WEEKLY"]).await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(clicked)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire_master(&[
+                UNTIL_BEFORE_OCCURRENCE,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            clicked,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Standup", clicked, clicked + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let sent = requests(&server).await;
+        let post = sent.iter().find(|r| r.method.as_str() == "POST").expect("no tail create");
+        let body: serde_json::Value = serde_json::from_slice(&post.body).unwrap();
+        assert_eq!(body["transparency"], "transparent", "the occurrence's Free was dropped: {body}");
+        assert_eq!(body["visibility"], "private", "the occurrence's Private was dropped: {body}");
     }
 
     /// The truncation carries the ending and nothing else.

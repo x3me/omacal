@@ -177,7 +177,7 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                     }
                 },
             };
-            match crate::events::create_event_body(state, calendar_id, fields, &send_updates)
+            match crate::events::create_event_body(state, calendar_id, fields, &send_updates, None)
                 .await
             {
                 Ok(detail) => ok_env(serde_json::json!(detail)),
@@ -478,7 +478,6 @@ mod tests {
             quit_on_close: Default::default(),
             open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS),
-            sync_gate: std::sync::Arc::new(crate::sync_loop::SyncGate::new()),
         };
 
         // Dropped at the end of the test, socket and all.

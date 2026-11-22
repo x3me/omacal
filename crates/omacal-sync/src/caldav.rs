@@ -17,7 +17,7 @@
 //! Tasks (VTODO) sync in the same pass under the same ctag: one collection,
 //! one answer to "anything changed?".
 
-use omacal_caldav::{CalDavClient, CalDavError, CalEvent, IcsTime};
+use omacal_caldav::{CalDavClient, CalDavError, CalEvent, DiscoveredCalendar, IcsTime};
 use omacal_store::StoredEvent;
 use sqlx::SqlitePool;
 
@@ -132,6 +132,24 @@ pub fn caldav_to_stored(
         sequence: ev.sequence,
         organizer_email: ev.organizer_email.clone(),
         guests_can_modify: false,
+        // CalDAV's words mapped onto Google's, the store's one vocabulary. An
+        // absent `TRANSP` is `OPAQUE` by the RFC; an absent `CLASS` is
+        // Google's `default` (the RFC would say `PUBLIC`, but the user never
+        // chose that, and writing it back on the next save would be a change
+        // nobody made). An extension `CLASS` value nobody here understands
+        // reads as `default` too.
+        transparency: match ev.transp.as_deref() {
+            Some("TRANSPARENT") => "transparent",
+            _ => "opaque",
+        }
+        .to_string(),
+        visibility: match ev.class.as_deref() {
+            Some("PUBLIC") => "public",
+            Some("PRIVATE") => "private",
+            Some("CONFIDENTIAL") => "confidential",
+            _ => "default",
+        }
+        .to_string(),
         attendees: ev
             .attendees
             .iter()
@@ -202,56 +220,6 @@ pub async fn sync_caldav_calendar(
     window_end_ms: i64,
     now_ms: i64,
 ) -> Result<SyncOutcome, CalDavError> {
-    sync_caldav_fetch(
-        pool,
-        client,
-        calendar_id,
-        collection_url,
-        supports_events,
-        supports_tasks,
-        &[(window_start_ms, window_end_ms)],
-        window_start_ms,
-        window_end_ms,
-        true,
-        true,
-        now_ms,
-    )
-    .await
-}
-
-/// [`sync_caldav_calendar`] over one or more report ranges.
-///
-/// `record_start_ms`/`record_end_ms` are what `sync_state` keeps afterwards.
-/// A full sync records the range it asked about. A post-write resync asks
-/// about the recent window — and the saved event, when that sits outside it —
-/// but records the window the calendar already had, so one save cannot shrink
-/// the span a later sync believes it has fetched.
-///
-/// `masters_in_reach` is true for that full sync: a master the report did not
-/// return is gone, because a report over the whole window would have named
-/// every series that occurs in it. A resync sets it false. Its report never
-/// asked about a series that ended earlier, and deleting those masters would
-/// throw away the history a longer span exists to keep.
-///
-/// `record_ctag` is false when a save on a longer span found the calendar
-/// had already changed before the write. The narrow report is still applied,
-/// but the stored ctag stays, so the next sync does the full pass and can
-/// reap a series that report never asked about.
-#[allow(clippy::too_many_arguments)]
-pub async fn sync_caldav_fetch(
-    pool: &SqlitePool,
-    client: &CalDavClient,
-    calendar_id: i64,
-    collection_url: &str,
-    supports_events: bool,
-    supports_tasks: bool,
-    ranges: &[(i64, i64)],
-    record_start_ms: i64,
-    record_end_ms: i64,
-    masters_in_reach: bool,
-    record_ctag: bool,
-    now_ms: i64,
-) -> Result<SyncOutcome, CalDavError> {
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
         .bind(calendar_id)
         .fetch_one(pool)
@@ -277,13 +245,9 @@ pub async fn sync_caldav_fetch(
             .flatten();
 
     // An unchanged ctag means nothing was edited — but it says nothing about
-    // what the window has newly reached, so the window check gets a say
+    // what the window has newly reached, so the day-advance check gets a say
     // before the short-circuit. See `crate::window_needs_refetch`.
     let ctag = client.ctag(collection_url).await?;
-    // A save that raced another change keeps the ctag it already had. This
-    // probe is the one after the write, and storing that would tell the next
-    // sync nothing had changed.
-    let token = if record_ctag { &ctag } else { &stored_ctag };
     // `supports_events` gates the check, because the window write below is
     // inside that branch: a tasks-only collection never records one, so an
     // ungated check would read "no window" for ever and refetch its tasks on
@@ -291,7 +255,7 @@ pub async fn sync_caldav_fetch(
     if ctag.is_some()
         && ctag == stored_ctag
         && !(supports_events
-            && crate::window_needs_refetch(pool, calendar_id, record_start_ms, record_end_ms).await)
+            && crate::window_needs_refetch(pool, calendar_id, window_start_ms, window_end_ms).await)
     {
         return Ok(SyncOutcome::default());
     }
@@ -299,12 +263,29 @@ pub async fn sync_caldav_fetch(
     let mut outcome = SyncOutcome::default();
 
     if supports_events {
-        // Fetched before the write transaction: a REPORT must not hold the
-        // database lock.
-        let mut fetched = Vec::with_capacity(ranges.len());
-        for &(start_ms, end_ms) in ranges {
-            let resources = client.events_in_window(collection_url, start_ms, end_ms).await?;
-            fetched.push((start_ms, end_ms, resources));
+        let resources = client
+            .events_in_window(collection_url, window_start_ms, window_end_ms)
+            .await?;
+        let mut seen: Vec<String> = Vec::new();
+        let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
+        for res in &resources {
+            let Some(root) = omacal_caldav::parse(&res.ics) else {
+                tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
+                continue;
+            };
+            for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
+                let Some(stored) =
+                    caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
+                else {
+                    tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
+                    continue;
+                };
+                seen.push(stored.google_id.clone());
+                // The master (first, by events_in's ordering) carries the
+                // resource pointer and raw bytes for the write path.
+                let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
+                rows.push((stored, src));
+            }
         }
 
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(anyhow::Error::from)?;
@@ -318,62 +299,44 @@ pub async fn sync_caldav_fetch(
             tx.rollback().await.map_err(anyhow::Error::from)?;
             return Ok(SyncOutcome::default());
         }
+        // Read before this sync writes its own cursor below: a first sync
+        // is the baseline, not news (`forget_baseline_changes`).
+        let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
 
-        for (start_ms, end_ms, resources) in &fetched {
-            let mut seen: Vec<String> = Vec::new();
-            let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
-            for res in resources {
-                let Some(root) = omacal_caldav::parse(&res.ics) else {
-                    tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
-                    continue;
-                };
-                for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
-                    let Some(stored) =
-                        caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
-                    else {
-                        tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
-                        continue;
-                    };
-                    seen.push(stored.google_id.clone());
-                    // The master (first, by events_in's ordering) carries the
-                    // resource pointer and raw bytes for the write path.
-                    let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
-                    rows.push((stored, src));
-                }
+        for (row, src) in &rows {
+            let id = omacal_store::upsert_event(&mut *tx, row).await?;
+            if let Some((href, ics)) = src {
+                sqlx::query("UPDATE events SET caldav_href = ?2, raw_ics = ?3 WHERE id = ?1")
+                    .bind(id)
+                    .bind(href)
+                    .bind(ics)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(anyhow::Error::from)?;
             }
-
-            for (row, src) in &rows {
-                let id = omacal_store::upsert_event(&mut *tx, row).await?;
-                if let Some((href, ics)) = src {
-                    sqlx::query("UPDATE events SET caldav_href = ?2, raw_ics = ?3 WHERE id = ?1")
-                        .bind(id)
-                        .bind(href)
-                        .bind(ics)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(anyhow::Error::from)?;
-                }
-                outcome.upserted += 1;
-            }
-
-            // Each range is swept with only the names *it* returned. A union
-            // of two disjoint reports would treat everything between them as
-            // absent and delete it.
-            //
-            // **Bounded at both ends, unlike the Google sweep** — see
-            // `reap::Reach` for why each provider reaches exactly as far as
-            // its own fetch asked, and no further. A resync uses `Dated` so
-            // a series the recent window did not ask about is left alone.
-            let reach = if masters_in_reach {
-                crate::reap::Reach::Overlapping { start_ms: *start_ms, end_ms: *end_ms }
-            } else {
-                crate::reap::Reach::Dated { start_ms: *start_ms, end_ms: *end_ms }
-            };
-            let deleted = crate::reap::delete_unnamed(&mut tx, calendar_id, &seen, reach)
-                .await
-                .map_err(anyhow::Error::from)?;
-            outcome.deleted += deleted as usize;
+            outcome.upserted += 1;
         }
+
+        // Inferred deletions, bounded to what the query would have returned:
+        // anything alive in (or recurring into) the window that the server
+        // did not mention no longer exists.
+        //
+        // **Bounded at both ends, unlike the Google sweep** — see
+        // `reap::Reach` for why each provider reaches exactly as far as its
+        // own fetch asked, and no further.
+        let deleted = crate::reap::delete_unnamed(
+            &mut tx,
+            calendar_id,
+            &seen,
+            crate::reap::Reach::Overlapping { start_ms: window_start_ms, end_ms: window_end_ms },
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+        outcome.deleted += deleted as usize;
+
+        let window_start_ms = omacal_store::history::retain_current_history(
+            &mut tx, calendar_id, window_start_ms, jiff::Timestamp::now().as_millisecond(),
+        ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(
             "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
@@ -384,12 +347,15 @@ pub async fn sync_caldav_fetch(
                  window_end = excluded.window_end",
         )
         .bind(calendar_id)
-        .bind(token)
-        .bind(record_start_ms)
-        .bind(record_end_ms)
+        .bind(&ctag)
+        .bind(window_start_ms)
+        .bind(window_end_ms)
         .execute(&mut *tx)
         .await
         .map_err(anyhow::Error::from)?;
+        if first_sync {
+            omacal_store::forget_baseline_changes(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
+        }
         tx.commit().await.map_err(anyhow::Error::from)?;
     }
 
@@ -456,9 +422,9 @@ pub async fn sync_caldav_fetch(
                      window_start = excluded.window_start, window_end = excluded.window_end",
             )
             .bind(calendar_id)
-            .bind(token)
-            .bind(record_start_ms)
-            .bind(record_end_ms)
+            .bind(&ctag)
+            .bind(window_start_ms)
+            .bind(window_end_ms)
             .execute(pool)
             .await
             .map_err(anyhow::Error::from)?;
@@ -466,6 +432,162 @@ pub async fn sync_caldav_fetch(
     }
 
     Ok(outcome)
+}
+
+/// Records the collections a discovery listed for one account.
+///
+/// Like the Google upsert: the provider's fields update, the user's
+/// (`selected`, `sync_enabled`, the label and colour overrides) are never in
+/// the statement, so neither a reconnect nor a sync can undo a hide, a
+/// removal or a rename. A collection new to the account gets the schema's
+/// defaults: shown, synced.
+///
+/// `fallback_tz` is for a new collection that publishes no zone — an all-day
+/// date has to resolve against something, and the zone the user is sitting
+/// in is the only defensible guess. A known row that publishes none keeps the
+/// zone it has: this runs on every sync now, and re-guessing would move a
+/// traveller's all-day dates to wherever the laptop was last opened.
+pub async fn upsert_collections(
+    pool: &SqlitePool,
+    account_id: i64,
+    calendars: &[DiscoveredCalendar],
+    fallback_tz: &str,
+) -> anyhow::Result<()> {
+    for cal in calendars {
+        sqlx::query(
+            "INSERT INTO calendars
+                (account_id, google_id, summary, color_hex, timezone, access_role,
+                 is_primary, supports_events, supports_tasks)
+             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ?9), ?6, 0, ?7, ?8)
+             ON CONFLICT (account_id, google_id) DO UPDATE SET
+                summary = excluded.summary,
+                color_hex = excluded.color_hex,
+                timezone = COALESCE(?5, calendars.timezone),
+                access_role = excluded.access_role,
+                supports_events = excluded.supports_events,
+                supports_tasks = excluded.supports_tasks",
+        )
+        .bind(account_id)
+        .bind(&cal.url)
+        .bind(&cal.display_name)
+        .bind(&cal.color)
+        .bind(cal.timezone.as_deref())
+        .bind(if cal.read_only { "reader" } else { "owner" })
+        .bind(cal.supports_events as i64)
+        .bind(cal.supports_tasks as i64)
+        .bind(fallback_tz)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// An error as the log may carry it: the status or the kind, never the
+/// message, which for a failed request is reqwest's and names the URL — and a
+/// Fastmail collection URL holds the account's address.
+fn log_kind(e: &CalDavError) -> String {
+    match e {
+        CalDavError::Http(status) => status.as_u16().to_string(),
+        CalDavError::Unauthorized => "unauthorized".into(),
+        CalDavError::Forbidden => "forbidden".into(),
+        CalDavError::PreconditionFailed => "precondition failed".into(),
+        CalDavError::Other(_) => "request failed".into(),
+    }
+}
+
+/// What one [`refresh_collections`] changed, for the log.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionsRefresh {
+    /// Collections the listing named that the account had no row for.
+    pub added: usize,
+    /// Rows deleted because their collection is gone from the server.
+    pub removed: usize,
+}
+
+/// Brings one account's calendar list up to date with the server: a
+/// collection made on another device since the account was connected gets a
+/// row, and one deleted there loses its row.
+///
+/// Discovery used to run once, when the account was connected, so a task
+/// list made later on the phone never reached OmaCal at all, and a deleted
+/// one stayed listed, its ctag probe answering 404 on every sync.
+///
+/// **Nothing is deleted on the listing's word alone.** A failed discovery
+/// changes nothing. An empty listing changes nothing either: connecting
+/// refuses an account with no calendars, so "none" is a broken answer rather
+/// than a user who deleted everything. And a row the listing left out is
+/// deleted only once its own collection answers 404 or 410 — a listing cut
+/// short by a proxy, or a collection that still answers but no longer sits
+/// in the home set, keeps its row and its events.
+///
+/// Errors only with `Unauthorized`, so the caller can mark the account for
+/// reconnecting. Anything else is logged and the sync goes on with the rows
+/// it has: a calendar list a few minutes stale is not worth failing the
+/// sync of the calendars that are fine.
+pub async fn refresh_collections(
+    pool: &SqlitePool,
+    account_id: i64,
+    client: &CalDavClient,
+    fallback_tz: &str,
+) -> Result<CollectionsRefresh, CalDavError> {
+    let listed = match client.discover().await {
+        Ok(l) => l,
+        Err(e) if e.needs_reauth() => return Err(e),
+        // The account's own principal or calendar home refused: that is the
+        // account refused, which only a reconnect can change. Per collection
+        // a 403 is no such thing (`sync_account` skips that one collection).
+        Err(CalDavError::Forbidden) => return Err(CalDavError::Unauthorized),
+        Err(e) => {
+            tracing::warn!(account_id, error = %log_kind(&e), "collection discovery failed; calendar list unchanged");
+            return Ok(CollectionsRefresh::default());
+        }
+    };
+    if listed.is_empty() {
+        tracing::warn!(account_id, "discovery listed no collections; calendar list unchanged");
+        return Ok(CollectionsRefresh::default());
+    }
+
+    let stored: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, google_id FROM calendars WHERE account_id = ?1 ORDER BY id")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await
+            .map_err(anyhow::Error::from)?;
+
+    let mut out = CollectionsRefresh {
+        added: listed.iter().filter(|c| !stored.iter().any(|(_, url)| *url == c.url)).count(),
+        ..Default::default()
+    };
+    upsert_collections(pool, account_id, &listed, fallback_tz).await?;
+
+    for (calendar_id, url) in stored {
+        if listed.iter().any(|c| c.url == url) {
+            continue;
+        }
+        match client.ctag(&url).await {
+            Err(CalDavError::Http(status))
+                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE =>
+            {
+                omacal_store::delete_calendar(pool, calendar_id).await?;
+                out.removed += 1;
+            }
+            // Kept, and on purpose not raised: the listing just succeeded
+            // with these credentials, so a refusal on one collection is not
+            // a dead password.
+            Ok(_) => {
+                tracing::debug!(calendar_id, "collection not listed but still answers; kept");
+            }
+            Err(e) => {
+                tracing::warn!(calendar_id, error = %log_kind(&e), "collection not listed and its probe failed; kept");
+            }
+        }
+    }
+
+    if out != CollectionsRefresh::default() {
+        // Ids and counts only, like the task-list line above.
+        tracing::info!(account_id, added = out.added, removed = out.removed, "calendar list refreshed");
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -493,6 +615,31 @@ mod tests {
             conference_uri: None,
             last_modified_ms: None,
             attendees: Vec::new(),
+            transp: None,
+            class: None,
+        }
+    }
+
+    /// `TRANSP` and `CLASS` land in the store's vocabulary, and their absence
+    /// reads as busy and default, the same answer a Google event omitting both
+    /// keys gives.
+    #[test]
+    fn transp_and_class_map_onto_show_as_and_visibility() {
+        let mut ev = sample("u1");
+        let s = caldav_to_stored(&ev, 7, "Europe/Sofia", None, "").unwrap();
+        assert_eq!((s.transparency.as_str(), s.visibility.as_str()), ("opaque", "default"));
+
+        for (transp, class, want_t, want_v) in [
+            ("TRANSPARENT", "PRIVATE", "transparent", "private"),
+            ("OPAQUE", "PUBLIC", "opaque", "public"),
+            ("OPAQUE", "CONFIDENTIAL", "opaque", "confidential"),
+            ("X-WHATEVER", "X-TEAM-ONLY", "opaque", "default"),
+        ] {
+            ev.transp = Some(transp.into());
+            ev.class = Some(class.into());
+            let s = caldav_to_stored(&ev, 7, "Europe/Sofia", None, "").unwrap();
+            assert_eq!((s.transparency.as_str(), s.visibility.as_str()), (want_t, want_v),
+                       "TRANSP:{transp} CLASS:{class}");
         }
     }
 
@@ -579,6 +726,64 @@ mod tests {
     /// #145: what a task list's server sends and OmaCal cannot store is
     /// counted, not dropped without a word. One good VTODO, one resource that
     /// is not iCalendar, one VTODO with no UID: one stored, two skipped.
+    /// A collection's first sync is the baseline, as a Google calendar's
+    /// is: the moved occurrences it brings in were never news to the user.
+    /// A move after it is.
+    #[tokio::test]
+    async fn a_collections_first_sync_is_a_baseline_and_later_moves_are_news() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        fn ics(moved_to: &str) -> String {
+            format!(
+                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
+                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\n\
+                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:20260810T060000Z&#13;\nDTSTART:{moved_to}&#13;\n\
+                 DTEND:20260811T090000Z&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\nEND:VCALENDAR&#13;\n")
+        }
+        fn multistatus(body: String) -> String {
+            format!(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">{body}</d:multistatus>"#)
+        }
+        async fn serve(server: &MockServer, ctag: &str, moved_to: &str) {
+            server.reset().await;
+            Mock::given(method("PROPFIND"))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
+                    "<d:response><d:href>/cal/</d:href><d:propstat><d:prop><cs:getctag>{ctag}</cs:getctag></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"))))
+                .mount(server).await;
+            Mock::given(method("REPORT"))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
+                    "<d:response><d:href>/cal/s1.ics</d:href><d:propstat><d:prop><d:getetag>\"{ctag}\"</d:getetag>\
+                     <c:calendar-data>{}</c:calendar-data></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(moved_to)))))
+                .mount(server).await;
+        }
+        let server = MockServer::start().await;
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider) VALUES ('caldav:e@x','e@x',0,'caldav')")
+            .execute(&pool).await.unwrap();
+        let url = format!("{}/cal/", server.uri());
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, ?1, 'Work', 'UTC', 'owner')")
+            .bind(&url).execute(&pool).await.unwrap();
+        let client = omacal_caldav::CalDavClient::new(&server.uri(), "e@x", "p").unwrap();
+        let ledger = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM event_changes").fetch_one(&pool).await.unwrap()
+        };
+        let far = 4_102_444_800_000; // 2100
+
+        serve(&server, "c1", "20260811T080000Z").await;
+        sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
+        let exceptions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE recurring_event_id IS NOT NULL")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(exceptions, 1, "the fixture's premise: the moved occurrence was stored");
+        assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
+
+        serve(&server, "c2", "20260811T083000Z").await;
+        sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
+        assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
+    }
+
     #[tokio::test]
     async fn a_task_resource_that_cannot_be_read_is_counted_not_silently_dropped() {
         use wiremock::matchers::method;
@@ -633,4 +838,308 @@ mod tests {
         let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
         assert_eq!(rows.iter().map(|r| r.task.uid.as_str()).collect::<Vec<_>>(), vec!["t-1"]);
     }
+
+    /// The collection-refresh tests' server: the discovery walk of
+    /// `omacal-caldav`'s own test, with the home's listing up to each test.
+    mod refresh {
+        use super::super::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const PRINCIPAL: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop>
+          <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+
+        const HOME: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response>
+          <d:href>/principals/p/</d:href><d:propstat><d:prop>
+          <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+
+        /// One `<d:response>` for a calendar collection in the home.
+        fn collection(name: &str, display: &str, component: &str) -> String {
+            format!(
+                r#"<d:response><d:href>/cals/p/{name}/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                <d:displayname>{display}</d:displayname>
+                <c:supported-calendar-component-set><c:comp name="{component}"/></c:supported-calendar-component-set>
+                <d:current-user-privilege-set><d:privilege><d:write/></d:privilege></d:current-user-privilege-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#
+            )
+        }
+
+        /// The home's Depth-1 listing: the home itself (not a calendar), then
+        /// `entries`.
+        fn listing(entries: &[String]) -> String {
+            format!(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"
+                     xmlns:cs="http://calendarserver.org/ns/" xmlns:ic="http://apple.com/ns/ical/">
+                <d:response><d:href>/cals/p/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/></d:resourcetype></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>{}</d:multistatus>"#,
+                entries.concat()
+            )
+        }
+
+        /// A server whose principal and home answer, and whose home listing
+        /// answers `home`.
+        async fn server(home: ResponseTemplate) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("PROPFIND")).and(path("/"))
+                .respond_with(ResponseTemplate::new(207).set_body_raw(PRINCIPAL, "application/xml"))
+                .mount(&server).await;
+            Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+                .respond_with(ResponseTemplate::new(207).set_body_raw(HOME, "application/xml"))
+                .mount(&server).await;
+            Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+                .respond_with(home)
+                .mount(&server).await;
+            server
+        }
+
+        /// A probe of one collection, as `ctag` asks it.
+        async fn probe(server: &MockServer, name: &str, answer: ResponseTemplate) {
+            Mock::given(method("PROPFIND")).and(path(format!("/cals/p/{name}/"))).and(header("Depth", "0"))
+                .respond_with(answer)
+                .mount(server).await;
+        }
+
+        /// An account holding `work` with every user choice made: hidden,
+        /// removed from syncing, its label and colour overridden, and the zone
+        /// it was given when connected. Returns the pool and the row's id.
+        async fn connected(server: &MockServer) -> (SqlitePool, i64) {
+            let pool = omacal_store::connect_memory().await.unwrap();
+            sqlx::query(
+                "INSERT INTO accounts (google_sub, email, created_at, provider)
+                 VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
+            )
+            .execute(&pool).await.unwrap();
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role,
+                                        selected, sync_enabled, label_override, color_override)
+                 VALUES (1, ?1, 'Work', 'America/Chicago', 'owner', 0, 0, 'My work', '#123456')
+                 RETURNING id",
+            )
+            .bind(format!("{}/cals/p/work/", server.uri()))
+            .fetch_one(&pool).await.unwrap();
+            (pool, id)
+        }
+
+        async fn add_row(pool: &SqlitePool, server: &MockServer, name: &str) -> i64 {
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (1, ?1, ?2, 'UTC', 'owner') RETURNING id",
+            )
+            .bind(format!("{}/cals/p/{name}/", server.uri()))
+            .bind(name)
+            .fetch_one(pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, updated_at)
+                 VALUES (?1, 'ev', 0, 1, 'UTC', 'UTC', 0)",
+            )
+            .bind(id)
+            .execute(pool).await.unwrap();
+            id
+        }
+
+        async fn ids(pool: &SqlitePool) -> Vec<i64> {
+            sqlx::query_scalar("SELECT id FROM calendars ORDER BY id").fetch_all(pool).await.unwrap()
+        }
+
+        /// A task list made on the phone after the account was connected is
+        /// listed on the next refresh, as a tasks-only list, shown and synced;
+        /// and the row that was already there keeps every choice the user made
+        /// on it, and the zone it already had (the listing publishes none).
+        #[tokio::test]
+        async fn a_collection_made_elsewhere_is_added_and_the_known_one_keeps_its_choices() {
+            let server = server(ResponseTemplate::new(207).set_body_string(listing(&[
+                collection("work", "Work (renamed)", "VEVENT"),
+                collection("bernard", "Bernard", "VTODO"),
+            ])))
+            .await;
+            let (pool, work) = connected(&server).await;
+            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+            let out = refresh_collections(&pool, 1, &client, "Europe/Sofia").await.unwrap();
+            assert_eq!(out, CollectionsRefresh { added: 1, removed: 0 });
+
+            type Row = (String, i64, i64, i64, i64, String);
+            let bernard: Row = sqlx::query_as(
+                "SELECT summary, supports_events, supports_tasks, selected, sync_enabled, timezone
+                 FROM calendars WHERE google_id = ?1",
+            )
+            .bind(format!("{}/cals/p/bernard/", server.uri()))
+            .fetch_one(&pool).await.unwrap();
+            assert_eq!(bernard, ("Bernard".into(), 0, 1, 1, 1, "Europe/Sofia".into()));
+
+            type Kept = (String, i64, i64, Option<String>, Option<String>, String);
+            let kept: Kept = sqlx::query_as(
+                "SELECT summary, selected, sync_enabled, label_override, color_override, timezone
+                 FROM calendars WHERE id = ?1",
+            )
+            .bind(work)
+            .fetch_one(&pool).await.unwrap();
+            assert_eq!(kept, ("Work (renamed)".into(), 0, 0, Some("My work".into()), Some("#123456".into()),
+                              "America/Chicago".into()),
+                       "the server's name updates; hidden, removed, label, colour and zone stay");
+
+            let again = refresh_collections(&pool, 1, &client, "Europe/Sofia").await.unwrap();
+            assert_eq!(again, CollectionsRefresh::default(), "a second refresh finds nothing new");
+            assert_eq!(ids(&pool).await.len(), 2);
+        }
+
+        /// A collection the listing leaves out goes only on its own 404 or
+        /// 410. One that still answers, one whose probe fails, and one whose
+        /// probe is refused all stay with their events — and the refusal does
+        /// not fail the refresh, since the listing just succeeded.
+        #[tokio::test]
+        async fn an_unlisted_collection_goes_only_when_it_answers_not_found() {
+            let server = server(ResponseTemplate::new(207).set_body_string(listing(&[
+                collection("work", "Work", "VEVENT"),
+            ])))
+            .await;
+            let (pool, work) = connected(&server).await;
+            let deleted = add_row(&pool, &server, "deleted").await;
+            let gone = add_row(&pool, &server, "gone").await;
+            let alive = add_row(&pool, &server, "alive").await;
+            let flaky = add_row(&pool, &server, "flaky").await;
+            let refused = add_row(&pool, &server, "refused").await;
+            probe(&server, "deleted", ResponseTemplate::new(404)).await;
+            probe(&server, "gone", ResponseTemplate::new(410)).await;
+            probe(&server, "alive", ResponseTemplate::new(207).set_body_string(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+                <d:response><d:href>/cals/p/alive/</d:href><d:propstat><d:prop><cs:getctag>c</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+            )).await;
+            probe(&server, "flaky", ResponseTemplate::new(502)).await;
+            probe(&server, "refused", ResponseTemplate::new(403)).await;
+            let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+            let out = refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+            assert_eq!(out, CollectionsRefresh { added: 0, removed: 2 });
+            assert_eq!(ids(&pool).await, vec![work, alive, flaky, refused]);
+            assert!(!ids(&pool).await.contains(&deleted) && !ids(&pool).await.contains(&gone));
+            let events: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM events ORDER BY calendar_id")
+                .fetch_all(&pool).await.unwrap();
+            assert_eq!(events, vec![alive, flaky, refused], "the kept rows keep their events");
+        }
+
+        /// A listing that fails, or names nothing, changes nothing — not even
+        /// for a collection that would answer 404 — and does not fail the
+        /// sync. A refused password does, so the account can be marked.
+        #[tokio::test]
+        async fn a_failed_or_empty_listing_touches_nothing() {
+            for home in [ResponseTemplate::new(502), ResponseTemplate::new(207).set_body_string(listing(&[]))] {
+                let server = server(home).await;
+                let (pool, work) = connected(&server).await;
+                let deleted = add_row(&pool, &server, "deleted").await;
+                probe(&server, "work", ResponseTemplate::new(404)).await;
+                probe(&server, "deleted", ResponseTemplate::new(404)).await;
+                let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+                let out = refresh_collections(&pool, 1, &client, "UTC").await.unwrap();
+                assert_eq!(out, CollectionsRefresh::default());
+                assert_eq!(ids(&pool).await, vec![work, deleted]);
+            }
+
+            // A refusal of the account's own calendar home is a refusal of the
+            // account, not of one collection: it asks for a reconnect, as a
+            // wrong password does. Anything quieter and every collection
+            // would go stale with nothing on screen to say why.
+            for refused in [401, 403] {
+                let server = server(ResponseTemplate::new(refused)).await;
+                let (pool, _) = connected(&server).await;
+                let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+                assert!(
+                    matches!(refresh_collections(&pool, 1, &client, "UTC").await, Err(CalDavError::Unauthorized)),
+                    "{refused}"
+                );
+            }
+        }
+    }
+
+    /// Pause after the REPORT reaches the server, then shorten history before
+    /// its old response is applied. No scheduling sleep decides the ordering.
+    #[tokio::test]
+    async fn a_caldav_fetch_cannot_undo_a_history_shrink() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let seen = entered.clone();
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>new</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.notify_one();
+                ResponseTemplate::new(207).set_body_string(
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/old.ics</d:href><d:propstat><d:prop><c:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:old\r\nDTSTART:20000101T090000Z\r\nDTEND:20000101T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>")
+            }).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        const DAY: i64 = 86_400_000;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let floor = now - 180 * DAY;
+        // Stop polling the sync after REPORT is observed, commit the shorter
+        // span, then resume it: apply necessarily sees the committed change.
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        let fetched = sync_caldav_calendar(&pool, &client, 1, &collection,
+            true, false, -2_208_988_800_000, now + 365 * DAY, now);
+        tokio::pin!(fetched);
+        tokio::select! {
+            _ = entered.notified() => {},
+            result = &mut fetched => panic!("sync finished before shrink: {result:?}"),
+        }
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months', '6')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (1, 'before', ?1, ?2)")
+            .bind(floor).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        let outcome = fetched.await.unwrap();
+        assert_eq!(outcome.upserted, 1, "the old event really reached apply");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id = 'old'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "the in-flight REPORT must not restore old rows");
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+
+    /// A ctag describes server edits, not how much history was requested.
+    /// Widening must REPORT even when that tag has not changed; the same
+    /// window and a shorter one need no additional download.
+    #[tokio::test]
+    async fn wider_caldav_history_refetches_an_unchanged_collection() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>same</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:"/>"#))
+            .expect(2).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        const DAY: i64 = 86_400_000;
+        let now = 1_786_341_600_000;
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (1, 'same', ?1, ?2)")
+            .bind(now - 180 * DAY).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        for (start, reports) in [(now - 180 * DAY, 0), (now - 730 * DAY, 1),
+                                 (-2_208_988_800_000, 2), (now - 180 * DAY, 2)] {
+            sync_caldav_calendar(&pool, &client, 1, &collection, true, false,
+                start, now + 365 * DAY, now).await.unwrap();
+            let count = server.received_requests().await.unwrap().iter()
+                .filter(|r| r.method.as_str() == "REPORT").count();
+            assert_eq!(count, reports, "start {start}");
+        }
+    }
+
 }

@@ -2,8 +2,8 @@ import { test, expect } from '@playwright/test';
 import { calendarColor, offerableCalendarId, writableCalendars, type Calendar } from '../src/lib/calendars';
 import type { EventDetail } from '../src/lib/eventdetail';
 import {
-  addGuest, blankValue, blankValueAt, endAfterStart, isAddress, mailableGuests, pastedValue,
-  locationForVideoCall, previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
+  addGuest, blankValue, blankValueAt, duplicatedValue, endAfterStart, isAddress, mailableGuests, pastedValue,
+  locationForVideoCall, onlyShowAsChanged, previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
   repeatEndProblem, sameRepeatEnd, sameVideoCall, sameWeeklyDays, shiftedEndDate,
   toEventInput, toggledGuestOptional,
   toggledWeeklyDay, valueFromDetail, videoCallProblem, weekdayCodeForDate, whenOf,
@@ -381,6 +381,30 @@ test.describe('pastedValue', () => {
     expect(r.emailReminders).toEqual([]);
   });
 
+  /**
+   * A copy of a private or free event stays private or free. Starting from
+   * the blank form made it Busy and Default, which on a shared calendar
+   * publishes the details of an event its author had hidden. Confidential
+   * cannot be set from the form, so it lands as the nearest it can be:
+   * private, never the more open default.
+   */
+  test('Show as and visibility cross over, and the create sends them', () => {
+    for (const make of [pastedValue, duplicatedValue]) {
+      const free = { ...copied(), showAs: 'free' as const, visibility: 'private' as const };
+      const r = make(free, blank());
+      expect([r.showAs, r.visibility], make.name).toEqual(['free', 'private']);
+      const input = toEventInput(r, r, 'Europe/Sofia');
+      expect([input.transparency, input.visibility], make.name).toEqual(['transparent', 'private']);
+
+      const secret = make({ ...copied(), visibility: 'confidential' }, blank());
+      expect(secret.visibility, make.name).toBe('private');
+      expect(toEventInput(secret, secret, 'Europe/Sofia').visibility, make.name).toBe('private');
+
+      const plain = make(copied(), blank());
+      expect([plain.showAs, plain.visibility], make.name).toEqual(['busy', 'default']);
+    }
+  });
+
   test('a span keeps its length in days — timed across midnight, and all-day', () => {
     const overnight = {
       ...copied(), date: '2026-08-05', start: '23:00', endDate: '2026-08-07', end: '01:00',
@@ -604,7 +628,8 @@ const timedDetail = (startMs: number, endMs: number): EventDetail => ({
   start_date: null, end_date: null, is_all_day: false,
   is_recurring: false, is_series_exception: false, recurrence: null, repeat: 'never', weekly_days: [],
   repeat_end: { kind: 'never' }, color: null,
-  organizer_email: null, self_response: null, can_respond: true, can_edit: true, is_organizer: true, guests_can_modify: false, mails_guests: true,
+  organizer_email: null, self_response: null, can_respond: true, can_edit: true, is_organizer: true, guests_can_modify: false,
+  transparency: 'opaque', visibility: 'default', mails_guests: true,
   attendees: [],
   reminders: { use_default: true, overrides: [] }, calendar_default_reminders: [],
 });
@@ -2513,6 +2538,77 @@ test.describe('video calls in the value and on the wire', () => {
       { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'conference' },
       { provider: 'zoom', uri: 'https://zoom.us/j/1', source: 'location' },
     )).toBe(true);
+  });
+});
+
+// --- Show as and visibility -----------------------------------------------
+
+test.describe('show as and visibility in the value and on the wire', () => {
+  const stored = (o: Partial<EventDetail>): EventDetail => ({
+    ...timedDetail(1_785_398_400_000, 1_785_400_200_000), ...o,
+  });
+  const opened = (d: EventDetail) => valueFromDetail(d, d.start_ms, d.end_ms);
+
+  test('an edit opens on the stored values', () => {
+    const value = opened(stored({ transparency: 'transparent', visibility: 'confidential' }));
+    expect([value.showAs, value.visibility]).toEqual(['free', 'confidential']);
+    const plain = opened(stored({}));
+    expect([plain.showAs, plain.visibility]).toEqual(['busy', 'default']);
+  });
+
+  test('an untouched edit sends neither, whatever the stored values are', () => {
+    for (const d of [stored({}), stored({ transparency: 'transparent', visibility: 'private' })]) {
+      const input = toEventInput(opened(d), opened(d), TZ);
+      expect('transparency' in input || 'visibility' in input).toBe(false);
+    }
+  });
+
+  test('an edit sends only the one that changed, Default included', () => {
+    const d = stored({ visibility: 'private' });
+    const free = { ...opened(d), showAs: 'free' as const };
+    const input = toEventInput(free, opened(d), TZ);
+    expect(input.transparency).toBe('transparent');
+    expect('visibility' in input).toBe(false);
+
+    // Back to Default is a real change and is sent as one; an absent key
+    // would leave the event private.
+    const back = { ...opened(d), visibility: 'default' as const };
+    expect(toEventInput(back, opened(d), TZ).visibility).toBe('default');
+  });
+
+  test('a create sends only what is not the default', () => {
+    const blank = blankValueAt(1_785_398_400_000, 1);
+    expect([blank.showAs, blank.visibility]).toEqual(['busy', 'default']);
+    const plain = toEventInput(blank, blank, TZ);
+    expect('transparency' in plain || 'visibility' in plain).toBe(false);
+
+    const chosen = { ...blank, showAs: 'free' as const, visibility: 'public' as const };
+    const input = toEventInput(chosen, blank, TZ);
+    expect([input.transparency, input.visibility]).toEqual(['transparent', 'public']);
+  });
+
+  test('onlyShowAsChanged is true for those two fields alone, on an edit', () => {
+    const d = stored({});
+    const initial = opened(d);
+    expect(onlyShowAsChanged(initial, initial, TZ, 'this')).toBe(false);
+    expect(onlyShowAsChanged({ ...initial, showAs: 'free' }, initial, TZ, 'this')).toBe(true);
+    expect(onlyShowAsChanged({ ...initial, visibility: 'private' }, initial, TZ, 'this')).toBe(true);
+    expect(onlyShowAsChanged({ ...initial, showAs: 'free', title: 'Renamed' }, initial, TZ, 'this'))
+      .toBe(false);
+    expect(onlyShowAsChanged({ ...initial, showAs: 'free', calendarId: 2 }, initial, TZ, 'this'))
+      .toBe(false);
+    const blank = blankValueAt(1_785_398_400_000, 1);
+    expect(onlyShowAsChanged({ ...blank, showAs: 'free' }, blank, TZ, 'this')).toBe(false);
+  });
+
+  test('onlyShowAsChanged is never true for This and following', () => {
+    // That save splits the series into a new tail event, created with the
+    // guest list: news to every guest, whichever field prompted it.
+    const initial = { ...opened(stored({})), isRecurring: true };
+    const freed = { ...initial, showAs: 'free' as const };
+    expect(onlyShowAsChanged(freed, initial, TZ, 'following')).toBe(false);
+    expect(onlyShowAsChanged(freed, initial, TZ, 'this')).toBe(true);
+    expect(onlyShowAsChanged(freed, initial, TZ, 'all')).toBe(true);
   });
 });
 

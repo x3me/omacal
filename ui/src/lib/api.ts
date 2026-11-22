@@ -27,6 +27,13 @@ export type UiEvent = {
    *  "no" is not this — that is `response`, and it already strikes the
    *  block through. */
   all_guests_declined: boolean;
+  /** "Show as", in the store's vocabulary. A free (`transparent`) event
+   *  draws its colour bar as an outline instead of a solid stripe, the way
+   *  Fantastical marks time you are still available in. */
+  transparency: 'opaque' | 'transparent';
+  /** Private and confidential both put a lock in the block's corner; the
+   *  views never tell those two apart. */
+  visibility: 'default' | 'public' | 'private' | 'confidential';
   /** All underlying occurrences when several calendars share this display. */
   copies?: EventCopy[];
   /** Drawn where a change the user just made puts it, while that change is
@@ -42,6 +49,10 @@ export type UiEvent = {
  *  event, not choose a destination. It is also what routes the click around
  *  the AppImage environment that crashes a spawned browser (issue #1). */
 export const openConference = (id: number) => invoke<void>('open_conference', { id });
+/** Opens a clicked link through the backend (`commands::open_link`), which
+ *  opens web links only and keeps the AppImage environment out of the
+ *  browser. Never the webview's own `target="_blank"`. */
+export const openLink = (url: string) => invoke<void>('open_link', { url });
 
 /** Saves one occurrence as an `.ics` the user names (#113). Resolves to the
  *  path written, or `null` when the chooser was dismissed — a cancel is an

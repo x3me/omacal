@@ -106,6 +106,19 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// How many civil days an all-day series' occurrences span, read off the
+/// master's own two dates in the series' zone, never off its length in
+/// milliseconds. At least one: an all-day event covers its day.
+fn all_day_span_days(series: &Series) -> u64 {
+    let date = |ms: i64| {
+        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, series.dtstart_tz), "%Y-%m-%d").ok()
+    };
+    match (date(series.dtstart_ms), date(series.dtstart_ms + series.duration_ms)) {
+        (Some(first), Some(end)) => (end - first).num_days().max(1) as u64,
+        _ => 1,
+    }
+}
+
 const DAY_MS: i64 = 24 * 3_600_000;
 
 /// Whether every rule in `recurrence` has finished before `from_ms`, so
@@ -119,7 +132,7 @@ const DAY_MS: i64 = 24 * 3_600_000;
 fn rule_ended_before(recurrence: &[String], _dtstart_ms: i64, from_ms: i64, duration_ms: i64) -> bool {
     if recurrence.iter().any(|line| {
         let t = line.trim();
-        t.len() >= 5 && t[..5].eq_ignore_ascii_case("RDATE")
+        t.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("RDATE"))
     }) {
         return false;
     }
@@ -157,16 +170,17 @@ fn until_ms(upper: &str) -> Option<i64> {
     if token.len() < 8 {
         return None;
     }
-    let y: i16 = token[0..4].parse().ok()?;
-    let m: i8 = token[4..6].parse().ok()?;
-    let d: i8 = token[6..8].parse().ok()?;
+    let y: i16 = token.get(0..4)?.parse().ok()?;
+    let m: i8 = token.get(4..6)?.parse().ok()?;
+    let d: i8 = token.get(6..8)?.parse().ok()?;
     let date = jiff::civil::Date::new(y, m, d).ok()?;
     let (hh, mm, ss) = if token.len() >= 15 && token.as_bytes().get(8) == Some(&b'T') {
-        (token[9..11].parse().ok()?, token[11..13].parse().ok()?, token[13..15].parse().ok()?)
+        (token.get(9..11)?.parse().ok()?, token.get(11..13)?.parse().ok()?, token.get(13..15)?.parse().ok()?)
     } else {
         (0, 0, 0)
     };
-    date.at(hh, mm, ss, 0).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
+    let time = jiff::civil::Time::new(hh, mm, ss, 0).ok()?;
+    date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
@@ -226,16 +240,30 @@ pub fn expand(
         .before(to_chrono(to_ms)?)
         .all(limit);
 
+    let span_days = all_day_span_days(series);
     let intervals = result
         .dates
         .into_iter()
         .map(|d| {
-            let start = if series.is_all_day {
-                midnight_in_zone(d.date_naive(), zone)
+            if series.is_all_day {
+                // Both ends are midnights of civil dates, so the occurrence
+                // covers whole days whatever their length. The master's
+                // duration in milliseconds is only right on days as long as
+                // the master's own: on a 25-hour fall-back day it ended an
+                // hour short of midnight, and a master on a 23-hour
+                // spring-forward day ended every ordinary occurrence an hour
+                // short. Either way the span ended on the day before it
+                // started, and the occurrence vanished.
+                let date = d.date_naive();
+                let last = date + chrono::Days::new(span_days);
+                Interval {
+                    start_ms: midnight_in_zone(date, zone),
+                    end_ms: midnight_in_zone(last, zone),
+                }
             } else {
-                d.timestamp_millis()
-            };
-            Interval { start_ms: start, end_ms: start + series.duration_ms }
+                let start = d.timestamp_millis();
+                Interval { start_ms: start, end_ms: start + series.duration_ms }
+            }
         })
         .filter(|i| i.start_ms < to_ms && i.end_ms > from_ms)
         .collect();
@@ -757,4 +785,30 @@ mod tests {
             "an RDATE is another way for the series to occur"
         );
     }
+
+    /// Server recurrence text is not necessarily ASCII, or even a valid date.
+    /// Both the shortcut and the public expansion path must reject it safely.
+    #[test]
+    fn malformed_until_never_panics() {
+        for token in ["202É0101", "20260É01", "2026010É", "20260101T0É0000Z",
+                      "20260101T000É00Z", "20260101T00000ÉZ", "2026", "",
+                      "YYYYMMDD", "20260230", "20261301", "20261231T256000Z"] {
+            let line = format!("RRULE:FREQ=DAILY;UNTIL={token}");
+            assert_eq!(until_ms(&line), None, "{line}");
+            let recurrence = vec![line];
+            let series = Series { dtstart_ms: MON_0900_SOFIA, dtstart_tz: "UTC",
+                duration_ms: HOUR, is_all_day: false, recurrence: &recurrence };
+            let _ = expand(&series, MON_0900_SOFIA, MON_0900_SOFIA + DAY, 32);
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_recurrence_prefix_never_panics() {
+        let recurrence = vec!["RRULÉ:FREQ=DAILY;COUNT=1".into()];
+        assert!(!rule_ended_before(&recurrence, MON_0900_SOFIA, MON_0900_SOFIA, HOUR));
+        let series = Series { dtstart_ms: MON_0900_SOFIA, dtstart_tz: "UTC",
+            duration_ms: HOUR, is_all_day: false, recurrence: &recurrence };
+        let _ = expand(&series, MON_0900_SOFIA, MON_0900_SOFIA + DAY, 32);
+    }
+
 }

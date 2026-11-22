@@ -286,7 +286,7 @@
                  padding: 5px 8px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .list button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
   .list button[data-active] { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .list button.on { background: var(--accent); color: var(--on-accent, #fff); }
+  .list button.on { background: var(--accent-fill); color: var(--on-accent, #fff); }
   .note { margin-left: 10px; color: var(--muted); font-size: 11px; }
   .list button.on .note { color: inherit; opacity: .75; }
   /* A finger, not a pointer (#111 asks for tablets): rows a fingertip can

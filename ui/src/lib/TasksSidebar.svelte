@@ -379,7 +379,24 @@
     }
   }
 
+  /** The task whose × was pressed once and now asks "Delete?". A delete goes
+   *  to the server at once and has no undo, so one stray click on a 14px
+   *  target must not be enough. */
+  let askingDelete = $state<number | null>(null);
+
+  /** The first press: the × becomes "Delete?", focused, so Enter or a
+   *  second click confirms, and Escape or the pointer leaving it does not.
+   *  Not on blur: WebKit blurs a focused button on the mousedown of a click
+   *  on that same button, which cancelled the confirmation under the click
+   *  meant to give it. */
+  function askToDelete(task: Task, button: HTMLElement) {
+    const row = button.parentElement;
+    askingDelete = task.id;
+    void tick().then(() => row?.querySelector<HTMLButtonElement>('.del.confirm')?.focus());
+  }
+
   async function remove(task: Task) {
+    askingDelete = null;
     note = null;
     try {
       if (editingId === task.id) editingId = null;
@@ -806,7 +823,15 @@
                 </span>
               {/if}
               {#if t.canWrite}
-                <button class="del" aria-label="Delete {t.summary}" onclick={() => remove(t)}>×</button>
+                {#if askingDelete === t.id}
+                  <button class="del confirm" aria-label="Confirm delete {t.summary}"
+                          onclick={() => remove(t)}
+                          onpointerleave={() => { if (askingDelete === t.id) askingDelete = null; }}
+                          onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); askingDelete = null; } }}>Delete?</button>
+                {:else}
+                  <button class="del" aria-label="Delete {t.summary}"
+                          onclick={(e) => askToDelete(t, e.currentTarget)}>×</button>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -1054,9 +1079,13 @@
   .pchip { flex: 0 0 auto; font-size: 10px; font-weight: 600; line-height: 1;
            padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
            white-space: nowrap; }
-  .pchip.high { color: var(--error); }
-  .pchip.medium { color: var(--accent); }
-  .pchip.low { color: var(--muted); }
+  /* Red, amber and blue (`setPalette`), not the accent: the accent is a
+     theme's choice and Daylight's is red. High is filled, so the three also
+     differ in shape for anyone who cannot tell the hues apart. */
+  .pchip.high { color: var(--prio-high-ink); background: var(--prio-high);
+                border-color: var(--prio-high); }
+  .pchip.medium { color: var(--prio-medium); }
+  .pchip.low { color: var(--prio-low); }
   .due { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
          white-space: nowrap; }
   .due.overdue { color: var(--error); }
@@ -1064,6 +1093,7 @@
          padding: 0 2px; visibility: hidden; }
   .row:hover .del { visibility: visible; }
   .del:hover { color: var(--text); }
+  .del.confirm { visibility: visible; color: var(--danger, #d14343); font-size: 12px; }
   .row.done .title { color: var(--muted); text-decoration: line-through; }
 
   .editor { background: var(--surface); border-radius: 8px; padding: 9px;
@@ -1089,7 +1119,7 @@
   .eact button { appearance: none; -webkit-appearance: none; font: inherit; font-size: 11.5px;
                  padding: 4px 11px; border-radius: 6px; cursor: pointer;
                  border: 1px solid var(--hairline); background: none; color: var(--text); }
-  .eact .go { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .eact .go { background: var(--accent-fill); color: var(--on-accent); border-color: transparent; }
   .eact button:disabled, .quick button:disabled, .add input:disabled { opacity: .5; cursor: default; }
 
   .empty { color: var(--muted); padding: 10px 6px; line-height: 1.5; }

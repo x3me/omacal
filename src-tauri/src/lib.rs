@@ -39,6 +39,7 @@ mod restart;
 mod resume;
 mod search;
 mod settings;
+mod snooze;
 mod status;
 mod sync_loop;
 mod tasks;
@@ -136,9 +137,6 @@ pub struct AppState {
     /// on the state, so a test that builds its own state does not share one
     /// with the rest of the process.
     pub history_months: std::sync::atomic::AtomicI64,
-    /// One sync at a time. Beside `history_months` so a test that builds its
-    /// own state does not share a process-wide gate with the rest.
-    pub sync_gate: std::sync::Arc<sync_loop::SyncGate>,
 }
 
 /// The notification transport, managed on its own rather than inside
@@ -189,17 +187,18 @@ async fn get_status(
 /// Every appearance the settings pane offers, with the palette it would
 /// paint — for the theme picker's previews, so a card is drawn in exactly the
 /// colours choosing it gives. `Auto` is previewed as it resolves right now:
-/// the Omarchy theme, or the system's light or dark.
+/// the Omarchy theme, or the theme chosen for the system's light or dark.
 #[tauri::command]
-fn appearance_previews() -> Vec<AppearancePreview> {
+async fn appearance_previews(state: tauri::State<'_, AppState>) -> Result<Vec<AppearancePreview>, String> {
     use theme::Appearance as A;
-    [A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn]
+    let auto = settings::auto_pair(&state.pool).await;
+    Ok([A::Auto, A::Light, A::Dark, A::TokyoNight, A::CatppuccinMocha, A::CatppuccinLatte, A::RosePineDawn, A::RetroBloom, A::Daylight, A::DaylightDark]
         .into_iter()
         .map(|appearance| AppearancePreview {
             appearance,
-            palette: theme::resolve(theme::omarchy_theme_dir().as_deref(), appearance),
+            palette: theme::resolve(theme::omarchy_theme_dir().as_deref(), appearance, auto),
         })
-        .collect()
+        .collect())
 }
 
 #[derive(serde::Serialize)]
@@ -217,6 +216,7 @@ async fn get_palette(state: tauri::State<'_, AppState>) -> Result<theme::Palette
     Ok(theme::resolve(
         theme::omarchy_theme_dir().as_deref(),
         settings::appearance(&state.pool).await,
+        settings::auto_pair(&state.pool).await,
     ))
 }
 
@@ -253,16 +253,15 @@ fn take_open_date(state: tauri::State<'_, AppState>) -> Option<String> {
     state.open_date.lock().expect("open date poisoned").take()
 }
 
-/// The display zone: the user's setting if present, otherwise the system zone.
-/// Every day boundary in the week grid is computed against this.
+/// The display zone: every day boundary in the week grid is computed
+/// against this. The zone frozen at launch ([`effective_timezone`]), the
+/// same one every label and every written `TZID` come from. It used to read
+/// the system zone live, so after the machine's zone changed the grid's
+/// days moved to the new zone (within jiff's five-minute cache) while the
+/// labels, the writes and the webview's own clock stayed in the old one.
 fn display_tz(pool: &SqlitePool) -> String {
-    // `settings` is read on the sync task's runtime elsewhere; here we only
-    // need a cheap default, so fall back to the system zone.
     let _ = pool;
-    jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string()
+    effective_timezone()
 }
 
 /// `pad` on every day-grid command (2026-09-03): that many days either side
@@ -1062,32 +1061,68 @@ pub(crate) fn synced_window(state: &AppState, now_ms: i64) -> (i64, i64) {
     settings::history_window(now_ms, state.history_months.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// The window one sync asks a calendar for.
+/// Syncs the one calendar a write just changed, and nothing else.
 ///
-/// A save's follow-up is the recent six months, never the history the user
-/// keeps. The command that saved the event already refetched it; the queue
-/// then asks for another sync, and that one used to repeat the whole span —
-/// a changed ctag, or an end that had moved a day, is enough to make CalDAV
-/// report everything back to 1900.
-pub(crate) fn sync_bounds(now_ms: i64, history_months: i64, after_write: bool) -> (i64, i64) {
-    let months = if after_write { settings::SPAN_6_MONTHS } else { history_months };
-    settings::history_window(now_ms, months)
+/// What the UI's pending queue waits on after a write (`sync_now` with a
+/// calendar),
+/// in place of the full [`sync_all`] it used to wait on. That full sync
+/// failed whenever *any* target did, and a failed post-write sync leaves the
+/// written event dimmed and locked until a later sync succeeds, so one
+/// broken WebCal feed or one unreachable account froze every edit for the
+/// session. A write's own calendar is the only thing whose state it has to
+/// know, so it is the only one asked.
+///
+/// Takes the same turn as [`sync_all`]: a pass over this calendar must not
+/// overlap a full pass over it.
+pub(crate) async fn sync_one_calendar(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+    let _turn = sync_turn().lock().await;
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT a.provider, a.email, c.google_id FROM calendars c JOIN accounts a ON a.id = c.account_id
+         WHERE c.id = ?1 AND c.sync_enabled = 1",
+    )
+    .bind(calendar_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((provider, email, google_id)) = row else { return Ok(()) };
+    let (window_start, window_end) = synced_window(state, now_ms());
+    match provider.as_str() {
+        "google" => {
+            let cfg = load_config()?;
+            let token = access_token_for(state, &cfg, &email).await?;
+            let client = omacal_google::CalendarClient::new(GOOGLE_CALENDAR_API, &token);
+            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end)
+                .await?;
+        }
+        "caldav" => caldav_write::resync(state, calendar_id).await?,
+        // A WebCal feed or this device's own list: no write reaches a server.
+        _ => {}
+    }
+    Ok(())
+}
+
+
+
+/// The lock [`sync_all`] holds for its whole run. The background paths
+/// (`sync_loop`) check it first and skip rather than queue, because a sync
+/// already running answers what they would have asked.
+pub(crate) fn sync_turn() -> &'static tokio::sync::Mutex<()> {
+    static TURN: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    TURN.get_or_init(Default::default)
 }
 
 /// Refreshes the access token and syncs every calendar of every account.
 ///
 /// Pure sync work, with no demo check and no status bookkeeping of its own —
-/// shared by the `sync_now` command and the background loop, each of which
-/// handles the demo gate and `record_sync` itself. `after_write` is the
-/// queue's follow-up after a save: CalDAV must not report the whole history
-/// again. Concurrent callers share one run ([`sync_loop::SyncGate`]) and a
-/// caller that waited receives that run's own result, including a failure.
-pub(crate) async fn sync_all(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
-    let gate = std::sync::Arc::clone(&state.sync_gate);
-    gate.run(sync_all_inner(state, after_write)).await
-}
-
-async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u64> {
+/// shared by the `sync_now` command and the background loop (Task 4), each of
+/// which handles the demo gate and `record_sync` itself.
+pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
+    // One sync at a time. Three callers can start one (the ticker, a window
+    // focus, the sync command) and nothing else stopped them overlapping, so
+    // two passes over one calendar raced each other's transactions and
+    // reaps. A caller that finds one running waits its turn rather than being
+    // turned away: a sync asked for after a write must see that write, and
+    // the one already running may have read the calendar before it.
+    let _turn = sync_turn().lock().await;
     let pool = &state.pool;
     // `ORDER BY id`, so which account goes first is a decision rather than
     // whatever rowid order happens to be — it used to decide whose failure
@@ -1109,8 +1144,7 @@ async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u
     let google = accounts_to_attempt(google, &marked);
 
     let now = now_ms();
-    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
-    let (window_start, window_end) = sync_bounds(now, months, after_write);
+    let (window_start, window_end) = synced_window(state, now);
 
     let mut total = 0u64;
     let mut failed: Vec<String> = Vec::new();
@@ -1145,7 +1179,7 @@ async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u
     for (account_id, email, _, server_url, username) in
         all.iter().filter(|(_, _, p, _, _)| p == "caldav")
     {
-        if marked.contains(email) {
+        if marked.contains(&caldav_account::reauth_key(email)) {
             continue; // dead credentials; the banner is already up
         }
         let client =
@@ -1157,16 +1191,14 @@ async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u
                     continue;
                 }
             };
-        match caldav_account::sync_account(
-            pool, *account_id, &client, window_start, window_end, after_write,
-        )
-        .await
+        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end)
+            .await
         {
             Ok(n) => total += n,
             Err(e) if e.needs_reauth() => {
                 tracing::warn!(account = %email,
                     "the CalDAV password was rejected; the account needs to be reconnected");
-                dead.push(email.clone());
+                dead.push(caldav_account::reauth_key(email));
             }
             Err(e) => {
                 tracing::warn!(account = %email, %e, "CalDAV sync failed");
@@ -1182,20 +1214,31 @@ async fn sync_all_inner(state: &AppState, after_write: bool) -> anyhow::Result<u
     sync_result(total, &failed)
 }
 
-/// Refreshes the access token and syncs every calendar of every account.
+/// Refreshes the access token and syncs every calendar of every account, or,
+/// given `calendar_id`, that calendar alone.
+///
+/// The second form is what the pending queue waits on after a write (see
+/// [`sync_one_calendar`] for why it must not be the full sync). It answers 0
+/// and records no sync time: one calendar brought up to date is not the
+/// "Synced 2 min ago" the header reports.
 #[tauri::command]
 async fn sync_now(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    after_write: Option<bool>,
+    calendar_id: Option<i64>,
 ) -> Result<u64, String> {
     // Checked here, at the command boundary, rather than inside `sync_all` —
     // Task 4's background sync loop is a second caller that needs its own
     // demo check, and burying this one inside `sync_all` would leave that
     // caller with no way to see it.
     demo_sync_guard(state.demo)?;
+    if let Some(calendar_id) = calendar_id {
+        sync_one_calendar(&state, calendar_id).await.map_err(|e| errors::user_facing(&e))?;
+        invites::after_sync(&app).await;
+        return Ok(0);
+    }
 
-    let n = sync_all(&state, after_write.unwrap_or(false)).await.map_err(|e| errors::user_facing(&e))?;
+    let n = sync_all(&state).await.map_err(|e| errors::user_facing(&e))?;
     status::record_sync(&state.pool, now_ms()).await.map_err(|e| e.to_string())?;
     invites::after_sync(&app).await;
     Ok(n)
@@ -1247,6 +1290,34 @@ pub fn apply_gtk_theme_early() {
     if drop_hook_gtk_theme(gtk_theme.as_deref(), user_override.as_deref(), in_appimage) {
         std::env::remove_var("GTK_THEME");
     }
+    if let Some(value) = gtk_use_portal(cfg!(target_os = "linux"), std::env::var_os("GTK_USE_PORTAL").is_some()) {
+        std::env::set_var("GTK_USE_PORTAL", value);
+    }
+}
+
+/// What to export as `GTK_USE_PORTAL`, if anything, before GTK reads it (#182).
+///
+/// The file choosers (export's save dialog, the form's "Import .ics…") are
+/// `tauri-plugin-dialog`'s, and on Linux that is rfd's GTK3 backend, which
+/// builds a `GtkFileChooserNative`. GTK hands a native chooser to the
+/// desktop portal's FileChooser only when it believes it should, which
+/// outside a sandbox means `GTK_USE_PORTAL=1`; otherwise it draws its own
+/// GTK3 dialog inside the app and never asks the picker the user chose in
+/// `portals.conf` (GNOME's, KDE's, or a custom one like flea).
+///
+/// The variable, not rfd's own `xdg-portal` backend: rfd picks one backend at
+/// compile time, and its portal backend's fallback is zenity and then
+/// nothing, so a desktop with no FileChooser portal would get no dialog at
+/// all. GTK's portal path falls back to its own dialog when the portal is not
+/// there, so every desktop still gets a chooser.
+///
+/// GTK reads the variable once and caches it, so it must be set before the
+/// first dialog, and it is inherited by what this process launches: a GTK
+/// app started from here uses the desktop's picker too, which is the desktop
+/// working as configured. A value someone set themselves, `0` included, is
+/// theirs and left alone. Linux only: nothing else reads it.
+fn gtk_use_portal(linux: bool, already_set: bool) -> Option<&'static str> {
+    (linux && !already_set).then_some("1")
 }
 
 /// Exports `TZ` from the display-tz sidecar, and **must run first thing in
@@ -1328,7 +1399,7 @@ fn system_zone_name() -> String {
 /// survived (caught in the very first field test, 2026-08-19). Clearing must
 /// undo our export and only ours; a `TZ` the user launched us under is
 /// theirs to keep.
-const TZ_MARKER: &str = "OMACAL_SET_TZ";
+pub(crate) const TZ_MARKER: &str = "OMACAL_SET_TZ";
 
 #[derive(Debug, PartialEq)]
 enum TzAction {
@@ -1376,8 +1447,14 @@ fn dispatch_notification_action(handle: &tauri::AppHandle, action: notify::Actio
                 tracing::warn!(%e, "could not open the meeting link");
             }
         }
-        // Still display-only; re-queueing is §2.5's future.
-        notify::Action::Snooze5m => {}
+        // Five minutes on, the reminder loop posts it again if the calendar
+        // still holds it (`snooze.rs`).
+        notify::Action::Snooze5m { event_id, occurrence_ms, minutes } => {
+            snooze::queue().snooze(
+                omacal_core::remind::FiredKey { event_id, occurrence_ms, minutes },
+                now_ms(),
+            );
+        }
         // The click on a task announcement (#137): bring the window up and
         // hand the webview the task, which opens the Tasks pane on it.
         notify::Action::OpenTask { task_id } => {
@@ -1463,7 +1540,12 @@ pub fn run() {
         // `--quit`, which is how a surface outside this process (the Omarchy
         // bar widget) drives the app. See `tray::instance_action`.
         .plugin(single_instance_plugin())
-        .plugin(tauri_plugin_opener::init())
+        // No opener plugin. Every link the webview shows is opened by a
+        // backend command (`open_link`, `open_conference`, the About links)
+        // through `browser::open_external`, which opens web links only and
+        // scrubs the AppImage environment. The plugin's own spawn skipped
+        // both, and its default capability let the webview open any
+        // `http`, `mailto` or `tel` link it liked.
         // Only Rust calls it — the export's save dialog (#113) — so no
         // capability is granted to the webview and the frontend cannot
         // open a chooser of its own.
@@ -1624,9 +1706,15 @@ pub fn run() {
                 quit_on_close: std::sync::atomic::AtomicBool::new(quit_on_close),
                 open_date: std::sync::Mutex::new(open_date),
                 history_months: std::sync::atomic::AtomicI64::new(history_months),
-                sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
             });
             sync_loop::spawn(app.handle().clone());
+            // Before anything reads the choice: off Omarchy a stored Light or
+            // Dark becomes Daylight or Daylight Dark, so the picker ticks
+            // what is worn (`Appearance::on_this_desktop`).
+            tauri::async_runtime::block_on(settings::retire_plain_themes(
+                &app.state::<AppState>().pool,
+                theme::omarchy_theme_dir().is_some(),
+            ));
             // Before the first palette is resolved: off Omarchy, "Follow the
             // desktop theme" follows the system's light-or-dark.
             system_theme::init(app.handle());
@@ -1639,11 +1727,14 @@ pub fn run() {
                     tauri::async_runtime::block_on(settings::appearance(
                         &app.state::<AppState>().pool,
                     )),
+                    tauri::async_runtime::block_on(settings::auto_pair(
+                        &app.state::<AppState>().pool,
+                    )),
                 )
                 .is_dark,
             );
             theme_watch::spawn(app.handle().clone());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             tz_watch::spawn(app.handle().clone());
             // Seed the upcoming feed from whatever is already in the store,
             // so a bar widget has an answer before the first sync completes.
@@ -1766,7 +1857,10 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
-            tauri::WindowEvent::Focused(true) => {
+            // The main window only: the menubar popup takes focus on every
+            // tray click, and syncing on each was a sync the user never asked
+            // for. Its own feed reads the store.
+            tauri::WindowEvent::Focused(true) if window.label() == "main" => {
                 sync_loop::request_now(window.app_handle());
                 // The update notice rides the same "the user is back" signal,
                 // behind its own four-hour floor: an instance launched 45
@@ -1799,6 +1893,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             export::export_event,
+            import::pick_ics_file,
             invites::pending_invites,
             invites::declined_guests,
             invites::dismiss_decline_notice,
@@ -1823,6 +1918,7 @@ pub fn run() {
             update::open_latest_release,
             update::install_update,
             commands::open_conference,
+            commands::open_link,
             weather::get_weather,
             weather::set_weather_location,
             tasks::update_task,
@@ -1908,6 +2004,136 @@ fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 mod tests {
     use super::*;
 
+    /// Syncs never overlap. Three callers can start one (the ticker, a
+    /// window focus, the sync command), and overlapping passes over one
+    /// calendar raced each other's transactions and reaps. Witnessed without
+    /// a stopwatch: while the lock a running sync holds is held, a second
+    /// sync sends nothing at all, and once it is released the second sync
+    /// runs. Without the lock it would have reached the server at once.
+    #[tokio::test]
+    async fn a_sync_waits_for_the_one_already_running() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        crate::caldav_account::test_passwords::set("serial@x.test", "p");
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+             VALUES ('caldav:serial@x.test', 'serial@x.test', 0, 'caldav', ?1, 'serial@x.test')",
+        )
+        .bind(server.uri())
+        .execute(&pool).await.unwrap();
+        let state = std::sync::Arc::new(AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+        });
+
+        let running = sync_turn().lock().await;
+        let second = tokio::spawn({
+            let state = state.clone();
+            async move { sync_all(&state).await }
+        });
+        // Long enough for an unguarded sync to have reached the server even
+        // on a cold first request (loading the OS root certificates alone
+        // can take a few hundred milliseconds).
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(server.received_requests().await.unwrap().is_empty(), "the second sync went ahead");
+        assert!(!second.is_finished());
+
+        drop(running);
+        let _ = second.await.unwrap();
+        assert!(!server.received_requests().await.unwrap().is_empty(), "and ran once its turn came");
+    }
+
+    /// The sync after a write covers the calendar written, and only it: a
+    /// second account whose server is down fails a full sync (asserted, or
+    /// the fixture would prove nothing) but not this one. Before, the
+    /// post-write sync was the full one, so any failing account or feed left
+    /// every edit dimmed and locked until the app restarted.
+    #[tokio::test]
+    async fn the_sync_after_a_write_covers_the_calendar_written_and_only_it() {
+        use wiremock::{matchers::{header, method}, Mock, MockServer, ResponseTemplate};
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
+        let healthy = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cal/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&healthy).await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}></d:multistatus>"#)))
+            .mount(&healthy).await;
+        let down = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(500)).mount(&down).await;
+        crate::caldav_account::test_passwords::set("healthy@x.test", "p");
+        crate::caldav_account::test_passwords::set("down@x.test", "p");
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for (email, server) in [("healthy@x.test", &healthy), ("down@x.test", &down)] {
+            let account: i64 = sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+                 VALUES (?1, ?2, 0, 'caldav', ?3, ?2) RETURNING id",
+            )
+            .bind(format!("caldav:{email}")).bind(email).bind(server.uri())
+            .fetch_one(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (?1, ?2, 'Work', 'UTC', 'owner')",
+            )
+            .bind(account).bind(format!("{}/cal/", server.uri()))
+            .execute(&pool).await.unwrap();
+        }
+        let state = AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+        };
+        assert!(sync_all(&state).await.is_err(), "the fixture's premise: a full sync fails");
+        let written: i64 = sqlx::query_scalar("SELECT c.id FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE a.email = 'healthy@x.test'")
+            .fetch_one(&state.pool).await.unwrap();
+
+        sync_one_calendar(&state, written).await.unwrap();
+
+        let down_reached = down.received_requests().await.unwrap().len();
+        let _ = sync_one_calendar(&state, written).await;
+        assert_eq!(down.received_requests().await.unwrap().len(), down_reached, "the other account was not asked");
+    }
+
+    /// A CalDAV password the server rejects is marked under the CalDAV key,
+    /// never the bare address: the same address may be a Google account too
+    /// (an Apple ID that is a Gmail address), and a bare mark would stop that
+    /// account syncing and tell the user to sign in with Google.
+    #[tokio::test]
+    async fn a_rejected_caldav_password_marks_the_caldav_account_alone() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(401)).mount(&server).await;
+        crate::caldav_account::test_passwords::set("both@x.test", "p");
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+             VALUES ('caldav:both@x.test', 'both@x.test', 0, 'caldav', ?1, 'both@x.test')",
+        )
+        .bind(server.uri())
+        .execute(&pool).await.unwrap();
+        let state = AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
+            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+        };
+
+        let _ = sync_all(&state).await;
+
+        let marked = state.reauth.lock().unwrap().clone();
+        assert_eq!(marked, std::collections::BTreeSet::from(["caldav:both@x.test".to_string()]));
+    }
+
     /// **Not a test: the website's screenshot source.** Seeds the demo data
     /// into a memory database at a fixed moment and writes what the read
     /// commands would answer, so `ui/showcase` can render the real interface
@@ -1961,7 +2187,6 @@ mod tests {
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
-            sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
         };
         write("event_detail", serde_json::to_value(events::event_detail_impl(&state, id).await.unwrap()).unwrap());
 
@@ -1972,7 +2197,8 @@ mod tests {
                 .split(',')
                 .map(|name| {
                     let dir = std::path::Path::new(&root).join(name);
-                    let palette = theme::resolve(Some(&dir), theme::Appearance::Auto);
+                    // A theme directory decides `Auto` whatever the pair says.
+                    let palette = theme::resolve(Some(&dir), theme::Appearance::Auto, theme::AutoPair::default());
                     (name.to_string(), serde_json::to_value(palette).unwrap())
                 })
                 .collect();
@@ -1998,6 +2224,17 @@ mod tests {
             "a person's own GTK_THEME, outside any AppImage"
         );
         assert!(!drop_hook_gtk_theme(None, None, true));
+    }
+
+    /// #182: the file choosers go to the desktop's portal picker on Linux,
+    /// unless someone already said otherwise. `GTK_USE_PORTAL=0` is a choice,
+    /// and so is `1`; only an absent variable is ours to fill. Elsewhere there
+    /// is no GTK to read it.
+    #[test]
+    fn the_file_chooser_asks_the_portal_unless_told_otherwise() {
+        assert_eq!(gtk_use_portal(true, false), Some("1"));
+        assert_eq!(gtk_use_portal(true, true), None, "a value the user set stays theirs");
+        assert_eq!(gtk_use_portal(false, false), None, "not on macOS");
     }
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2141,6 +2378,16 @@ mod tests {
         assert!(!cached_is_usable(Some(&cached(NOW)), NOW));
     }
 
+    /// The deb, the rpm, the AppImage and the AUR package all install this
+    /// entry, so a launcher that sorts by category finds OmaCal under Office
+    /// and Calendar. The bundler's `{{categories}}` slot came out empty (#187).
+    #[test]
+    fn the_linux_desktop_entry_names_its_categories() {
+        let entry = include_str!("../../packaging/linux/omacal.desktop");
+        let categories: Vec<&str> = entry.lines().filter(|l| l.starts_with("Categories=")).collect();
+        assert_eq!(categories, ["Categories=Office;Calendar;"]);
+    }
+
     #[tokio::test]
     async fn the_synced_window_reads_the_span_on_this_state() {
         // The year views and the sync loop must share one edge. The spans
@@ -2160,25 +2407,11 @@ mod tests {
             quit_on_close: Default::default(),
             open_date: Default::default(),
             history_months: std::sync::atomic::AtomicI64::new(settings::SPAN_6_MONTHS),
-            sync_gate: std::sync::Arc::new(sync_loop::SyncGate::new()),
         };
         assert_eq!(synced_window(&state, now), (now - 180 * DAY, now + 365 * DAY));
         state.history_months.store(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(synced_window(&state, now).0, settings::history_window(now, 0).0);
         assert_eq!(synced_window(&state, now).1, now + 365 * DAY);
-    }
-
-    /// The queue calls `sync_now` after every save. That pass must not ask
-    /// for the history span: the write already refetched the event, and a
-    /// changed ctag would otherwise report everything back to 1900.
-    #[test]
-    fn a_save_does_not_ask_for_the_whole_history() {
-        let now = 1_786_341_600_000;
-        let (full, _) = sync_bounds(now, 0, false);
-        let (after, _) = sync_bounds(now, 0, true);
-        assert_eq!(omacal_sync::to_rfc3339(full), "1900-01-01T00:00:00Z");
-        assert_eq!(after, settings::history_window(now, settings::SPAN_6_MONTHS).0);
-        assert!(after > full);
     }
 
     /// The message is shown for whichever button the user pressed, so it has

@@ -19,7 +19,19 @@ use tauri::{AppHandle, Emitter, Manager};
 /// A new system setting: remember it, and repaint if the app is following it
 /// — `Auto`, and no Omarchy theme taking precedence. A pinned palette is not
 /// following anything, so the flip is not news to it.
+///
+/// For a caller outside the async runtime: macOS's window-event callback, on
+/// the main thread. The Linux portal watcher runs *inside* the runtime and
+/// awaits [`changed_async`] instead, because `block_on` from a runtime
+/// worker panics ("Cannot start a runtime from within a runtime"). That
+/// panic killed live theme-following on the first dark/light flip.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn changed(app: &AppHandle, scheme: SystemScheme) {
+    tauri::async_runtime::block_on(changed_async(app, scheme));
+}
+
+/// [`changed`] for a caller already on the async runtime.
+pub async fn changed_async(app: &AppHandle, scheme: SystemScheme) {
     if theme::system_scheme() == scheme {
         return;
     }
@@ -27,12 +39,15 @@ pub fn changed(app: &AppHandle, scheme: SystemScheme) {
     if theme::omarchy_theme_dir().is_some() {
         return;
     }
-    let appearance =
-        tauri::async_runtime::block_on(crate::settings::appearance(&app.state::<crate::AppState>().pool));
+    let pool = app.state::<crate::AppState>().pool.clone();
+    let appearance = crate::settings::appearance(&pool).await;
     if appearance.is_pinned() {
         return;
     }
-    let palette = theme::resolve(None, appearance);
+    // The pair is re-read on every flip, not captured at launch: it can be
+    // changed in Settings while the app runs, and the next flip must wear it.
+    let auto = crate::settings::auto_pair(&pool).await;
+    let palette = theme::resolve(None, appearance, auto);
     tracing::info!(?scheme, "system appearance changed, repainting");
     let dark = palette.is_dark;
     let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));
@@ -58,26 +73,35 @@ pub fn init(app: &AppHandle) {
         }
         return;
     }
-    #[cfg(target_os = "linux")]
-    {
-        if theme::omarchy_theme_dir().is_some() {
-            return; // Omarchy's theme decides; there is nothing to follow here.
-        }
-        let read = tauri::async_runtime::block_on(async {
-            tokio::time::timeout(std::time::Duration::from_millis(500), portal::read()).await
-        });
-        match read {
-            Ok(Ok(scheme)) => theme::set_system_scheme(scheme),
-            Ok(Err(e)) => tracing::debug!(%e, "no portal colour scheme; staying on no preference"),
-            Err(_) => tracing::debug!("portal did not answer in time; staying on no preference"),
-        }
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = portal::watch(app).await {
-                tracing::debug!(%e, "portal colour-scheme watch ended");
-            }
-        });
+    follow_portal(app);
+}
+
+/// Linux's half of [`init`]: the portal's colour scheme, read once and then
+/// watched. A function of its own, with a no-op twin elsewhere, so `init`
+/// reads the same on every platform — a `#[cfg]` block inline left macOS's
+/// `return` as the function's last statement, which clippy calls needless.
+#[cfg(not(target_os = "linux"))]
+fn follow_portal(_app: &AppHandle) {}
+
+#[cfg(target_os = "linux")]
+fn follow_portal(app: &AppHandle) {
+    if theme::omarchy_theme_dir().is_some() {
+        return; // Omarchy's theme decides; there is nothing to follow here.
     }
+    let read = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(500), portal::read()).await
+    });
+    match read {
+        Ok(Ok(scheme)) => theme::set_system_scheme(scheme),
+        Ok(Err(e)) => tracing::debug!(%e, "no portal colour scheme; staying on no preference"),
+        Err(_) => tracing::debug!("portal did not answer in time; staying on no preference"),
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = portal::watch(app).await {
+            tracing::debug!(%e, "portal colour-scheme watch ended");
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -129,7 +153,9 @@ mod portal {
             };
             if namespace == NAMESPACE && key == KEY {
                 if let Some(scheme) = scheme_of(&value) {
-                    changed(&app, scheme);
+                    // Awaited: this runs on a runtime worker, where the
+                    // blocking `changed` would panic.
+                    changed_async(&app, scheme).await;
                 }
             }
         }

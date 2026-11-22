@@ -70,6 +70,69 @@ pub(crate) struct EventFields {
     /// touched. Manual Zoom URLs are represented in `location`; Google Meet is
     /// the structured provider this Google connection can create itself.
     pub conference: Option<ConferenceAction>,
+    /// "Show as", or `None` for "not touched". Unlike `guests` this is a plain
+    /// field on both providers, but the rule is the same one: a path that
+    /// does not offer it (a drag, quick add, the CLI) must not write it, or
+    /// it would flatten a free event to busy on every move.
+    pub transparency: Option<Transparency>,
+    /// Visibility, or `None` for "not touched". `confidential` cannot be
+    /// chosen, so an event that has it keeps it by sending `None`.
+    pub visibility: Option<Visibility>,
+}
+
+/// "Show as". Google's `transparency` values, lowercased as the UI sends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Transparency {
+    Opaque,
+    Transparent,
+}
+
+impl Transparency {
+    /// The value Google and the store both spell it as.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Transparency::Opaque => "opaque",
+            Transparency::Transparent => "transparent",
+        }
+    }
+
+    pub(crate) fn transp(self) -> omacal_caldav::Transp {
+        match self {
+            Transparency::Opaque => omacal_caldav::Transp::Opaque,
+            Transparency::Transparent => omacal_caldav::Transp::Transparent,
+        }
+    }
+}
+
+/// The visibilities the dialog can set. Google also has `confidential`, which
+/// is read and preserved but never written by this app, so it has no variant
+/// here and a payload naming it fails at the command boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Visibility {
+    Default,
+    Public,
+    Private,
+}
+
+impl Visibility {
+    /// The value Google and the store both spell it as.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Default => "default",
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+        }
+    }
+
+    pub(crate) fn class(self) -> omacal_caldav::Class {
+        match self {
+            Visibility::Default => omacal_caldav::Class::Default,
+            Visibility::Public => omacal_caldav::Class::Public,
+            Visibility::Private => omacal_caldav::Class::Private,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,18 +226,27 @@ pub(crate) fn reminders_json(r: &RemindersInput) -> Value {
 /// function and not a step inside a command.
 pub(crate) fn validate_reminders(r: &RemindersInput) -> Result<(), String> {
     if r.overrides.len() > 5 {
-        return Err("an event can carry at most 5 reminders".into());
+        return Err(TOO_MANY_REMINDERS.into());
     }
     for o in &r.overrides {
         if o.method != "popup" && o.method != "email" {
-            return Err(format!("'{}' is not a reminder method Google knows", o.method));
+            return Err(format!("{UNKNOWN_REMINDER_METHOD}{}", o.method));
         }
         if !(0..=40_320).contains(&o.minutes) {
-            return Err("a reminder must be 0 to 40320 minutes (four weeks) ahead".into());
+            return Err(REMINDER_OUT_OF_RANGE.into());
         }
     }
     Ok(())
 }
+
+/// `validate_reminders`' three refusals, raised before anything is sent and
+/// allowlisted in `errors.rs`: the user can act on each, and the opaque
+/// "Sync failed" said nothing a person could fix.
+pub(crate) const TOO_MANY_REMINDERS: &str = "an event can carry at most 5 reminders";
+/// A prefix: the method the caller sent follows it (CLI and IPC input only;
+/// the form offers the two that exist).
+pub(crate) const UNKNOWN_REMINDER_METHOD: &str = "not a reminder method Google knows: ";
+pub(crate) const REMINDER_OUT_OF_RANGE: &str = "a reminder must be 0 to 40320 minutes (four weeks) ahead";
 
 /// When an event happens.
 ///
@@ -477,6 +549,14 @@ pub(crate) struct EventInput {
     /// `"googleMeet"` or `"none"` — matching the UI union exactly.
     #[serde(default)]
     pub conference: Option<ConferenceInput>,
+    /// Absent when the user did not touch "Show as" — see
+    /// [`EventFields::transparency`]. `#[serde(default)]` for the same two
+    /// reasons as `guests`: older payloads, and callers with no such control.
+    #[serde(default)]
+    pub transparency: Option<Transparency>,
+    /// Absent when the user did not touch visibility.
+    #[serde(default)]
+    pub visibility: Option<Visibility>,
 }
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -521,7 +601,7 @@ pub enum RepeatEnd {
 impl WeekdayCode {
     const ALL: [Self; 7] = [Self::Su, Self::Mo, Self::Tu, Self::We, Self::Th, Self::Fr, Self::Sa];
 
-    fn text(self) -> &'static str {
+    pub(crate) fn text(self) -> &'static str {
         match self {
             Self::Su => "SU",
             Self::Mo => "MO",
@@ -537,7 +617,7 @@ impl WeekdayCode {
         Self::ALL.iter().position(|candidate| *candidate == self).unwrap_or(0)
     }
 
-    fn from_text(text: &str) -> Option<Self> {
+    pub(crate) fn from_text(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|day| day.text() == text)
     }
 }
@@ -604,6 +684,8 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
             },
             ConferenceInput::None => ConferenceAction::Remove,
         }),
+        transparency: input.transparency,
+        visibility: input.visibility,
     })
 }
 
@@ -725,7 +807,7 @@ fn basic_date(value: &str) -> Option<jiff::civil::Date> {
     format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8]).parse().ok()
 }
 
-fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
+pub(crate) fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
     let b = value.as_bytes();
     if b.len() != 16 || b[8] != b'T' || b[15] != b'Z'
         || !b[..8].iter().chain(&b[9..15]).all(|c| c.is_ascii_digit())
@@ -988,6 +1070,8 @@ mod tests {
             guests: None,
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 
@@ -1318,6 +1402,8 @@ mod tests {
             guests: None,
             reminders: None,
             conference: None,
+            transparency: None,
+            visibility: None,
         }
     }
 

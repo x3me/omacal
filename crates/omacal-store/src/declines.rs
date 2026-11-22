@@ -53,7 +53,11 @@ pub async fn declined_guests(
                 c.timezone, COALESCE(c.color_override, c.color_hex) AS color_hex
            FROM events e
            JOIN calendars c ON c.id = e.calendar_id
-          WHERE e.organizer_email = c.google_id
+           JOIN accounts a ON a.id = c.account_id
+          -- The user's own meeting (`is_users_own`): organised by the
+          -- account's address, or by the calendar's own on Google.
+          WHERE (LOWER(e.organizer_email) = LOWER(a.email)
+                 OR LOWER(e.organizer_email) = LOWER(c.google_id))
             AND e.status != 'cancelled'
             AND (e.end_utc > ?1 OR e.recurrence IS NOT NULL)
             AND c.selected = 1
@@ -170,6 +174,31 @@ mod tests {
         pool
     }
 
+    /// A guest declining the user's own meeting is news on CalDAV too. The
+    /// calendar's id there is a collection URL, so "my own meeting" is the
+    /// account's address, case aside.
+    #[tokio::test]
+    async fn a_guest_declining_the_users_own_caldav_meeting_is_reported() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:me@icloud.com', 'me@icloud.com', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (2, 'https://caldav.example.com/me/home/', 'Home', 'Europe/Sofia', 'owner')",
+        )
+        .execute(&pool).await.unwrap();
+        let mut own = mine("own", NOW + HOUR, vec![guest("bob@x.com", "declined")]);
+        own.calendar_id = 2;
+        own.organizer_email = Some("ME@icloud.com".into());
+        upsert_event(&pool, &own).await.unwrap();
+
+        let found = declined_guests(&pool, NOW).await.unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
     fn guest(email: &str, status: &str) -> Attendee {
         Attendee {
             email: email.into(),
@@ -211,6 +240,7 @@ mod tests {
             sequence: 0,
             organizer_email: Some("me@x.com".into()),
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees,
             reminders: Default::default(),
             calendar_default_reminders: Vec::new(),

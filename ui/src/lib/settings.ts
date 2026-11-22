@@ -72,17 +72,23 @@ export const HISTORY_SPAN_OPTIONS: ReadonlyArray<[HistorySpan, string]> = [
  * and a second copy of that number in TypeScript is one that drifts from the
  * `sync_loop::MIN_INTERVAL_MS` actually enforced.
  */
-/** Which palette the app wears. `'auto'` is the desktop's — the Omarchy
- *  theme if there is one, dark if there is not — and the two others are the
- *  built-in palettes, chosen explicitly. */
+/** Which palette the app wears. `'auto'` is the desktop's: the Omarchy theme
+ *  if there is one, and otherwise the theme chosen for the system's light or
+ *  dark mode (`autoLightTheme`, `autoDarkTheme`). Every other value is a
+ *  palette chosen explicitly. */
 export type Appearance =
   | 'auto' | 'light' | 'dark'
-  | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn';
+  | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn' | 'retro-bloom'
+  | 'daylight' | 'daylight-dark';
 
 /** The rows, in the order the select offers them, and the labels the spec
  *  drives them by. Here rather than in the markup so the component and its
- *  test read one list. The four named themes are Omarchy's own most used,
- *  for a desktop with no Omarchy theme to follow (`theme::Palette::named`). */
+ *  test read one list. Light and Dark are offered on Omarchy only, and the
+ *  named themes everywhere else (`SettingsModal`'s `themeOptions`). The named themes are for a desktop with no Omarchy
+ *  theme to follow (`theme::Palette::named`): four of Omarchy's own most used,
+ *  Retro Bloom (a community Omarchy theme on Gruvbox's palette), and Daylight,
+ *  omacal's own bright one, with Daylight Dark, the same look on a near-black
+ *  page. */
 export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
   ['auto', 'Follow the desktop'],
   ['light', 'Light'],
@@ -91,6 +97,9 @@ export const APPEARANCE_OPTIONS: ReadonlyArray<[Appearance, string]> = [
   ['catppuccin-mocha', 'Catppuccin Mocha'],
   ['catppuccin-latte', 'Catppuccin Latte'],
   ['rose-pine-dawn', 'Rosé Pine Dawn'],
+  ['retro-bloom', 'Retro Bloom'],
+  ['daylight', 'Daylight'],
+  ['daylight-dark', 'Daylight Dark'],
 ];
 
 /** Whether the window draws a title bar. `'auto'` is no frame where a tiling
@@ -125,7 +134,7 @@ export type AppSettings = {
   minSyncIntervalMs: number;
   /** Months of history to keep. `0` is everything; ahead is a year either way.
    *  Two years until chosen. An install that already had a calendar keeps
-   *  six (migration 0019). */
+   *  six (migration 0020). */
   historySpan: HistorySpan;
   /** Whether Day, Week and Month draw as a list rather than a grid (filmstrip
    *  spec §4). No settings tab shows it — the control is the `▦`/`☰` beside the
@@ -237,6 +246,13 @@ export type AppSettings = {
    *  exist: off Omarchy there was no theme to wear and dark was the only
    *  answer the app had (issue #30). */
   appearance: Appearance;
+  /** The themes `'auto'` wears while the system is in light mode and in dark
+   *  mode, off Omarchy. `'daylight'` and `'daylight-dark'` unless chosen; the
+   *  backend reads a stored `'light'` or `'dark'` as its successor and any
+   *  other stale row as that side's default, so these are always a theme of
+   *  their side that its picker offers. */
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   /** Whether the window draws a title bar, or `null` where the choice is not
    *  omacal's — macOS, whose overlay title bar *is* the frame. The modal
    *  shows the row only when there is an answer, so this is the one place
@@ -270,6 +286,9 @@ export type AppSettings = {
    *  until chosen — typed text leaves the machine, and Photon's public
    *  server asks for light personal use. History stays on either way. */
   photonPlaces: boolean;
+  /** Whether the daily update check runs: it asks GitHub's public release
+   *  listing. On by default, off inside a Flatpak (the backend decides). */
+  updateCheck: boolean;
   /** Whether the forecast high is drawn in Celsius or Fahrenheit — Celsius by
    *  default. Read by `WeekGrid` and `Filmstrip` through the
    *  `tempunit.svelte.ts` rune, for `timeFormat`'s reason: both print a
@@ -318,11 +337,16 @@ export type SettingValues = {
   secondTimezone: string | null;
   weatherEnabled: boolean;
   photonPlaces: boolean;
+  /** Whether the daily update check runs: it asks GitHub's public release
+   *  listing. On by default, off inside a Flatpak (the backend decides). */
+  updateCheck: boolean;
   notificationsEnabled: boolean;
   taskNotificationsEnabled: boolean;
   keepRemindersOnScreen: boolean;
   trayIcon: boolean;
   appearance: Appearance;
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   windowFrame: WindowFrame;
   quitOnClose: boolean;
   startOnLogin: StartOnLogin;

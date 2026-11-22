@@ -25,6 +25,9 @@
 //! with the macOS one. The grid decides what a pinch means; this file only
 //! delivers it.
 
+/// Linux only, like the gesture that builds it: macOS gets the DOM's own
+/// gesture events and never constructs one (a dead-code lint there otherwise).
+#[cfg(target_os = "linux")]
 #[derive(serde::Serialize, Clone)]
 struct Pinch {
     /// `begin`, `update` or `end` — GTK's own phases, less `cancel`, which

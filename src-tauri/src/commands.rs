@@ -69,6 +69,15 @@ pub struct UiEvent {
     /// signed-in user's own row is excluded through `is_self`, so your own
     /// "no" — which already strikes the block through — never sets this.
     pub all_guests_declined: bool,
+    /// "Show as": `opaque` (busy) or `transparent` (free), the store's
+    /// vocabulary unchanged. The views draw a free event's colour bar as an
+    /// outline, the way Fantastical does, so that time you are still
+    /// available in reads differently from time you are not.
+    pub transparency: String,
+    /// `default` | `public` | `private` | `confidential`, as stored. Private
+    /// and confidential both put a lock on the block; the views never need
+    /// to tell those two apart, so the distinction is left to the dialog.
+    pub visibility: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +167,8 @@ pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
             let mut others = src.attendees.iter().filter(|a| !a.is_self).peekable();
             others.peek().is_some() && others.all(|a| a.response_status == "declined")
         },
+        transparency: src.transparency.clone(),
+        visibility: src.visibility.clone(),
     }
 }
 
@@ -889,15 +900,20 @@ pub fn assemble_big_year_combining(
                 if src.status == "cancelled" {
                     continue;
                 }
+                // Only all-day events are drawn here, so a timed one is
+                // skipped before it is expanded, not after: a daily timed
+                // series was expanded once per row, fourteen times, and every
+                // occurrence thrown away.
+                if !src.is_all_day {
+                    continue;
+                }
                 for iv in occurrences(src, row_start, row_end) {
                     if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                         continue;
                     }
-                    if src.is_all_day {
-                        let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
-                        segments.push(Segment { idx: pill_events.len(), start_col, end_col });
-                        pill_events.push(to_ui(src, iv.start_ms, iv.end_ms));
-                    }
+                    let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
+                    segments.push(Segment { idx: pill_events.len(), start_col, end_col });
+                    pill_events.push(to_ui(src, iv.start_ms, iv.end_ms));
                 }
             }
 
@@ -922,6 +938,19 @@ pub fn assemble_big_year_combining(
         .collect();
 
     BigYearPayload { year, rows, lane_cap: GRID_LANE_CAP }
+}
+
+/// Opens a link the user clicked in an event's description or form, through
+/// [`crate::browser::open_external`]: the same path as Join, so the
+/// AppImage's environment is scrubbed from the browser it starts (issue #1),
+/// and only a web link is opened at all. The webview used to open these
+/// itself, through the opener plugin's raw spawn, which skipped both.
+#[tauri::command]
+pub(crate) fn open_link(url: String) -> Result<(), String> {
+    crate::browser::open_external(&url).map_err(|e| {
+        tracing::warn!(%e, "could not open a link");
+        crate::BROWSER_FAILED.to_string()
+    })
 }
 
 /// Opens an event's meeting link with its preferred application — the Join
@@ -980,6 +1009,7 @@ mod tests {
             color_hex: None, calendar_timezone: "UTC".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
             guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(),
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
@@ -1555,6 +1585,71 @@ mod tests {
     /// arithmetic gives rather than symmetry: see
     /// `an_all_day_events_last_day_comes_from_its_own_calendars_zone`.
     const NEW_YORK: &str = "America/New_York";
+
+    /// A weekly all-day series every Sunday in Sofia, whose master starts on
+    /// `master` and spans one civil day. Stored the way sync stores it: both
+    /// ends local midnights, so a master on a DST day carries a 23- or
+    /// 25-hour duration.
+    fn sofia_sundays(master: (i16, i8, i8)) -> omacal_store::StoredEvent {
+        let (y, m, d) = master;
+        let next = jiff::civil::date(y, m, d).tomorrow().unwrap();
+        let mut e = all_day_event(
+            "Europe/Sofia",
+            midnight_ms("Europe/Sofia", y, m, d),
+            midnight_ms("Europe/Sofia", next.year(), next.month(), next.day()),
+        );
+        e.start_tz = "Europe/Sofia".into();
+        e.end_tz = "Europe/Sofia".into();
+        e.recurrence = Some("RRULE:FREQ=WEEKLY".into());
+        e
+    }
+
+    /// An all-day occurrence covers its civil day, whatever that day's length.
+    /// Sofia falls back on Sunday 25 October 2026, a 25-hour day; a series
+    /// whose master is an ordinary 24-hour Sunday used to end that occurrence
+    /// at 23:00 the same day, which reads as a span ending the day before it
+    /// starts, and the chip vanished from every view.
+    #[test]
+    fn an_all_day_occurrence_on_a_fall_back_day_still_covers_that_day() {
+        let series = sofia_sundays((2026, 10, 4));
+        assert_eq!(series.end_utc - series.start_utc, 24 * 3_600_000, "the master is an ordinary day");
+        let fall_back = midnight_ms("Europe/Sofia", 2026, 10, 26) - midnight_ms("Europe/Sofia", 2026, 10, 25);
+        assert_eq!(fall_back, 25 * 3_600_000, "the fixture must reach a 25-hour day, or it proves nothing");
+
+        let w = assemble_week(&[series], midnight_ms("Europe/Sofia", 2026, 10, 19), "Europe/Sofia");
+
+        assert_eq!(w.all_day.len(), 1, "the Sunday occurrence is drawn");
+        assert_eq!((w.all_day[0].start_col, w.all_day[0].end_col), (6, 6), "on Sunday, and only Sunday");
+    }
+
+    /// A series of several-day occurrences keeps its length in days: a
+    /// Friday-to-Sunday weekend that ends on the fall-back Sunday covers all
+    /// three columns, not two and a stub.
+    #[test]
+    fn a_several_day_all_day_occurrence_keeps_its_length_across_fall_back() {
+        let mut series = sofia_sundays((2026, 10, 2));
+        series.end_utc = midnight_ms("Europe/Sofia", 2026, 10, 5); // Fri 2 to Sun 4 inclusive
+
+        let w = assemble_week(&[series], midnight_ms("Europe/Sofia", 2026, 10, 19), "Europe/Sofia");
+
+        assert_eq!(w.all_day.len(), 1);
+        assert_eq!((w.all_day[0].start_col, w.all_day[0].end_col), (4, 6), "Friday through Sunday");
+    }
+
+    /// The mirror image, and the worse one: a master on Sofia's spring-forward
+    /// Sunday (29 March 2026) is a 23-hour day, and adding those 23 hours to
+    /// every later occurrence ended each one an hour before its own midnight,
+    /// so the series vanished on every ordinary Sunday.
+    #[test]
+    fn a_series_begun_on_a_spring_forward_day_covers_each_later_day() {
+        let series = sofia_sundays((2026, 3, 29));
+        assert_eq!(series.end_utc - series.start_utc, 23 * 3_600_000, "the master is the 23-hour day");
+
+        let w = assemble_week(&[series], midnight_ms("Europe/Sofia", 2026, 4, 6), "Europe/Sofia");
+
+        assert_eq!(w.all_day.len(), 1, "the ordinary Sunday's occurrence is drawn");
+        assert_eq!((w.all_day[0].start_col, w.all_day[0].end_col), (6, 6), "on Sunday 12 April, and only then");
+    }
 
     /// The defect this plan exists to close, in the week grid.
     ///
@@ -2686,7 +2781,7 @@ mod all_guests_declined_tests {
             status: "confirmed".into(), self_response: Some("accepted".into()),
             conference_uri: None, color_hex: None, calendar_timezone: "UTC".into(),
             description: None, etag: None, sequence: 0, organizer_email: None,
-            guests_can_modify: false, attendees: Vec::new(),
+            guests_can_modify: false, transparency: "opaque".into(), visibility: "default".into(), attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         };
         src.attendees = attendees;

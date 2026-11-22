@@ -24,7 +24,19 @@ use crate::AppState;
 /// The keyring key for a CalDAV secret. Prefixed so the same address used
 /// as both a Google account and an Apple ID cannot collide on one entry.
 fn keyring_key(email: &str) -> String {
-    format!("caldav:{email}")
+    format!("{REAUTH_PREFIX}{email}")
+}
+
+/// What marks a CalDAV account in `AppState::reauth`, beside Google's bare
+/// addresses. The same prefix as the keyring's, for the same reason: one
+/// address can be both a Google account and a CalDAV one, and a dead
+/// password on one must neither stop the other syncing nor send the user to
+/// the wrong fix.
+pub(crate) const REAUTH_PREFIX: &str = "caldav:";
+
+/// The account's mark in `AppState::reauth`.
+pub(crate) fn reauth_key(email: &str) -> String {
+    keyring_key(email)
 }
 
 fn store_password(email: &str, password: &str) -> anyhow::Result<()> {
@@ -33,7 +45,36 @@ fn store_password(email: &str, password: &str) -> anyhow::Result<()> {
 }
 
 fn password_for(email: &str) -> anyhow::Result<String> {
+    #[cfg(test)]
+    if let Some(p) = test_passwords::get(email) {
+        return Ok(p);
+    }
     Ok(keyring::Entry::new(crate::KEYRING_SERVICE, &keyring_key(email))?.get_password()?)
+}
+
+/// Passwords a test hands the write path in place of the OS keychain, so a
+/// CalDAV write can be driven end to end against a wiremock — through
+/// `client_for_calendar` and the post-write resync, the call shape the app
+/// actually makes — without touching the developer's real keychain. Keyed
+/// by account address; each test uses its own, so parallel tests cannot
+/// see each other's entries.
+#[cfg(test)]
+pub(crate) mod test_passwords {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn map() -> &'static Mutex<HashMap<String, String>> {
+        static MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        MAP.get_or_init(Default::default)
+    }
+
+    pub(crate) fn set(email: &str, password: &str) {
+        map().lock().unwrap().insert(email.to_string(), password.to_string());
+    }
+
+    pub(super) fn get(email: &str) -> Option<String> {
+        map().lock().unwrap().get(email).cloned()
+    }
 }
 
 /// What `connect_caldav` needs to know about the kind of server it is
@@ -107,53 +148,33 @@ pub async fn connect_caldav(
     .await
     .map_err(|e| crate::errors::user_facing(&anyhow::Error::from(e)))?;
 
-    // The machine's zone is the fallback for collections that publish none —
-    // an all-day date has to resolve against something, and the zone the
-    // user is sitting in is the only defensible guess.
-    let fallback_tz = jiff::tz::TimeZone::system()
-        .iana_name()
-        .unwrap_or("UTC")
-        .to_string();
-
-    for cal in &calendars {
-        // Like the Google upsert: the provider's fields update, the user's
-        // (`selected`, `sync_enabled`) are never touched on reconnect.
-        sqlx::query(
-            "INSERT INTO calendars
-                (account_id, google_id, summary, color_hex, timezone, access_role,
-                 is_primary, supports_events, supports_tasks)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
-             ON CONFLICT (account_id, google_id) DO UPDATE SET
-                summary = excluded.summary,
-                color_hex = excluded.color_hex,
-                timezone = excluded.timezone,
-                access_role = excluded.access_role,
-                supports_events = excluded.supports_events,
-                supports_tasks = excluded.supports_tasks",
-        )
-        .bind(account_id)
-        .bind(&cal.url)
-        .bind(&cal.display_name)
-        .bind(&cal.color)
-        .bind(cal.timezone.as_deref().unwrap_or(&fallback_tz))
-        .bind(if cal.read_only { "reader" } else { "owner" })
-        .bind(cal.supports_events as i64)
-        .bind(cal.supports_tasks as i64)
-        .execute(pool)
+    omacal_sync::caldav::upsert_collections(pool, account_id, &calendars, &fallback_tz())
         .await
-        .map_err(|e| crate::errors::user_facing(&anyhow::Error::from(e)))?;
-    }
+        .map_err(|e| crate::errors::user_facing(&e))?;
 
     // A reconnect clears the account's dead-credential mark, same as the
     // Google path.
-    state.reauth.lock().expect("reauth mark poisoned").remove(&email);
+    state.reauth.lock().expect("reauth mark poisoned").remove(&reauth_key(&email));
     Ok(email)
+}
+
+/// The zone for collections that publish none — an all-day date has to
+/// resolve against something, and the zone the user is sitting in is the
+/// only defensible guess.
+fn fallback_tz() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .unwrap_or("UTC")
+        .to_string()
 }
 
 /// Maps a CalDAV error to something the connect form can show.
 fn user_facing_caldav(e: CalDavError) -> String {
     match e {
-        CalDavError::Unauthorized => {
+        // At connect, discovery is the credential check, and a server that
+        // refuses the account's own principal has refused the account: the
+        // same advice as a wrong password.
+        CalDavError::Unauthorized | CalDavError::Forbidden => {
             "The server rejected the credentials. For iCloud, use an app-specific password from appleid.apple.com, not your Apple ID password.".to_string()
         }
         CalDavError::PreconditionFailed => e.to_string(),
@@ -205,15 +226,22 @@ pub(crate) async fn client_for_calendar(
 
 /// Syncs every enabled calendar of one CalDAV account. Returns rows written;
 /// an `Unauthorized` anywhere marks the whole account dead (one password
-/// covers every collection).
+/// covers every collection). A collection that answers 403 is skipped, not
+/// failed: it is one refusal, not a dead password.
+///
+/// The calendar list is refreshed first, so a collection made on another
+/// device is synced in the same pass that finds it — see
+/// `omacal_sync::caldav::refresh_collections` for what it may and may not
+/// delete.
 pub(crate) async fn sync_account(
     pool: &SqlitePool,
     account_id: i64,
     client: &CalDavClient,
     window_start_ms: i64,
     window_end_ms: i64,
-    after_write: bool,
 ) -> Result<u64, CalDavError> {
+    omacal_sync::caldav::refresh_collections(pool, account_id, client, &fallback_tz()).await?;
+
     let cals: Vec<(i64, String, i64, i64)> = sqlx::query_as(
         "SELECT id, google_id, supports_events, supports_tasks FROM calendars
          WHERE account_id = ?1 AND sync_enabled = 1 ORDER BY id",
@@ -225,61 +253,31 @@ pub(crate) async fn sync_account(
 
     sync_contacts(pool, account_id, client).await;
 
-    let now = crate::now_ms();
     let mut total = 0u64;
     for (cal_id, url, ev, tasks) in cals {
-        let outcome = if after_write {
-            // The save already refetched this event. Ask only about the
-            // recent window, and leave the recorded span where it was: writing
-            // the recent start back would make the next sync think history
-            // had widened and download it all.
-            let recorded: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
-                "SELECT window_start, window_end FROM sync_state WHERE calendar_id = ?1",
-            )
-            .bind(cal_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(anyhow::Error::from)?;
-            // A long recorded window must not have this follow-up stamp the
-            // ctag. The save's own resync already stored it when that was
-            // safe; storing it here after a change that landed before the
-            // save would hide that change from the next full sync.
-            let (record_start, record_end, record_ctag) = match recorded {
-                Some((Some(start), Some(end))) => (
-                    start,
-                    end,
-                    crate::settings::window_within_recent(start, end, now),
-                ),
-                _ => (window_start_ms, window_end_ms, true),
-            };
-            omacal_sync::caldav::sync_caldav_fetch(
-                pool,
-                client,
-                cal_id,
-                &url,
-                ev != 0,
-                tasks != 0,
-                &[(window_start_ms, window_end_ms)],
-                record_start,
-                record_end,
-                false,
-                record_ctag,
-                now,
-            )
-            .await?
-        } else {
-            omacal_sync::caldav::sync_caldav_calendar(
-                pool,
-                client,
-                cal_id,
-                &url,
-                ev != 0,
-                tasks != 0,
-                window_start_ms,
-                window_end_ms,
-                now,
-            )
-            .await?
+        let outcome = match omacal_sync::caldav::sync_caldav_calendar(
+            pool,
+            client,
+            cal_id,
+            &url,
+            ev != 0,
+            tasks != 0,
+            window_start_ms,
+            window_end_ms,
+            crate::now_ms(),
+        )
+        .await
+        {
+            Ok(o) => o,
+            // One collection refusing (shared without read access, a REPORT
+            // it will not run) keeps what it has and lets the rest sync. The
+            // account's own refusal arrives from discovery above, as
+            // `Unauthorized`.
+            Err(CalDavError::Forbidden) => {
+                tracing::warn!(calendar_id = cal_id, "the server refused this collection; skipped this sync");
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         total += outcome.upserted as u64;
     }
@@ -378,68 +376,141 @@ mod tests {
         );
     }
 
-    /// A save's follow-up sync. The calendar's recorded window reaches 1900,
-    /// and the ctag moved because the save itself wrote. The report must be
-    /// the recent window that was asked for, and the recorded span must stay
-    /// where it was — writing the recent start back would make the next sync
-    /// download the history to catch up.
+    /// The wiring: a sync finds a list made since the account was connected
+    /// and fetches its tasks in the same pass, rather than only on the sync
+    /// after. The listing's own rules are `omacal_sync::caldav`'s tests.
     #[tokio::test]
-    async fn a_save_does_not_report_the_whole_history() {
-        use wiremock::matchers::method;
+    async fn a_sync_picks_up_a_task_list_made_after_the_account_was_connected() {
+        use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
         let server = MockServer::start().await;
-        let collection = format!("{}/cal/", server.uri());
-        let ctag = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:href>/cal/</d:href><d:propstat><d:prop><cs:getctag>after-put</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
-        Mock::given(method("PROPFIND"))
-            .respond_with(ResponseTemplate::new(207).set_body_raw(ctag, "application/xml"))
-            .mount(&server)
-            .await;
-        Mock::given(method("REPORT"))
-            .respond_with(ResponseTemplate::new(207).set_body_raw(
-                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>"#,
-                "application/xml",
-            ))
-            .mount(&server)
-            .await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/</d:href><d:propstat><d:prop>
+                <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/principals/p/</d:href><d:propstat><d:prop>
+                <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}>
+                <d:response><d:href>/cals/p/bernard/</d:href><d:propstat><d:prop>
+                <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                <d:displayname>Bernard</d:displayname>
+                <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/bernard/")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/bernard/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("REPORT")).and(path("/cals/p/bernard/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/bernard/t.ics</d:href>
+                <d:propstat><d:prop><d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:t-1&#13;
+SUMMARY:Take the bins out&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
 
         let pool = omacal_store::connect_memory().await.unwrap();
-        sqlx::query("INSERT INTO accounts (google_sub, email, provider, created_at) VALUES ('s','e@x','caldav',0)")
-            .execute(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, supports_events, supports_tasks)
-             VALUES (1, ?1, 'Work', 'UTC', 'owner', 1, 0)",
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
         )
-        .bind(&collection)
         .execute(&pool).await.unwrap();
-        let history = crate::settings::history_window(0, 0).0;
-        let now = crate::now_ms();
-        let (near, near_end) = crate::settings::history_window(now, crate::settings::SPAN_6_MONTHS);
+        let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
+
+        sync_account(&pool, 1, &client, 0, 1).await.unwrap();
+
+        let lists: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT summary, supports_events, supports_tasks FROM calendars")
+                .fetch_all(&pool).await.unwrap();
+        assert_eq!(lists, vec![("Bernard".to_string(), 0, 1)]);
+        let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(tasks, vec!["Take the bins out".to_string()], "fetched in the same pass");
+    }
+
+    /// One collection that refuses (a calendar shared without read access)
+    /// does not stop the rest of the account syncing, and is not a dead
+    /// password. The refusing one comes first, so a sync that gave up there
+    /// would never reach the other.
+    #[tokio::test]
+    async fn a_collection_that_refuses_leaves_the_others_syncing() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ns = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/""#;
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/</d:href><d:propstat><d:prop>
+                <d:current-user-principal><d:href>/principals/p/</d:href></d:current-user-principal>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/principals/p/</d:href><d:propstat><d:prop>
+                <c:calendar-home-set><d:href>/cals/p/</d:href></c:calendar-home-set>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        let list = |name: &str| format!(
+            r#"<d:response><d:href>/cals/p/{name}/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+            <d:displayname>{name}</d:displayname>
+            <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+            </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#);
+        Mock::given(method("PROPFIND")).and(path("/cals/p/")).and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}>{}{}</d:multistatus>"#, list("refusing"), list("open"))))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/refusing/"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/open/")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/open/</d:href>
+                <d:propstat><d:prop><cs:getctag>c1</cs:getctag></d:prop>
+                <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+        Mock::given(method("REPORT")).and(path("/cals/p/open/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus {ns}><d:response><d:href>/cals/p/open/t.ics</d:href>
+                <d:propstat><d:prop><d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:t-1&#13;
+SUMMARY:Water the plants&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#)))
+            .mount(&server).await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
         sqlx::query(
-            "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end) VALUES (1, 'before-put', ?1, ?2)",
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:e@x', 'e@x', 0, 'caldav')",
         )
-        .bind(history)
-        .bind(near_end)
         .execute(&pool).await.unwrap();
+        let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
 
-        let client = omacal_caldav::CalDavClient::new(server.uri().as_str(), "u", "p").unwrap();
-        sync_account(&pool, 1, &client, near, near_end, true).await.unwrap();
+        let out = sync_account(&pool, 1, &client, 0, 1).await;
 
-        let reports: Vec<String> = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "REPORT")
-            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
-            .collect();
-        assert_eq!(reports.len(), 1, "the changed ctag is fetched once");
-        assert!(!reports[0].contains("19000101"), "a save must not report the whole history: {}", reports[0]);
-        let kept: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
-            .fetch_one(&pool).await.unwrap();
-        assert_eq!(kept, history, "the recorded span stays the history already fetched");
-        let token: String = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = 1")
-            .fetch_one(&pool).await.unwrap();
-        assert_eq!(token, "before-put", "a wider window does not treat the post-write ctag as a full sync");
+        assert!(out.is_ok(), "one refusing collection is not the account's failure: {out:?}");
+        let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(tasks, vec!["Water the plants".to_string()], "the open list still synced");
     }
 }
