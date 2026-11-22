@@ -57,8 +57,11 @@ pub struct UpdateNotice {
 /// broader than "no Google": it produces no network traffic, full stop —
 /// same rule, same shape, same reason as [`crate::sync_loop::may_sync`] and
 /// [`crate::notify_loop::may_notify`].
-pub(crate) fn may_check(demo: bool) -> bool {
-    !demo
+///
+/// And the user's own switch (`settings::update_check`): the check asks a
+/// third party, so it is theirs to turn off.
+pub(crate) fn may_check(demo: bool, enabled: bool) -> bool {
+    !demo && enabled
 }
 
 /// Whether this process may replace itself — the gate on the banner's
@@ -143,6 +146,9 @@ pub(crate) async fn fetch_latest(endpoint: &str) -> anyhow::Result<(String, Stri
     use anyhow::Context;
     let resp = reqwest::Client::builder()
         .user_agent(concat!("omacal/", env!("CARGO_PKG_VERSION")))
+        // A background notice; a GitHub that hangs must not hold a task.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(endpoint)
         .send()
@@ -217,7 +223,7 @@ pub(crate) fn spawn(app: AppHandle) {
             let state = app.state::<crate::AppState>();
             (state.demo, app.package_info().version.to_string())
         };
-        if !may_check(demo) {
+        if !may_check(demo, true) {
             return;
         }
 
@@ -225,7 +231,11 @@ pub(crate) fn spawn(app: AppHandle) {
         let mut ticker = tokio::time::interval(CHECK_INTERVAL);
         loop {
             ticker.tick().await; // the first tick resolves immediately
-            check_once(&app, &current).await;
+            // Read each tick, so the switch takes effect without a restart.
+            let pool = app.state::<crate::AppState>().pool.clone();
+            if may_check(demo, crate::settings::update_check(&pool).await) {
+                check_once(&app, &current).await;
+            }
         }
     });
 }
@@ -245,7 +255,10 @@ pub(crate) fn check_on_focus(app: &AppHandle) {
                 state.update_checked_at.load(std::sync::atomic::Ordering::Relaxed),
             )
         };
-        if !may_check(demo) || !focus_should_check(last, crate::now_ms()) {
+        let pool = app.state::<crate::AppState>().pool.clone();
+        if !may_check(demo, crate::settings::update_check(&pool).await)
+            || !focus_should_check(last, crate::now_ms())
+        {
             return;
         }
         check_once(&app, &current).await;
@@ -408,8 +421,28 @@ mod tests {
     /// network traffic. Same rule as `may_sync` and `may_notify`.
     #[test]
     fn demo_mode_never_checks_for_updates() {
-        assert!(!may_check(true));
-        assert!(may_check(false));
+        assert!(!may_check(true, true));
+        assert!(may_check(false, true));
+    }
+
+    /// The user's switch: off is off, demo or not.
+    #[test]
+    fn a_check_turned_off_never_runs() {
+        assert!(!may_check(false, false));
+        assert!(!may_check(true, false));
+    }
+
+    /// On by default, except inside a Flatpak, whose package manager brings
+    /// the updates; a stored choice wins either way.
+    #[tokio::test]
+    async fn the_update_check_is_on_by_default_except_in_flatpak_and_a_choice_wins() {
+        assert!(crate::settings::update_check_default(false));
+        assert!(!crate::settings::update_check_default(true));
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        assert!(crate::settings::update_check(&pool).await, "no FLATPAK_ID under test: on");
+        crate::settings::store(&pool, &crate::settings::Setting::UpdateCheck(false)).await.ok();
+        assert!(!crate::settings::update_check(&pool).await, "turned off, it stays off");
     }
 
     /// The self-update gate, every corner. The packaged cases are the ones

@@ -77,6 +77,10 @@ const SAFE_PREFIXES: &[&str] = &[
     "some later occurrences of this series were moved or deleted on their own, and a split \
      cannot carry them across — edit all events instead, or re-create them afterwards. \
      Occurrences affected: ",
+    // src-tauri/src/write.rs — `validate_reminders`: the trailing detail is
+    // the reminder method the caller sent, which only the CLI and IPC can
+    // set to anything (the form offers the two that exist).
+    crate::write::UNKNOWN_REMINDER_METHOD,
 ];
 
 /// Error messages matched as a whole, not a prefix: nothing may come before or
@@ -308,6 +312,17 @@ const SAFE_EXACT: &[&str] = &[
     crate::caldav_write::EVENT_CHANGED_ON_SERVER,
     crate::caldav_write::EVENT_NOT_SYNCED_YET,
     crate::caldav_account::CALENDAR_IS_READ_ONLY,
+    // src-tauri/src/write.rs — `validate_reminders`, raised by `create_impl`
+    // and `update_impl` before any write through `map_err(anyhow!)` with no
+    // context added: a reminder the event cannot carry is the user's to fix.
+    crate::write::TOO_MANY_REMINDERS,
+    crate::write::REMINDER_OUT_OF_RANGE,
+    // src-tauri/src/events.rs — a Meet link asked for on a CalDAV calendar,
+    // `bail!` before anything is sent, on create and on save.
+    crate::events::MEET_ONLY_ON_GOOGLE,
+    // src-tauri/src/caldav_write.rs — `respond` finding no ATTENDEE line for
+    // the account, before any write; reached by a bare `?`.
+    crate::caldav_write::NOT_A_GUEST_HERE,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -327,6 +342,12 @@ pub fn user_facing(err: &anyhow::Error) -> String {
     }
     if SAFE_PREFIXES.iter().any(|p| text.starts_with(p)) {
         return text;
+    }
+    // Google answering with an error status, in the words CalDAV's already
+    // get (`server_answered`). Every `ApiError::Http` carries the status
+    // alone, a number and its fixed reason phrase, never a URL or a body.
+    if let Some(omacal_google::ApiError::Http(status)) = err.downcast_ref::<omacal_google::ApiError>() {
+        return server_answered(status);
     }
 
     // Withheld from the user, but not from the log — [`OPAQUE`] tells them to
@@ -352,6 +373,28 @@ pub fn user_facing(err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Refusals a person can act on reach them in their own words, not as
+    /// "Sync failed": a reminder the event cannot carry, a Meet link on a
+    /// calendar that cannot make one, an RSVP with nobody to answer as, and
+    /// Google answering a request with an error status (in the words
+    /// CalDAV's already get).
+    #[test]
+    fn refusals_and_google_statuses_are_shown_not_hidden() {
+        for m in [
+            crate::write::TOO_MANY_REMINDERS,
+            crate::write::REMINDER_OUT_OF_RANGE,
+            crate::events::MEET_ONLY_ON_GOOGLE,
+            crate::caldav_write::NOT_A_GUEST_HERE,
+        ] {
+            assert_eq!(user_facing(&anyhow::anyhow!(m)), m);
+        }
+        let method = format!("{}fax", crate::write::UNKNOWN_REMINDER_METHOD);
+        assert_eq!(user_facing(&anyhow::anyhow!(method.clone())), method);
+
+        let google = anyhow::Error::from(omacal_google::ApiError::Http("403 Forbidden".into()));
+        assert_eq!(user_facing(&google), "The server answered 403 Forbidden");
+    }
 
     /// Captures what `tracing` emitted while `body` ran.
     ///
@@ -627,6 +670,12 @@ mod tests {
             crate::caldav_write::EVENT_CHANGED_ON_SERVER,
             crate::caldav_write::EVENT_NOT_SYNCED_YET,
             crate::caldav_account::CALENDAR_IS_READ_ONLY,
+            // Checked against the rule: fixed literals raised before any
+            // write, no interpolation, no added context (2026-11-19).
+            crate::write::TOO_MANY_REMINDERS,
+            crate::write::REMINDER_OUT_OF_RANGE,
+            crate::events::MEET_ONLY_ON_GOOGLE,
+            crate::caldav_write::NOT_A_GUEST_HERE,
         ];
         for expected in EXPECTED {
             assert!(
@@ -778,6 +827,9 @@ mod tests {
             "some later occurrences of this series were moved or deleted on their own, and a \
              split cannot carry them across — edit all events instead, or re-create them \
              afterwards. Occurrences affected: ",
+            // Checked against the rule: the trailing detail is the reminder
+            // method the caller sent, appended by one `format!`.
+            crate::write::UNKNOWN_REMINDER_METHOD,
         ];
         for expected in EXPECTED {
             assert!(

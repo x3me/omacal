@@ -59,6 +59,22 @@ pub struct CalendarClient {
     http: reqwest::Client,
 }
 
+/// How long one Google request may take before it is given up on, so a
+/// request that never comes back cannot hold the sync (and every account
+/// after it) forever. Shortened under test, so a test can watch it fire.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
+
+/// The client every Google request in this crate goes through: connect and
+/// request timeouts, nothing else changed from reqwest's defaults.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
 impl CalendarClient {
     /// `base_url` is `https://www.googleapis.com/calendar/v3` in production and
     /// a `wiremock` URI in tests.
@@ -66,7 +82,7 @@ impl CalendarClient {
         Self {
             base_url: base_url.into(),
             access_token: access_token.into(),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -465,6 +481,20 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_json_string, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The same rule as the CalDAV client's: a Google request that never
+    /// comes back is given up on rather than holding the sync forever.
+    #[tokio::test]
+    async fn a_request_that_never_comes_back_is_given_up_on() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server).await;
+        let client = CalendarClient::new(server.uri(), "t");
+        let started = std::time::Instant::now();
+        assert!(client.get_event("primary", "e1").await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "gave up before the server answered");
+    }
 
     #[tokio::test]
     async fn list_calendars_parses_the_payload() {

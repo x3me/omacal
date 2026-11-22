@@ -22,6 +22,12 @@ pub enum CalDavError {
     /// caller shows the reconnect banner, same as a dead Google token.
     #[error("the server rejected the credentials")]
     Unauthorized,
+    /// A 403: the server knows who is asking and refuses this one request —
+    /// a collection shared without that access, a REPORT it will not run, a
+    /// UID already taken. Not a credential problem, so not a reconnect: one
+    /// refusing collection must not take the whole account down with it.
+    #[error("the server refused this request")]
+    Forbidden,
     /// The etag guard fired: someone else changed the resource first.
     #[error("the event changed on the server since it was loaded")]
     PreconditionFailed,
@@ -225,11 +231,24 @@ const NS: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns
 /// CardDAV at all should see no mention of it in a calendar request.
 const CARD_NS: &str = r#"xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav""#;
 
+/// How long one request may take, start to finish, before it is given up
+/// on. Without one, a socket left half-open by a laptop's sleep or a proxy
+/// that takes the request and never answers held the sync forever, and with
+/// it every account after this one. Generous, because a REPORT over a large
+/// calendar on a slow link is legitimately slow. Shortened under test, so a
+/// test can watch it fire without waiting minutes.
+const REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 120 });
+/// How long the connection itself may take.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl CalDavClient {
     pub fn new(base_url: &str, username: &str, password: &str) -> anyhow::Result<Self> {
         let base = Url::parse(base_url.trim())?;
         https_or_private(&base)?;
         let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 // Same-host only: a redirect is the server's word, not the
                 // user's, and credentials ride on every request.
@@ -287,8 +306,11 @@ impl CalDavClient {
         }
         let resp = req.body(body).send().await.map_err(anyhow::Error::from)?;
         let status = resp.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        if status == StatusCode::UNAUTHORIZED {
             return Err(CalDavError::Unauthorized);
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Err(CalDavError::Forbidden);
         }
         if status == StatusCode::PRECONDITION_FAILED {
             return Err(CalDavError::PreconditionFailed);
@@ -653,6 +675,25 @@ struct CollectionEntry {
     timezone: Option<String>,
 }
 
+/// Whether `node` sits in a `propstat` whose status is not a success.
+///
+/// RFC 4918 §9.1: a PROPFIND answers each property it was asked for, and the
+/// ones it cannot return come back empty in a `propstat` of their own whose
+/// status says why (404, 403). Only a 2xx block describes the collection. A
+/// block with no status at all is read, since a server that omits it is not
+/// saying the property failed.
+fn in_failed_propstat(node: &roxmltree::Node) -> bool {
+    let Some(propstat) = node.ancestors().find(|a| a.is_element() && local(a.tag_name()) == "propstat") else {
+        return false;
+    };
+    propstat
+        .children()
+        .find(|c| c.is_element() && local(c.tag_name()) == "status")
+        .and_then(|s| s.text())
+        .and_then(|t| t.split_whitespace().nth(1))
+        .is_some_and(|code| !code.starts_with('2'))
+}
+
 fn parse_collections(xml: &str) -> Vec<CollectionEntry> {
     let Ok(doc) = roxmltree::Document::parse(xml) else {
         return Vec::new();
@@ -678,7 +719,7 @@ fn parse_collections(xml: &str) -> Vec<CollectionEntry> {
         let mut saw_privileges = false;
         let mut can_write = false;
         let mut timezone = None;
-        for node in resp.descendants().filter(|n| n.is_element()) {
+        for node in resp.descendants().filter(|n| n.is_element() && !in_failed_propstat(n)) {
             match local(node.tag_name()).as_str() {
                 "resourcetype" => {
                     is_calendar = node
@@ -854,6 +895,22 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A server that takes the request and never answers (a half-open socket
+    /// after sleep, a proxy that hangs) is given up on, so one stalled
+    /// account cannot stall every sync after it. The timeout is shortened
+    /// under test; the server here is slower than it.
+    #[tokio::test]
+    async fn a_server_that_never_answers_is_given_up_on() {
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server).await;
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let started = std::time::Instant::now();
+        assert!(client.ctag(&format!("{}/cal/", server.uri())).await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "gave up before the server answered");
+    }
 
     #[test]
     fn only_same_site_hosts_may_see_credentials() {
@@ -1072,6 +1129,54 @@ END:VCARD
         assert_eq!(cards[0].etag.as_deref(), Some("\"v1\""));
         assert!(cards[0].ics.contains("FN:Ana Petrova"));
         assert_eq!(crate::vcard::parse_cards(&cards[0].ics)[0].emails, vec!["ana@x.com".to_string()]);
+    }
+
+    /// RFC 4918 §9.1: a server lists the properties it could not return in
+    /// a second `propstat` whose status is 404 (or 403), the property empty.
+    /// Only the 200 block says anything about the collection. Read whole, an
+    /// empty privilege set there made a writable calendar read-only, and an
+    /// empty component set made it hold neither events nor tasks.
+    #[test]
+    fn a_property_the_server_could_not_return_says_nothing() {
+        let xml = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+            <d:response><d:href>/cal/work/</d:href>
+              <d:propstat><d:prop>
+                <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+                <d:displayname>Work</d:displayname>
+              </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+              <d:propstat><d:prop>
+                <d:current-user-privilege-set/>
+                <c:supported-calendar-component-set/>
+              </d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>
+            </d:response>
+          </d:multistatus>"#;
+        let got = parse_collections(xml);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].read_only, "no privilege set was returned, so none was refused");
+        assert!(got[0].supports_events && got[0].supports_tasks, "no component set was returned: the RFC default");
+
+        // The same properties in the 200 block are the server's answer.
+        let answered = xml
+            .replace("HTTP/1.1 404 Not Found", "HTTP/1.1 200 OK");
+        let got = parse_collections(&answered);
+        assert!(got[0].read_only, "an empty privilege set, returned, is no write privilege");
+        assert!(!got[0].supports_events, "an empty component set, returned, holds nothing");
+    }
+
+    /// A 403 is a refusal of one request (a collection shared without
+    /// access, an unsupported REPORT, a UID conflict), not a dead password:
+    /// it must not send the user to reconnect. A 401 still does.
+    #[tokio::test]
+    async fn a_refusal_is_not_a_dead_password() {
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server).await;
+        let client = CalDavClient::new(&server.uri(), "user", "right").unwrap();
+        let err = client.ctag(&format!("{}/cal/shared/", server.uri())).await.unwrap_err();
+        assert!(matches!(err, CalDavError::Forbidden), "{err:?}");
+        assert!(!err.needs_reauth());
     }
 
     #[tokio::test]

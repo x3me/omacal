@@ -135,7 +135,7 @@ pub fn needs_reauth(e: &anyhow::Error) -> bool {
 }
 
 async fn post_token(endpoint: &str, form: &[(&str, &str)]) -> anyhow::Result<Tokens> {
-    let resp = reqwest::Client::new()
+    let resp = crate::client::http_client()
         .post(endpoint)
         .form(form)
         .send()
@@ -207,7 +207,7 @@ pub async fn exchange_code(
 /// down) must not hold the account hostage. The user can always finish the
 /// job at myaccount.google.com/permissions.
 pub async fn revoke(revoke_endpoint: &str, token: &str) -> anyhow::Result<()> {
-    let resp = reqwest::Client::new()
+    let resp = crate::client::http_client()
         .post(revoke_endpoint)
         .form(&[("token", token)])
         .send()
@@ -363,6 +363,19 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The token refresh runs before every Google sync, so a token endpoint
+    /// that hangs would hang them all.
+    #[tokio::test]
+    async fn a_token_endpoint_that_hangs_is_given_up_on() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server).await;
+        let started = std::time::Instant::now();
+        assert!(refresh(&format!("{}/token", server.uri()), "id", "secret", "rt").await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "gave up before the server answered");
+    }
 
     #[test]
     fn pkce_challenge_is_url_safe_and_unpadded() {

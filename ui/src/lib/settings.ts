@@ -269,6 +269,9 @@ export type AppSettings = {
    *  until chosen — typed text leaves the machine, and Photon's public
    *  server asks for light personal use. History stays on either way. */
   photonPlaces: boolean;
+  /** Whether the daily update check runs: it asks GitHub's public release
+   *  listing. On by default, off inside a Flatpak (the backend decides). */
+  updateCheck: boolean;
   /** Whether the forecast high is drawn in Celsius or Fahrenheit — Celsius by
    *  default. Read by `WeekGrid` and `Filmstrip` through the
    *  `tempunit.svelte.ts` rune, for `timeFormat`'s reason: both print a
@@ -315,6 +318,9 @@ export type SettingValues = {
   secondTimezone: string | null;
   weatherEnabled: boolean;
   photonPlaces: boolean;
+  /** Whether the daily update check runs: it asks GitHub's public release
+   *  listing. On by default, off inside a Flatpak (the backend decides). */
+  updateCheck: boolean;
   notificationsEnabled: boolean;
   taskNotificationsEnabled: boolean;
   keepRemindersOnScreen: boolean;

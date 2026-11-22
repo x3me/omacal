@@ -66,6 +66,8 @@
     oncalendarchange,
     onappearancechange,
     onsettingschange,
+    initialTab = 'General',
+    initialAccountForm = null,
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
      *  one through `onSignIn` and cannot remove one, because nothing can yet. */
@@ -85,6 +87,12 @@
      *  backend now holds them. `App` derives the create-default from these,
      *  and without this call its copy is stale until a restart. */
     onsettingschange?: (s: AppSettings) => void;
+    /** The pane the modal opens on. Accounts, when it is opened to enter a
+     *  CalDAV server's password again; General otherwise. */
+    initialTab?: 'General' | 'Appearance' | 'Menu bar' | 'Calendars' | 'Accounts' | 'Notifications' | 'About';
+    /** The connect form Accounts opens with, when the empty state's chooser
+     *  sent the user here for one; none otherwise. */
+    initialAccountForm?: 'icloud' | 'caldav' | 'webcal' | null;
     /** Live appearance preview. Separate from `onsettingschange`: dragging a
      *  range should repaint the calendar behind this modal without causing
      *  every unrelated settings reaction (including a weather cache read). */
@@ -605,6 +613,17 @@
     }
   }
 
+  async function toggleUpdateCheck(on: boolean) {
+    aboutNote = null;
+    try {
+      settings = await setSetting('updateCheck', on);
+      if (settings) onsettingschange?.(settings);
+    } catch (e) {
+      aboutNote = String(e);
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function togglePhotonPlaces(on: boolean) {
     note = null;
     try {
@@ -759,6 +778,11 @@
     webcalName = '';
     webcalForm = true;
   }
+  onMount(() => {
+    if (initialAccountForm === 'webcal') openWebcalForm();
+    else if (initialAccountForm) openCaldavForm(initialAccountForm);
+  });
+
 
   async function submitWebcal() {
     if (!webcalForm || webcalBusy) return;
@@ -928,7 +952,9 @@
   const TABS = ['General', 'Appearance', 'Menu bar', 'Calendars', 'Accounts', 'Notifications', 'About'] as const;
   type Tab = (typeof TABS)[number];
 
-  let tab = $state<Tab>('General');
+  // Read once, at open: the modal is mounted fresh each time it opens.
+  // svelte-ignore state_referenced_locally
+  let tab = $state<Tab>(initialTab);
 
   /** The About pane's own answer, beside its own links, like every other pane's
    *  note. Only a failure has anything to say here: a browser coming up is its
@@ -2039,6 +2065,19 @@
           <a href="https://github.com/x3me/omacal" onclick={e => { e.preventDefault(); openLink('repository'); }}>GitHub repository</a>
           <a href="https://omacal.app" onclick={e => { e.preventDefault(); openLink('site'); }}>omacal.app</a>
         </div>
+        <label class="check section-start">
+          <input
+            type="checkbox"
+            checked={settings?.updateCheck ?? true}
+            disabled={!settings}
+            onchange={(e) => toggleUpdateCheck(e.currentTarget.checked)}
+          />
+          Check for updates
+        </label>
+        <p class="hint">
+          Once a day, asks GitHub's public release list whether a newer
+          version is out. GitHub sees the version and your IP address.
+        </p>
         {#if aboutNote}<p class="note err" role="alert" data-testid="about-note">{aboutNote}</p>{/if}
       </div>
 

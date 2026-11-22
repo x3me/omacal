@@ -22,7 +22,8 @@
   import { onPinch, type Pinch } from './pinch';
   import {
     BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, STRONG_SWIPE_MIN_PX, STRONG_SWIPE_PX_PER_MS, TOUCH_LIFT_WHEEL_MS,
-    filterWeekends, packBandLanes, panCommit,
+    NO_DECAY, RESIST_PX_PER_MS, decayStep, filterWeekends, momentumBegun, momentumTail, packBandLanes,
+    pageTarget, panCommit, resist,
     settleTarget, skipWeekendStart, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { DayColumn, Lane, Placed, WeekPayload, UiEvent } from './api';
@@ -40,7 +41,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, calendars = [], weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontaskdue = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
+  let { week, calendars = [], weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontaskdue = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, panAlign = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -58,6 +59,11 @@
      *  whole days — positive is forward. Optional: a grid without it (a
      *  future embedding) simply keeps the wheel native. */
     onpan?: ((days: number) => void) | null;
+    /** The window's slide off its alignment, in days (`App`'s
+     *  `weekPanDays`), when the view has a fixed first day to align to; `null`
+     *  in a rolling week or Day view. With it a strong swipe lands on a whole
+     *  aligned week (`settleTarget`'s `align`). */
+    panAlign?: number | null;
     /** The forecast by ISO date (`weather.ts`), or null for none — off, not
      *  yet fetched, or failed all look the same here: a header with no sky,
      *  which is what this header looked like for its whole life until now. */
@@ -460,10 +466,29 @@
    *  track moving, which is what a scroll view would do. A touchscreen says
    *  so directly (`endTouchPan`) and never waits for this. */
   const PAN_LULL_MS = 120;
+  /** A Mac, whose touchpad deltas come accelerated and carry a fast flick
+   *  past the page it lands on (`RESIST_PX_PER_MS`). Linux's do not. */
+  const ACCELERATED_WHEEL = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 
   /** The gesture under way is a finger on the screen, not a touchpad: set by
    *  the press that began it, which a touchpad swipe never makes. */
   let panTouch = false;
+  /** `panAlign` as it stood when the gesture began: the strong swipe's one
+   *  week is counted from the week on screen then, not from wherever the
+   *  momentum has carried the slide by the time it settles. */
+  let panAlignStart: number | undefined;
+  /** The run of shrinking wheel events the gesture is in (`decayStep`): five
+   *  of them at a strong swipe's speed are a Mac's momentum, and the swipe is
+   *  decided there, while its speed is still the hand's. */
+  let panDecay = NO_DECAY;
+  /** The momentum still arriving after a swipe was decided on it: swallowed,
+   *  so it neither drags the settle on nor starts a gesture of its own. */
+  let panTail: { sign: number; abs: number; at: number } | null = null;
+  /** The fastest the gesture went since its current run of shrinking events
+   *  began: the hand's speed as it lifted, which is what a strong swipe is
+   *  judged on everywhere else. Read at the moment momentum is recognised,
+   *  five events later, the speed has already lost a little to the decay. */
+  let panRunPeakV = 0;
   /** When the last finger left the screen. See `wheelPan` for the wheel
    *  event WebKitGTK sends right after, which is not movement. */
   let touchLiftAt = -Infinity;
@@ -499,8 +524,10 @@
 
   /** The fingers lifted. One spring from where the track is to the column it
    *  should rest on (`settleTarget`), carrying the speed they left with, and
-   *  whole days handed up as their columns pass. */
-  function settlePan() {
+   *  whole days handed up as their columns pass. `lift` is the hand's speed
+   *  when it is known better than the last events say: momentum's first
+   *  frames have already slowed (`panRunPeakV`). */
+  function settlePan(lift?: number) {
     clearTimeout(panLull);
     flushPan();
     if (panColWidth <= 0) {
@@ -509,7 +536,8 @@
       return;
     }
     const x = panHanded + panDays;
-    const v = velocityOf(panSamples);
+    const now = velocityOf(panSamples);
+    const v = lift !== undefined && Math.abs(lift) > Math.abs(now) ? Math.sign(now) * Math.abs(lift) : now;
     panSamples = [];
     // A strong swipe is the ‹ / › step, a page of `visible` days; Day view
     // under a finger pages on every flick (#127). The strong thresholds are
@@ -523,6 +551,7 @@
       minV: pager ? PAGE_FLICK_PX_PER_MS / panColWidth : FLING_MIN_V,
       strongV: STRONG_SWIPE_PX_PER_MS * perPx,
       strongX: STRONG_SWIPE_MIN_PX * perPx,
+      align: panAlignStart,
     });
     const plan = springPlan(x, target, v);
     const started = performance.now();
@@ -545,6 +574,15 @@
       panActive = false;
     };
     snapRaf = requestAnimationFrame(step);
+  }
+
+  /** Whether the gesture, as it stands, is a strong swipe: the same speed
+   *  and travel `settlePan` asks of it, in the hand's pixels. */
+  function strongAt(speed: number): boolean {
+    if (panColWidth <= 0) return false;
+    const perPx = (panTouch ? 1 : PAN_GAIN) / panColWidth;
+    return speed >= STRONG_SWIPE_PX_PER_MS * perPx
+      && Math.abs(panHanded + panDays + panPending) >= STRONG_SWIPE_MIN_PX * perPx;
   }
 
   /** Moves the track by `days` of travel, handing up whole columns as they
@@ -1060,6 +1098,8 @@
     window.addEventListener('pointermove', onTaskDragMove);
     window.addEventListener('pointerup', onTaskDragEnd);
     window.addEventListener('keydown', onTaskDragKey);
+    window.addEventListener('pointercancel', onTaskDragLost);
+    window.addEventListener('blur', onTaskDragLost);
   }
 
   function onTaskDragMove(e: PointerEvent) {
@@ -1076,6 +1116,8 @@
     window.removeEventListener('pointermove', onTaskDragMove);
     window.removeEventListener('pointerup', onTaskDragEnd);
     window.removeEventListener('keydown', onTaskDragKey);
+    window.removeEventListener('pointercancel', onTaskDragLost);
+    window.removeEventListener('blur', onTaskDragLost);
     if (!d || !d.moving || !commit || d.cols === 0) return;
     const days = renderedDays.map((x) => x.start_ms);
     const i = days.indexOf(d.fromMs);
@@ -1085,6 +1127,10 @@
   }
 
   const onTaskDragEnd = () => endTaskDrag(true);
+  /** The pointer or the window was lost mid-drag (Alt-Tab, palm rejection):
+   *  abandoned as Escape abandons it, never dropped on a later release. The
+   *  same rule for every drag here; the sweep already had it. */
+  const onTaskDragLost = () => endTaskDrag(false);
   /** Escape puts it back, the same escape the event drag honours. */
   const onTaskDragKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') endTaskDrag(false);
@@ -1122,6 +1168,8 @@
     window.addEventListener('pointermove', onPinDragMove);
     window.addEventListener('pointerup', onPinDragEnd);
     window.addEventListener('keydown', onPinDragKey);
+    window.addEventListener('pointercancel', onPinDragLost);
+    window.addEventListener('blur', onPinDragLost);
   }
 
   function onPinDragMove(e: PointerEvent) {
@@ -1147,10 +1195,13 @@
     window.removeEventListener('pointermove', onPinDragMove);
     window.removeEventListener('pointerup', onPinDragEnd);
     window.removeEventListener('keydown', onPinDragKey);
+    window.removeEventListener('pointercancel', onPinDragLost);
+    window.removeEventListener('blur', onPinDragLost);
     if (d && d.moving && commit && d.landedMs !== d.dueMs) ontaskdue?.(d.id, d.landedMs);
   }
 
   const onPinDragEnd = () => endPinDrag(true);
+  const onPinDragLost = () => endPinDrag(false);
   const onPinDragKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') endPinDrag(false);
   };
@@ -1200,6 +1251,8 @@
     window.addEventListener('pointermove', onDragMove);
     window.addEventListener('pointerup', onDragEnd);
     window.addEventListener('keydown', onDragKey);
+    window.addEventListener('pointercancel', onDragLost);
+    window.addEventListener('blur', onDragLost);
   }
 
   function onDragMove(e: PointerEvent) {
@@ -1300,6 +1353,8 @@
     window.addEventListener('pointermove', onDraftMove);
     window.addEventListener('pointerup', endDraftDrag);
     window.addEventListener('keydown', onDraftKey);
+    window.addEventListener('pointercancel', onDraftLost);
+    window.addEventListener('blur', onDraftLost);
   }
 
   function onDraftMove(e: PointerEvent) {
@@ -1336,6 +1391,17 @@
     window.removeEventListener('pointermove', onDraftMove);
     window.removeEventListener('pointerup', endDraftDrag);
     window.removeEventListener('keydown', onDraftKey);
+    window.removeEventListener('pointercancel', onDraftLost);
+    window.removeEventListener('blur', onDraftLost);
+  }
+
+  /** Lost mid-drag: the draft goes back where the gesture found it, as
+   *  Escape puts it. */
+  function onDraftLost() {
+    if (!draftDrag) return;
+    const origin = draftDrag.origin;
+    endDraftDrag();
+    ondraftmove?.(origin);
   }
 
   function onDragEnd() {
@@ -1381,6 +1447,16 @@
     window.removeEventListener('pointermove', onDragMove);
     window.removeEventListener('pointerup', onDragEnd);
     window.removeEventListener('keydown', onDragKey);
+    window.removeEventListener('pointercancel', onDragLost);
+    window.removeEventListener('blur', onDragLost);
+  }
+
+  /** Lost mid-drag: back to its origin, as Escape does, and the release
+   *  that follows is no drop. */
+  function onDragLost() {
+    if (!drag) return;
+    draggedNotClicked = drag.moving;
+    endDrag();
   }
 
   /**
@@ -1805,7 +1881,10 @@
    * up. The drag half of this has been true since Task 3; it is fixed here
    * rather than left because the sweep was about to be a second copy of it.
    */
-  $effect(() => () => { endDrag(); endSweep(); });
+  // Every gesture's window listeners, not two of them: an unmount mid-drag
+  // (a view switch from the keyboard) left the task, pin and draft drags
+  // listening to a window they no longer belonged to.
+  $effect(() => () => { endDrag(); endSweep(); endTaskDrag(false); endPinDrag(false); endDraftDrag(); });
 
   /**
    * The inline style for the ghost drawn over `day` while it is being swept,
@@ -2019,6 +2098,17 @@
       if (sideways || panActive) e.preventDefault();
       return;
     }
+    // Only a sideways event can be the tail: a vertical scroll straight
+    // after a flick scrolls the hours. An event with no travel at all keeps
+    // the tail's last size, or the next frame of it would read as a push.
+    if (panTail) {
+      if ((sideways || e.deltaY === 0) && momentumTail(panTail, e.deltaX, at)) {
+        e.preventDefault();
+        panTail = { sign: panTail.sign, abs: e.deltaX === 0 ? panTail.abs : Math.abs(e.deltaX), at };
+        return;
+      }
+      panTail = null;
+    }
     const tracking = panActive && !panSettling;
     if (!sideways && !tracking) return;
     e.preventDefault();
@@ -2033,18 +2123,38 @@
       panHanded = 0;
       panSamples = [];
       panTouch = touchDown;
+      panAlignStart = panAlign ?? undefined;
+      panDecay = NO_DECAY;
+      panRunPeakV = 0;
       cancelPressGestures();
     }
     if (panColWidth <= 0) return;
     panActive = true;
-    const days = -(e.deltaX * (panTouch ? 1 : PAN_GAIN)) / panColWidth;
+    const gain = panTouch ? 1 : PAN_GAIN;
+    let days = -(e.deltaX * gain) / panColWidth;
+    // The samples keep the hand's own travel: the speed is the hand's.
     panSamples.push({ t: eventTime(e), days });
     if (panSamples.length > 12) panSamples.shift();
+    const speed = Math.abs(velocityOf(panSamples));
+    if (ACCELERATED_WHEEL && !panTouch && days !== 0 && speed * panColWidth / gain >= RESIST_PX_PER_MS) {
+      const x = panHanded + panDays + panPending;
+      days = resist(x, days, pageTarget(x, Math.sign(days), visible, panAlignStart));
+    }
     if (!tracking) {
       movePan(days);
     } else {
       panPending += days;
       if (!panFrame) panFrame = requestAnimationFrame(flushPan);
+    }
+    // A Mac's momentum, begun at a strong swipe's speed: decide it now, a
+    // page on. Waiting for the lull after it read the tail's speed, which is
+    // never strong. A finger on the screen sends no momentum.
+    panDecay = decayStep(panDecay, e.deltaX);
+    panRunPeakV = panDecay.n === 0 ? speed : Math.max(panRunPeakV, speed);
+    if (!panTouch && momentumBegun(panDecay) && strongAt(panRunPeakV)) {
+      panTail = { sign: Math.sign(e.deltaX), abs: Math.abs(e.deltaX), at };
+      settlePan(panRunPeakV);
+      return;
     }
     clearTimeout(panLull);
     panLull = setTimeout(settlePan, PAN_LULL_MS);

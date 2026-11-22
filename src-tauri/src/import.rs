@@ -46,6 +46,9 @@ pub enum Planned {
         /// When it starts, as the row will read it: ms epoch.
         start_ms: i64,
         all_day: bool,
+        /// For an all-day event, its date (`yyyy-mm-dd`) as the file states
+        /// it, which the preview names. `None` when timed.
+        date: Option<String>,
         /// The repeat as the preview words it ("weekly on Mon, Wed, 10
         /// times"), when the file carried one at all: the whole rule, end
         /// included, so the preview shows what will be stored.
@@ -202,6 +205,7 @@ pub fn plan(src: &str, cal_tz: &str, existing_uids: &[String]) -> Option<Vec<Pla
                     summary,
                     start_ms,
                     all_day,
+                    date: if all_day { all_day_date(&ev.start) } else { None },
                     repeat: repeat.as_ref().map(repeat_words),
                     dropped_guests: ev.attendees.len(),
                 }
@@ -333,6 +337,7 @@ mod tests {
                 summary: "Lunch".into(),
                 start_ms: expected.as_millisecond(),
                 all_day: false,
+                date: None,
                 repeat: None,
                 dropped_guests: 0,
             }
@@ -504,9 +509,12 @@ mod tests {
              DTEND;VALUE=DATE:20260911\r\nEND:VEVENT\r\n",
         );
         let plan = plan(&src, "UTC", &[]).unwrap();
-        let Planned::Import { all_day, summary, .. } = &plan[0] else { panic!() };
+        let Planned::Import { all_day, summary, date, .. } = &plan[0] else { panic!() };
         assert!(all_day);
         assert_eq!(summary, "(no title)");
+        // The file's own day, which the preview names: read from the instant
+        // in the webview's zone, a calendar ahead of it showed the day before.
+        assert_eq!(date.as_deref(), Some("2026-09-10"));
     }
 
     fn only_event(src: &str) -> ics::CalEvent {

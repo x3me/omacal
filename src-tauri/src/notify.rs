@@ -51,12 +51,16 @@ pub(crate) enum Action {
     /// Open the occurrence's conferencing link. Carries the URI, so nothing
     /// downstream has to find it again — and **only exists when there is one**.
     Join(String),
-    /// Re-queue this reminder five minutes out (§2.5).
+    /// Post this reminder again five minutes out (§2.5), through
+    /// [`crate::snooze`]. Carries the reminder's own [`FiredKey`] fields,
+    /// because the click comes back with nothing else, and the loop needs them
+    /// to derive the same reminder again from the calendar as it is by then.
     ///
-    /// In memory only, deliberately: a snooze that does not survive a restart
-    /// is acceptable and much simpler than persisting it, and the missed rule
-    /// re-fires the reminder anyway while the event is still live.
-    Snooze5m,
+    /// The missed rule does **not** bring a snoozed reminder back on its own:
+    /// it was recorded as fired when it was posted, and a recorded reminder is
+    /// never offered again. Until the snooze queue existed, this button
+    /// dismissed the reminder and did nothing else.
+    Snooze5m { event_id: i64, occurrence_ms: i64, minutes: i64 },
     /// Accept the invitation this notification announces, for the whole
     /// series (`respond_to_event`'s scope `all` — what answering the email
     /// would do).
@@ -113,7 +117,7 @@ pub(crate) fn action_for_key(actions: &[Action], key: &str) -> Option<Action> {
             matches!(
                 (a, key),
                 (Action::Join(_), "join")
-                    | (Action::Snooze5m, "snooze")
+                    | (Action::Snooze5m { .. }, "snooze")
                     | (Action::AcceptInvite { .. }, "default")
                     | (Action::OpenEvent { .. }, "default")
                     | (Action::OpenTask { .. }, "default")
@@ -190,7 +194,11 @@ pub(crate) fn notification_for_format(
             actions.push(Action::Join(uri.clone()));
         }
     }
-    actions.push(Action::Snooze5m);
+    actions.push(Action::Snooze5m {
+        event_id: d.key.event_id,
+        occurrence_ms: d.key.occurrence_ms,
+        minutes: d.key.minutes,
+    });
     // The click itself, on every reminder: land the calendar on the
     // occurrence. Join keeps its own button where a daemon renders buttons —
     // a click must never join a meeting on the user's behalf.
@@ -288,7 +296,7 @@ pub(crate) const UN_CATEGORY_REMINDER: &str = "omacal.reminder";
 pub(crate) fn un_category(actions: &[Action]) -> &'static str {
     if actions.iter().any(|a| matches!(a, Action::Join(_))) {
         UN_CATEGORY_JOIN
-    } else if actions.iter().any(|a| matches!(a, Action::Snooze5m)) {
+    } else if actions.iter().any(|a| matches!(a, Action::Snooze5m { .. })) {
         UN_CATEGORY_REMINDER
     } else {
         ""
@@ -427,7 +435,7 @@ impl Notifier for DbusNotifier {
         for action in &n.actions {
             match action {
                 Action::Join(_) => builder.action("join", "Join"),
-                Action::Snooze5m => builder.action("snooze", "Snooze 5m"),
+                Action::Snooze5m { .. } => builder.action("snooze", "Snooze 5m"),
                 Action::AcceptInvite { .. } => builder.action("default", "Accept"),
                 Action::OpenEvent { .. } => builder.action("default", "Open"),
                 Action::OpenTask { .. } => builder.action("default", "Open"),
@@ -498,6 +506,10 @@ mod tests {
     /// 2026-08-10T09:00:00Z. In `Europe/Sofia` (UTC+3 in August) that is 12:00.
     const T0900Z: i64 = 1_786_352_400_000;
     const SOFIA: &str = "Europe/Sofia";
+
+    /// The Snooze action for the reminder `due` builds: event 1's 10-minute
+    /// reminder for its 09:00 occurrence.
+    const SNOOZE_THIS: Action = Action::Snooze5m { event_id: 1, occurrence_ms: T0900Z, minutes: 10 };
 
     fn due(title: Option<&str>, location: Option<&str>, conference: Option<&str>) -> Due {
         Due {
@@ -577,12 +589,14 @@ mod tests {
         assert_eq!(notification_for(&d, SOFIA).body, "All day · Bulgaria");
     }
 
-    /// §2.5. Snooze is offered on everything; it needs nothing from the event.
+    /// §2.5. Snooze is offered on every reminder, and names that reminder:
+    /// the click comes back with nothing but the action, so the action is
+    /// what tells the snooze queue which reminder to post again.
     #[test]
-    fn every_notification_offers_snooze() {
+    fn every_notification_offers_snooze_for_its_own_reminder() {
         assert!(notification_for(&due(Some("Standup"), None, None), SOFIA)
             .actions
-            .contains(&Action::Snooze5m));
+            .contains(&SNOOZE_THIS));
     }
 
     /// A reminder announces a moment; once the moment is near, expiring is
@@ -649,7 +663,7 @@ mod tests {
         let reminder =
             notification_for(&due(Some("Standup"), None, Some("https://meet/x")), SOFIA).actions;
         assert_eq!(action_for_key(&reminder, "join"), Some(Action::Join("https://meet/x".into())));
-        assert_eq!(action_for_key(&reminder, "snooze"), Some(Action::Snooze5m));
+        assert_eq!(action_for_key(&reminder, "snooze"), Some(SNOOZE_THIS));
         // The click lands on the event — never on the meeting. Joining is a
         // side effect a click must not have; Join stays on its own button.
         assert_eq!(
@@ -706,7 +720,7 @@ mod tests {
             action_for_un(&payload, "join"),
             Some(Action::Join("https://meet/x".into()))
         );
-        assert_eq!(action_for_un(&payload, "snooze"), Some(Action::Snooze5m));
+        assert_eq!(action_for_un(&payload, "snooze"), Some(SNOOZE_THIS));
         assert_eq!(
             action_for_un(&payload, UN_DEFAULT_ACTION),
             Some(Action::OpenEvent { event_id: 1, start_ms: T0900Z, end_ms: T0900Z + HOUR }),

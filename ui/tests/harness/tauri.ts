@@ -488,13 +488,13 @@ function statusFor(scenario: string): AppStatus {
     // picker opens after either.
     case 'sign-in-adds-account':
       return {
-        accounts: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
+        accounts: [], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: null, demo: false,
         overlay_titlebar: false, self_update: false,
       };
     // A newer release, as the daily check would have left it on AppState.
     case 'update-available':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], version: '9.9.9', system_tz_change: null,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], version: '9.9.9', system_tz_change: null,
         update: { version: '0.2.0', url: 'https://github.com/x3me/omacal/releases/tag/v0.2.0' },
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
@@ -502,7 +502,7 @@ function statusFor(scenario: string): AppStatus {
     // token, discovered by a sync, waiting on a re-consent.
     case 'needs-reauth':
       return {
-        accounts: ['me@x.com'], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: ['me@x.com'], update: null, system_tz_change: null, version: '9.9.9',
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
     // A macOS window whose controls are drawn over the webview. The default
@@ -511,12 +511,12 @@ function statusFor(scenario: string): AppStatus {
     // since none of them is about the title bar.
     case 'overlay-titlebar':
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: true, self_update: false,
       };
     default:
       return {
-        accounts: ['me@x.com'], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
+        accounts: ['me@x.com'], caldav_reauth: [], needs_reauth: [], update: null, system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO,
         demo: false, overlay_titlebar: false, self_update: false,
       };
   }
@@ -776,6 +776,7 @@ type StubSettings = {
   weatherEnabled: boolean;
   weatherLocation: string | null;
   photonPlaces: boolean;
+  updateCheck: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
   startOnLoginAsked: boolean;
@@ -872,6 +873,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   // Off until asked: typed locations do not leave the machine on a
   // fresh install, and Photon's public server asks for light use.
   photonPlaces: false,
+  updateCheck: true,
   // The backend's default: Celsius, so no installed copy changes under its user.
   temperatureUnit: 'celsius',
   // The backend's default too, and for a reason the stub has to reproduce
@@ -947,15 +949,15 @@ function saveSettings(s: StubSettings): StubSettings {
 const SEARCHABLE = [
   {
     eventId: APP_SERIES_ID, title: 'Standup',
-    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000,
+    startMs: APP_SERIES_OCCURRENCE, endMs: APP_SERIES_OCCURRENCE + 30 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_ONE_OFF_ID, title: 'Board prep',
-    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000,
+    startMs: APP_ONE_OFF_START, endMs: APP_ONE_OFF_START + 60 * 60_000, allDayDate: null,
   },
   {
     eventId: APP_GUESTS_ID, title: 'Standup review',
-    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000,
+    startMs: APP_NOW - 48 * 3_600_000, endMs: APP_NOW - 47 * 3_600_000, allDayDate: null,
   },
   // **A different month from the one the app opens on**, which is what makes
   // "the calendar moves to that date" witnessable at all: every other entry
@@ -963,7 +965,16 @@ const SEARCHABLE = [
   // one moves nothing and a version that never moved would pass.
   {
     eventId: APP_SOLO_SERIES_ID, title: 'Dentist',
-    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000,
+    startMs: APP_NOW + 45 * 24 * 3_600_000, endMs: APP_NOW + 45 * 24 * 3_600_000 + 3_600_000, allDayDate: null,
+  },
+  // An all-day event on an Auckland calendar: its 14 February is 13 February
+  // 11:00 UTC, and the suite runs in UTC, so a result dated from `startMs`
+  // reads the 13th. `allDayDate` is the backend's own reading of the day.
+  {
+    // Its own id: a query matching it and Dentist ("e") would otherwise
+    // hand the overlay's keyed list two equal keys.
+    eventId: 9_901, title: 'Valentines dinner',
+    startMs: Date.UTC(2024, 1, 13, 11), endMs: Date.UTC(2024, 1, 14, 11), allDayDate: '2024-02-14',
   },
 ];
 
@@ -1048,6 +1059,7 @@ export function installTauriStub(scenario: string): Harness {
       // URL from its own store by id and spawns sanitized. The test's fact
       // is the call and its id, in `harness.calls`.
       case 'open_conference':
+      case 'open_link':
         return null;
       // The export's file chooser is the platform's, so a spec can only ever
       // assert the call and what the popover does with the answer. Both
