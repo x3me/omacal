@@ -62,6 +62,11 @@ pub struct Hit {
     /// [`nearest`]'s answer and for a one-off is its own span.
     pub start_ms: i64,
     pub end_ms: i64,
+    /// For an all-day occurrence, its civil date (`2026-08-05`) in its own
+    /// calendar's zone, which is what the result names and where a jump
+    /// lands. Read from the instant in the machine's zone instead, a calendar
+    /// ahead of it showed the day before. `None` for a timed occurrence.
+    pub all_day_date: Option<String>,
 }
 
 /// `hits`, ordered nearest to `now_ms` first (spec §4).
@@ -136,6 +141,7 @@ mod tests {
             title: format!("event {id}"),
             start_ms: NOW + offset,
             end_ms: NOW + offset + HOUR,
+            all_day_date: None,
         }
     }
 

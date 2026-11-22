@@ -14,10 +14,12 @@
 //!   drops the series' exceptions — their `RECURRENCE-ID`s name occurrence
 //!   starts that no longer exist.
 //! - **this**: upsert an exception component under the same UID.
-//! - **following**: `UNTIL` on the master's rule, plus a brand-new resource
-//!   (new UID) carrying the rest. `COUNT` does not survive a split — it
-//!   counts from a start that no longer exists — so the remainder's rule is
-//!   carried without it.
+//! - **following**: a brand-new resource (new UID) carrying the rest, written
+//!   first, then `UNTIL` on the master's rule. Refused, as a Google split is,
+//!   when the master's rule ends after a `COUNT` (the rest would need what is
+//!   left of it, which only a full expansion knows) and when later
+//!   occurrences were changed on their own (shortening the master takes those
+//!   changes with it).
 //!
 //! Guests are deliberately not written: CalDAV scheduling (iTIP) is its own
 //! project, the form hides the editor on these calendars, and the rewrite
@@ -138,6 +140,16 @@ fn endpoints(when: &When, tz: &str, cal_tz: &str) -> anyhow::Result<(WriteTime, 
 
 /// One occurrence's identity, rendered the way the resource's own DTSTART is
 /// — a bare date for all-day series, the master's zone otherwise.
+/// The instant that names one occurrence of a series: where the series put
+/// it, not where it sits now. For an occurrence that was moved on its own
+/// the two differ, and only the first matches its exception's
+/// `RECURRENCE-ID` — rendering the second would address a slot the series
+/// never had, so an edit would add a second exception and a delete would
+/// exclude the wrong slot and leave the moved occurrence on screen.
+fn occurrence_identity(viewed: &StoredEvent, occurrence_start_ms: i64) -> i64 {
+    viewed.original_start_utc.unwrap_or(occurrence_start_ms)
+}
+
 fn occurrence_time(master: &StoredEvent, occurrence_start_ms: i64) -> anyhow::Result<WriteTime> {
     let ts = jiff::Timestamp::from_millisecond(occurrence_start_ms)?;
     if master.is_all_day {
@@ -168,47 +180,28 @@ fn alarms_for(
     }
 }
 
-/// The recurrence lines a rewrite should carry. `COUNT` is stripped when the
-/// lines are inherited across a split (`strip_count`), never otherwise.
-fn recurrence_for(
-    input: &Option<Option<String>>,
-    master: Option<&StoredEvent>,
-    strip_count: bool,
-) -> Vec<String> {
-    let inherited = || -> Vec<String> {
-        master
-            .and_then(|m| m.recurrence.as_deref())
-            .map(|r| r.lines().map(str::to_string).collect())
-            .unwrap_or_default()
-    };
-    let mut lines = match input {
+/// The recurrence lines a write carries: the form's rule when it set one,
+/// none when it chose Never, and the master's own when Repeat was left alone.
+fn recurrence_for(input: &Option<Option<String>>, master: Option<&StoredEvent>) -> Vec<String> {
+    match input {
         Some(Some(rule)) => vec![rule.clone()],
         Some(None) => Vec::new(),
-        None => inherited(),
-    };
-    if strip_count {
-        lines = lines
-            .into_iter()
-            .map(|l| {
-                if !l.to_ascii_uppercase().starts_with("RRULE") {
-                    return l;
-                }
-                let Some(colon) = l.find(':') else { return l };
-                let (head, params) = l.split_at(colon + 1);
-                let kept: Vec<&str> = params
-                    .split(';')
-                    .filter(|p| !p.trim().to_ascii_uppercase().starts_with("COUNT="))
-                    .collect();
-                format!("{head}{}", kept.join(";"))
-            })
-            .collect();
+        None => master
+            .and_then(|m| m.recurrence.as_deref())
+            .map(|r| r.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
     }
-    lines
 }
 
 fn now_ts() -> jiff::Timestamp {
     jiff::Timestamp::from_millisecond(crate::now_ms()).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
 }
+
+/// An RSVP on a CalDAV event whose copy on the server has no ATTENDEE line
+/// for this account: nothing to answer. Raised before any write;
+/// allowlisted in `errors.rs`.
+pub(crate) const NOT_A_GUEST_HERE: &str =
+    "this event's copy on the server does not list you as a guest, so there is no invitation here to answer";
 
 /// The 412 an etag-guarded write answers with, worded as its task twin
 /// `tasks::TASK_CHANGED_ON_SERVER` is. Both name the one fix there is —
@@ -225,13 +218,18 @@ pub(crate) const EVENT_NOT_SYNCED_YET: &str =
 fn friendly(e: CalDavError) -> anyhow::Error {
     match e {
         CalDavError::PreconditionFailed => anyhow::anyhow!(EVENT_CHANGED_ON_SERVER),
+        // In the allowlisted words any other status gets: the user learns the
+        // server said no, rather than reading "Sync failed".
+        CalDavError::Forbidden => {
+            anyhow::anyhow!(crate::errors::server_answered(reqwest::StatusCode::FORBIDDEN))
+        }
         other => anyhow::Error::from(other),
     }
 }
 
 /// Post-write reconciliation: one collection resynced through the read path,
 /// and the bar's feed refreshed.
-async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
+pub(crate) async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result<()> {
     let (client, collection_url) =
         crate::caldav_account::client_for_calendar(state, calendar_id).await?;
     let (supports_events, supports_tasks): (i64, i64) = sqlx::query_as(
@@ -299,7 +297,7 @@ pub(crate) async fn create(
         description: fields.description,
         start,
         end,
-        recurrence: recurrence_for(&fields.recurrence, None, false),
+        recurrence: recurrence_for(&fields.recurrence, None),
         recurrence_id: None,
         alarms: alarms_for(&fields.reminders, None),
         sequence: 0,
@@ -433,7 +431,7 @@ pub(crate) async fn update(
                 description: fields.description,
                 start,
                 end,
-                recurrence: recurrence_for(&fields.recurrence, Some(&master), false),
+                recurrence: recurrence_for(&fields.recurrence, Some(&master)),
                 recurrence_id: None,
                 alarms: alarms_for(&fields.reminders, Some(&master)),
                 sequence: master.sequence + 1,
@@ -447,14 +445,37 @@ pub(crate) async fn update(
                 .ok_or_else(|| anyhow::anyhow!("could not rewrite the event's resource"))?;
             (out, None, uid.clone())
         } else if scope == "following" {
-            if occurrence_start_ms <= master.start_utc {
+            // Cut at the slot the series put the occurrence in, as a Google
+            // split does: cut where a moved occurrence sits now and the old
+            // series keeps it while the new one starts on it too.
+            let split_at_ms = occurrence_identity(&viewed, occurrence_start_ms);
+            if split_at_ms <= master.start_utc {
                 // "This and following" from the first occurrence is the
                 // whole series; recurse as an "all" edit.
                 return Box::pin(update(state, id, "all", occurrence_start_ms, fields)).await;
             }
-            let cut = occurrence_time(&master, occurrence_start_ms)?;
+            // The Google split's two refusals, in its words and before
+            // anything is sent. A counted rule cannot be carried: the rest
+            // would need what is left of the count, and dropping it made the
+            // rest repeat forever. And later occurrences changed on their own
+            // live under this master, so shortening it takes them away.
+            if master.recurrence.as_deref().is_some_and(|r| r.lines().any(crate::write::has_count)) {
+                anyhow::bail!(crate::events::SPLIT_REFUSES_COUNT);
+            }
+            let stranded = omacal_store::exceptions_from(
+                &state.pool,
+                master.calendar_id,
+                &uid,
+                split_at_ms,
+                &viewed.google_id,
+            )
+            .await?;
+            if stranded > 0 {
+                anyhow::bail!("{}{stranded}", crate::events::SPLIT_STRANDS_PREFIX);
+            }
+            let cut = occurrence_time(&master, split_at_ms)?;
             let until = crate::write::until_value(
-                occurrence_start_ms,
+                split_at_ms,
                 master.is_all_day,
                 &master.calendar_timezone,
             );
@@ -469,7 +490,7 @@ pub(crate) async fn update(
                 description: fields.description,
                 start,
                 end,
-                recurrence: recurrence_for(&fields.recurrence, Some(&master), true),
+                recurrence: recurrence_for(&fields.recurrence, Some(&master)),
                 recurrence_id: None,
                 alarms: alarms_for(&fields.reminders, Some(&master)),
                 sequence: 0,
@@ -493,7 +514,8 @@ pub(crate) async fn update(
             (truncated, Some((new_href, ics)), new_uid)
         } else {
             // Scope "this": one occurrence becomes (or updates) an exception.
-            let rid = occurrence_time(&master, occurrence_start_ms)?;
+            let rid_ms = occurrence_identity(&viewed, occurrence_start_ms);
+            let rid = occurrence_time(&master, rid_ms)?;
             let ev = EventWrite {
                 uid: uid.clone(),
                 summary: fields.summary,
@@ -514,12 +536,25 @@ pub(crate) async fn update(
             };
             let out = omacal_caldav::upsert_exception(&raw, &ev, now)
                 .ok_or_else(|| anyhow::anyhow!("could not write the occurrence's exception"))?;
-            (out, None, format!("{uid}#{occurrence_start_ms}"))
+            (out, None, format!("{uid}#{rid_ms}"))
         };
 
-    client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
-    if let Some((new_href, ics)) = follow_up {
-        client.put(&new_href, &ics, None).await.map_err(friendly)?;
+    // A split writes the rest of the series first and shortens the original
+    // second. In the other order a failure between the two loses every future
+    // occurrence; in this one it leaves a duplicate, which the user can see
+    // and is told about. Google's split keeps the same order for the same
+    // reason.
+    match follow_up {
+        None => {
+            client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
+        }
+        Some((new_href, ics)) => {
+            client.put(&new_href, &ics, None).await.map_err(friendly)?;
+            if let Err(e) = client.put(&href, &new_raw, master.etag.as_deref()).await {
+                tracing::error!(%e, %uid, "split wrote the new series but could not shorten the original");
+                anyhow::bail!(crate::events::SPLIT_LEFT_TWO_SERIES);
+            }
+        }
     }
 
     saved_but(
@@ -584,7 +619,7 @@ pub(crate) async fn respond(
     let (new_raw, detail_uid) = if !is_series || scope == "all" {
         (omacal_caldav::respond_all(&raw, &uid, self_email, partstat), uid.clone())
     } else {
-        let rid_ms = viewed.original_start_utc.unwrap_or(occurrence_start_ms);
+        let rid_ms = occurrence_identity(&viewed, occurrence_start_ms);
         let rid = occurrence_time(&master, rid_ms)?;
         // The viewed row's own span: for a materialised exception the end is
         // unused (its block is answered in place), and for a bare occurrence
@@ -597,12 +632,7 @@ pub(crate) async fn respond(
             format!("{uid}#{rid_ms}"),
         )
     };
-    let new_raw = new_raw.ok_or_else(|| {
-        anyhow::anyhow!(
-            "this event's copy on the server does not list you as a guest, \
-             so there is no invitation here to answer"
-        )
-    })?;
+    let new_raw = new_raw.ok_or_else(|| anyhow::anyhow!(NOT_A_GUEST_HERE))?;
 
     client.put(&href, &new_raw, master.etag.as_deref()).await.map_err(friendly)?;
     resync(state, master.calendar_id).await?;
@@ -659,10 +689,14 @@ pub(crate) async fn move_to(
         crate::caldav_account::client_for_calendar(state, target_calendar_id).await?;
     let (href, raw) = resource_of(state, master.id).await?;
     let uid = master.google_id.clone();
-    let destination = resource_href(&collection_url, &uid);
+    // A name of this app's own making, as `create` mints one: a UID is the
+    // author's text and may hold `/`, `..`, `?` or `#`, none of which may
+    // steer where the copy lands — or which resource the DELETE below is
+    // then aimed past.
+    let destination = resource_href(&collection_url, &uuid::Uuid::new_v4().to_string());
 
     // `None` rather than an etag: this is a create in the destination, so
-    // `If-None-Match: *` — a UID that somehow already exists there fails
+    // `If-None-Match: *` — a name that somehow already exists there fails
     // loudly instead of overwriting a stranger's event.
     client.put(&destination, &raw, None).await.map_err(friendly)?;
 
@@ -703,12 +737,14 @@ pub(crate) async fn delete(
     if !is_series || scope == "all" {
         client.delete(&href, master.etag.as_deref()).await.map_err(friendly)?;
     } else if scope == "following" {
-        if occurrence_start_ms <= master.start_utc {
+        // The slot the series put the occurrence in, as for an edit.
+        let split_at_ms = occurrence_identity(&viewed, occurrence_start_ms);
+        if split_at_ms <= master.start_utc {
             client.delete(&href, master.etag.as_deref()).await.map_err(friendly)?;
         } else {
-            let cut = occurrence_time(&master, occurrence_start_ms)?;
+            let cut = occurrence_time(&master, split_at_ms)?;
             let until = crate::write::until_value(
-                occurrence_start_ms,
+                split_at_ms,
                 master.is_all_day,
                 &master.calendar_timezone,
             );
@@ -717,7 +753,7 @@ pub(crate) async fn delete(
             client.put(&href, &truncated, master.etag.as_deref()).await.map_err(friendly)?;
         }
     } else {
-        let occurrence = occurrence_time(&master, occurrence_start_ms)?;
+        let occurrence = occurrence_time(&master, occurrence_identity(&viewed, occurrence_start_ms))?;
         let excluded = omacal_caldav::exclude_occurrence(&raw, &uid, &occurrence)
             .ok_or_else(|| anyhow::anyhow!("could not remove the occurrence"))?;
         client.put(&href, &excluded, master.etag.as_deref()).await.map_err(friendly)?;
@@ -881,16 +917,17 @@ mod tests {
         assert_eq!(class_of_stored("default"), None);
     }
 
+    /// Inherited verbatim, `COUNT` included: a split never inherits a counted
+    /// rule, because it refuses one before it gets here.
     #[test]
-    fn recurrence_inherits_verbatim_but_count_never_survives_a_split() {
+    fn recurrence_inherits_verbatim_and_the_forms_rule_replaces_it() {
         let m = master(Some("RRULE:FREQ=DAILY;COUNT=10"));
-        assert_eq!(recurrence_for(&None, Some(&m), false), vec!["RRULE:FREQ=DAILY;COUNT=10"]);
-        assert_eq!(recurrence_for(&None, Some(&m), true), vec!["RRULE:FREQ=DAILY"]);
+        assert_eq!(recurrence_for(&None, Some(&m)), vec!["RRULE:FREQ=DAILY;COUNT=10"]);
         assert_eq!(
-            recurrence_for(&Some(Some("RRULE:FREQ=WEEKLY".into())), Some(&m), false),
+            recurrence_for(&Some(Some("RRULE:FREQ=WEEKLY".into())), Some(&m)),
             vec!["RRULE:FREQ=WEEKLY"]
         );
-        assert!(recurrence_for(&Some(None), Some(&m), false).is_empty(), "cleared is cleared");
+        assert!(recurrence_for(&Some(None), Some(&m)).is_empty(), "cleared is cleared");
     }
 
     #[test]
@@ -931,5 +968,405 @@ mod tests {
         assert_eq!(e, WriteTime::Date(jiff::civil::date(2026, 8, 21)));
         // Midnight Sofia = 21:00Z the day before.
         assert_eq!(ms % 86_400_000, 75_600_000);
+    }
+
+    /// The write path driven end to end against a wiremock CalDAV server:
+    /// rows seeded from a real resource the way a sync stores them, the
+    /// public `update`/`delete` called the way the commands call them, and
+    /// the bytes that reach the server read back off the mock.
+    mod against_a_server {
+        use super::super::*;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// A weekly 10:00 standup in Sofia, its 9 November occurrence moved
+        /// to Tuesday 10 November. The move crosses a day, so the moved start
+        /// and the original slot cannot render to the same RECURRENCE-ID.
+        const MOVED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n\
+            BEGIN:VEVENT\r\nUID:series-1\r\nDTSTAMP:20261101T000000Z\r\n\
+            DTSTART;TZID=Europe/Sofia:20261102T100000\r\nDTEND;TZID=Europe/Sofia:20261102T110000\r\n\
+            RRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:series-1\r\nDTSTAMP:20261101T000000Z\r\n\
+            RECURRENCE-ID;TZID=Europe/Sofia:20261109T100000\r\n\
+            DTSTART;TZID=Europe/Sofia:20261110T100000\r\nDTEND;TZID=Europe/Sofia:20261110T110000\r\n\
+            SUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        pub(super) fn ms(s: &str) -> i64 {
+            s.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+        }
+
+        /// A pool holding one CalDAV account on `server`, one writable
+        /// collection, and `raw` stored as that collection's resource.
+        /// Returns the state and the row id of every component, keyed by the
+        /// store's google_id (`series-1`, `series-1#<orig ms>`).
+        pub(super) async fn seeded(
+            server: &MockServer,
+            email: &str,
+            raw: &str,
+        ) -> (AppState, std::collections::HashMap<String, i64>) {
+            crate::caldav_account::test_passwords::set(email, "p");
+            let pool = omacal_store::connect_memory().await.unwrap();
+            let account: i64 = sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+                 VALUES (?1, ?2, 0, 'caldav', ?3, ?2) RETURNING id",
+            )
+            .bind(format!("caldav:{email}"))
+            .bind(email)
+            .bind(server.uri())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let calendar: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (?1, ?2, 'Work', 'Europe/Sofia', 'owner') RETURNING id",
+            )
+            .bind(account)
+            .bind(format!("{}/cal/", server.uri()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let href = format!("{}/cal/series-1.ics", server.uri());
+            let root = omacal_caldav::parse(raw).unwrap();
+            let mut ids = std::collections::HashMap::new();
+            for ev in omacal_caldav::events_in(&root) {
+                let row = omacal_sync::caldav::caldav_to_stored(&ev, calendar, "Europe/Sofia", Some("\"v1\""), email)
+                    .unwrap();
+                let id = omacal_store::upsert_event(&pool, &row).await.unwrap();
+                sqlx::query("UPDATE events SET caldav_href = ?1, raw_ics = ?2 WHERE id = ?3")
+                    .bind(&href)
+                    .bind(raw)
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                ids.insert(row.google_id.clone(), id);
+            }
+            let state = AppState {
+                pool,
+                demo: false,
+                tokens: Default::default(),
+                reauth: Default::default(),
+                update: Default::default(),
+                update_checked_at: Default::default(),
+                system_tz_change: Default::default(),
+                quit_on_close: Default::default(),
+                open_date: Default::default(),
+            };
+            (state, ids)
+        }
+
+        /// Every PUT body the server received, in order.
+        pub(super) async fn puts(server: &MockServer) -> Vec<String> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.method.as_str() == "PUT")
+                .map(|r| String::from_utf8(r.body).unwrap())
+                .collect()
+        }
+
+        pub(super) async fn accepting(server: &MockServer) {
+            Mock::given(method("PUT"))
+                .respond_with(ResponseTemplate::new(204).insert_header("ETag", "\"v2\""))
+                .mount(server)
+                .await;
+        }
+
+        fn retitled(start_ms: i64, end_ms: i64) -> EventFields {
+            EventFields {
+                summary: Some("Standup (moved)".into()),
+                location: None,
+                description: None,
+                when: When::Timed { start_ms, end_ms },
+                tz: "Europe/Sofia".into(),
+                recurrence: None,
+                guests: None,
+                reminders: None,
+                conference: None,
+                transparency: None,
+                visibility: None,
+            }
+        }
+
+        fn lines_starting<'a>(ics: &'a str, prefix: &str) -> Vec<&'a str> {
+            ics.lines().map(str::trim_end).filter(|l| l.starts_with(prefix)).collect()
+        }
+
+        /// Editing an occurrence that was already moved rewrites *its*
+        /// exception, named by the slot it was moved from. Naming it by where
+        /// it sits now would add a second exception for a slot the series
+        /// never had, and the occurrence would show twice.
+        #[tokio::test]
+        async fn editing_a_moved_occurrence_rewrites_its_own_exception() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "edit-moved@x.test", MOVED).await;
+            let original = ms("2026-11-09T08:00:00Z");
+            let exception = ids[&format!("series-1#{original}")];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            let _ = update(&state, exception, "this", moved, retitled(moved, moved + 3_600_000)).await;
+
+            let sent = puts(&server).await;
+            assert_eq!(sent.len(), 1, "one resource rewritten: {sent:?}");
+            assert_eq!(
+                lines_starting(&sent[0], "RECURRENCE-ID"),
+                vec!["RECURRENCE-ID;TZID=Europe/Sofia:20261109T100000"],
+                "one exception, still named by its original slot:\n{}",
+                sent[0]
+            );
+            assert!(sent[0].contains("SUMMARY:Standup (moved)"), "and it carries the edit:\n{}", sent[0]);
+        }
+
+        /// Deleting an occurrence that was already moved excludes the slot it
+        /// was moved from and takes its exception with it. Excluding where it
+        /// sits now would leave the exception standing, and the occurrence on
+        /// screen.
+        #[tokio::test]
+        async fn deleting_a_moved_occurrence_removes_its_exception() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "delete-moved@x.test", MOVED).await;
+            let original = ms("2026-11-09T08:00:00Z");
+            let exception = ids[&format!("series-1#{original}")];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            let _ = delete(&state, exception, "this", moved).await;
+
+            let sent = puts(&server).await;
+            assert_eq!(sent.len(), 1, "one resource rewritten: {sent:?}");
+            assert!(lines_starting(&sent[0], "RECURRENCE-ID").is_empty(), "the exception is gone:\n{}", sent[0]);
+            assert_eq!(
+                lines_starting(&sent[0], "EXDATE"),
+                vec!["EXDATE;TZID=Europe/Sofia:20261109T100000"],
+                "and its original slot is excluded:\n{}",
+                sent[0]
+            );
+        }
+
+        /// A weekly series in Sofia with nothing moved, `rule` its RRULE line.
+        fn plain(rule: &str) -> String {
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n\
+                 BEGIN:VEVENT\r\nUID:series-1\r\nDTSTAMP:20261101T000000Z\r\n\
+                 DTSTART;TZID=Europe/Sofia:20261102T100000\r\nDTEND;TZID=Europe/Sofia:20261102T110000\r\n\
+                 {rule}\r\nSUMMARY:Standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+        }
+
+        /// PUT paths in the order the server received them.
+        async fn put_paths(server: &MockServer) -> Vec<String> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.method.as_str() == "PUT")
+                .map(|r| r.url.path().to_string())
+                .collect()
+        }
+
+        /// "This and following" from the third Monday, 16 November.
+        async fn split_third(state: &AppState, ids: &std::collections::HashMap<String, i64>, recurrence: Option<Option<String>>) -> anyhow::Result<crate::events::EventDetail> {
+            let at = ms("2026-11-16T08:00:00Z");
+            let mut f = retitled(at, at + 3_600_000);
+            f.recurrence = recurrence;
+            update(state, ids["series-1"], "following", at, f).await
+        }
+
+        /// The new series is written before the old one is cut short. In the
+        /// other order a failure between the two writes loses every future
+        /// occurrence; in this one it leaves a duplicate, which is visible.
+        #[tokio::test]
+        async fn a_split_writes_the_new_series_before_it_shortens_the_old() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-order@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+
+            let _ = split_third(&state, &ids, None).await;
+
+            let paths = put_paths(&server).await;
+            assert_eq!(paths.len(), 2, "{paths:?}");
+            assert_ne!(paths[0], "/cal/series-1.ics", "the tail first: {paths:?}");
+            assert_eq!(paths[1], "/cal/series-1.ics", "the original second: {paths:?}");
+        }
+
+        /// And when the old series will not shorten after the new one landed,
+        /// the user is told there are now two, the same words a Google split
+        /// uses.
+        #[tokio::test]
+        async fn a_split_whose_original_will_not_shorten_says_there_are_two_series() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(wiremock::matchers::path("/cal/series-1.ics"))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-half@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+
+            let err = split_third(&state, &ids, None).await.unwrap_err();
+
+            assert_eq!(crate::errors::user_facing(&err), crate::events::SPLIT_LEFT_TWO_SERIES);
+            assert_eq!(put_paths(&server).await.len(), 2, "the tail landed, which is why it says so");
+        }
+
+        /// A series that ends after a set number of times is refused before
+        /// anything is sent, as a Google one is: the tail's count would have to
+        /// be what is left of the original's, a number only a full expansion
+        /// knows. Dropping it, as this once did, made the rest repeat forever.
+        #[tokio::test]
+        async fn a_series_that_ends_after_a_count_is_not_split() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-count@x.test", &plain("RRULE:FREQ=WEEKLY;COUNT=10")).await;
+
+            for recurrence in [None, Some(Some("RRULE:FREQ=WEEKLY".to_string()))] {
+                let err = split_third(&state, &ids, recurrence).await.unwrap_err();
+                assert_eq!(crate::errors::user_facing(&err), crate::events::SPLIT_REFUSES_COUNT);
+            }
+            assert!(server.received_requests().await.unwrap().is_empty(), "nothing sent at all");
+        }
+
+        /// The user's own "ends after N" on the rest of a series is theirs to
+        /// choose, and is written as chosen.
+        #[tokio::test]
+        async fn a_count_the_user_chose_for_the_rest_is_kept() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-chosen@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+
+            let _ = split_third(&state, &ids, Some(Some("RRULE:FREQ=WEEKLY;COUNT=3".into()))).await;
+
+            let tail = server.received_requests().await.unwrap().into_iter()
+                .find(|r| r.method.as_str() == "PUT" && r.url.path() != "/cal/series-1.ics")
+                .map(|r| String::from_utf8(r.body).unwrap())
+                .expect("the rest of the series was written");
+            assert_eq!(lines_starting(&tail, "RRULE"), vec!["RRULE:FREQ=WEEKLY;COUNT=3"], "the tail:\n{tail}");
+        }
+
+        /// A later occurrence changed on its own lives under the old series,
+        /// and shortening it takes that change away. Refused before anything
+        /// is sent, naming how many, as a Google split is.
+        #[tokio::test]
+        async fn a_split_that_would_strand_a_moved_occurrence_is_refused() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-stranded@x.test", MOVED).await;
+            // From 9 November, the slot the moved occurrence came from, and
+            // from the master's row: the moved occurrence is not the one being
+            // edited, so it would be stranded rather than carried.
+            let at = ms("2026-11-09T08:00:00Z");
+            let err = update(&state, ids["series-1"], "following", at, retitled(at, at + 3_600_000))
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                crate::errors::user_facing(&err),
+                format!("{}1", crate::events::SPLIT_STRANDS_PREFIX)
+            );
+            assert!(server.received_requests().await.unwrap().is_empty(), "nothing sent at all");
+        }
+
+        /// The UNTIL a shortened series ends at, read off the PUT to its own
+        /// resource.
+        async fn master_until(server: &MockServer) -> String {
+            let body = server.received_requests().await.unwrap().into_iter()
+                .filter(|r| r.method.as_str() == "PUT" && r.url.path() == "/cal/series-1.ics")
+                .map(|r| String::from_utf8(r.body).unwrap())
+                .next_back()
+                .expect("the original was shortened");
+            assert!(lines_starting(&body, "RECURRENCE-ID").is_empty(), "the moved occurrence left with the cut:\n{body}");
+            let rule = lines_starting(&body, "RRULE").pop().expect("still a series").to_string();
+            rule.split(';').find_map(|p| p.strip_prefix("UNTIL=")).expect("an UNTIL").to_string()
+        }
+
+        /// "This and following" from an occurrence that was moved on its own
+        /// cuts the series at the slot the series put it in, as a Google split
+        /// does. Cut where it sits now, the old series would keep it and the
+        /// new one would start on it too: the occurrence twice.
+        #[tokio::test]
+        async fn splitting_from_a_moved_occurrence_cuts_at_its_original_slot() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "split-moved@x.test", MOVED).await;
+            let exception = ids[&format!("series-1#{}", ms("2026-11-09T08:00:00Z"))];
+            let moved = ms("2026-11-10T08:00:00Z");
+
+            update(&state, exception, "following", moved, retitled(moved, moved + 3_600_000)).await.ok();
+
+            let until = master_until(&server).await;
+            assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
+            assert!(until.as_str() >= "20261102T080000Z", "and keeps 2 November: {until}");
+        }
+
+        /// And deleting "this and following" from it removes the slot it was
+        /// moved from, rather than ending the series after it and leaving the
+        /// moved occurrence standing.
+        #[tokio::test]
+        async fn deleting_following_from_a_moved_occurrence_cuts_at_its_original_slot() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            let (state, ids) = seeded(&server, "delete-following-moved@x.test", MOVED).await;
+            let exception = ids[&format!("series-1#{}", ms("2026-11-09T08:00:00Z"))];
+
+            delete(&state, exception, "following", ms("2026-11-10T08:00:00Z")).await.ok();
+
+            let until = master_until(&server).await;
+            assert!(until.as_str() < "20261109T080000Z", "ends before 9 November's slot: {until}");
+        }
+
+        /// A server that refuses a change (a calendar shared read-only that
+        /// still lists write access, say) says so in the words every other
+        /// status gets, rather than "Sync failed".
+        #[tokio::test]
+        async fn a_refused_change_says_the_server_refused_it() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+            let (state, ids) = seeded(&server, "refused-put@x.test", &plain("RRULE:FREQ=WEEKLY")).await;
+            let at = ms("2026-11-02T08:00:00Z");
+
+            let err = update(&state, ids["series-1"], "all", at, retitled(at, at + 3_600_000)).await.unwrap_err();
+
+            assert_eq!(crate::errors::user_facing(&err), "The server answered 403 Forbidden");
+        }
+
+        /// A moved event gets a file name of its own making. A UID is the
+        /// author's text and may hold `/`, `..` or `?`, none of which may
+        /// steer where the copy lands.
+        #[tokio::test]
+        async fn a_moved_event_is_filed_under_a_fresh_name_not_its_uid() {
+            let server = MockServer::start().await;
+            accepting(&server).await;
+            Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(204)).mount(&server).await;
+            let raw = plain("RRULE:FREQ=WEEKLY").replace("UID:series-1", "UID:../../other/evil?x");
+            let (state, _) = seeded(&server, "move-name@x.test", &raw).await;
+            let (account, master): (i64, i64) = sqlx::query_as(
+                "SELECT c.account_id, e.id FROM events e JOIN calendars c ON c.id = e.calendar_id",
+            )
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+            let target: i64 = sqlx::query_scalar(
+                "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                 VALUES (?1, ?2, 'Home', 'Europe/Sofia', 'owner') RETURNING id",
+            )
+            .bind(account)
+            .bind(format!("{}/home/", server.uri()))
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+
+            let _ = move_to(&state, master, target).await;
+
+            let paths = put_paths(&server).await;
+            assert_eq!(paths.len(), 1, "{paths:?}");
+            let name = paths[0].strip_prefix("/home/").expect("into the destination collection");
+            let stem = name.strip_suffix(".ics").expect("an .ics resource");
+            assert!(uuid::Uuid::parse_str(stem).is_ok(), "a fresh name, not the UID: {}", paths[0]);
+        }
     }
 }

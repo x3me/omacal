@@ -399,8 +399,9 @@ const noop = () => {};
 // needing re-consent or a pending update is one fixture's story each, not
 // thirty fixtures' boilerplate.
 const header = (
-  status: Omit<AppStatus, 'needs_reauth' | 'update' | 'version' | 'system_tz_change' | 'self_update'> & {
+  status: Omit<AppStatus, 'needs_reauth' | 'caldav_reauth' | 'update' | 'version' | 'system_tz_change' | 'self_update'> & {
     needs_reauth?: string[];
+    caldav_reauth?: string[];
     update?: AppStatus['update'];
     version?: string;
     system_tz_change?: string | null;
@@ -412,7 +413,7 @@ const header = (
   // fail when the wiring breaks, not ride along on a hardcoded string that
   // happens to match the build.
   status: {
-    needs_reauth: [], update: null, version: '9.9.9', system_tz_change: null, self_update: false,
+    needs_reauth: [], caldav_reauth: [], update: null, version: '9.9.9', system_tz_change: null, self_update: false,
     ...status,
   } as AppStatus,
   anchorMs: MON, weekStartMs: MON, busy, error: null as string | null, calendars: [] as Calendar[],
@@ -2170,9 +2171,9 @@ export const EXPORT_OCCURRENCE_START = MON + 3 * 24 * H + 9 * H;
 
 export const IMPORT_PLANS: Record<string, any[]> = {
   mixed: [
-    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false,
+    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false, date: null,
       repeat: null, dropped_guests: 2 },
-    { kind: 'import', summary: 'Standup', start_ms: 1788910200000, all_day: false,
+    { kind: 'import', summary: 'Standup', start_ms: 1788910200000, all_day: false, date: null,
       repeat: 'weekdays', dropped_guests: 0 },
     { kind: 'skip', summary: 'Third Thursday',
       reason: 'repeats in a way this version cannot store; import it from the app that wrote it' },
@@ -2183,9 +2184,11 @@ export const IMPORT_PLANS: Record<string, any[]> = {
    *  it. Its own plan rather than an addition to `mixed`, whose counts three
    *  specs already assert. */
   allday: [
-    { kind: 'import', summary: 'Berlin trip', start_ms: 1788825600000, all_day: true,
-      repeat: null, dropped_guests: 0 },
-    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false,
+    // Its day as the file states it, 8 September, held by a calendar ahead
+    // of the suite's UTC: Auckland's midnight is the 7th, 12:00 UTC.
+    { kind: 'import', summary: 'Berlin trip', start_ms: Date.UTC(2026, 8, 7, 12), all_day: true,
+      date: '2026-09-08', repeat: null, dropped_guests: 0 },
+    { kind: 'import', summary: 'Lunch', start_ms: 1788910200000, all_day: false, date: null,
       repeat: null, dropped_guests: 0 },
   ],
 };
@@ -2587,6 +2590,11 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // connected; its data is just going stale), also in `needs_reauth`.
     reauth: header({
       accounts: ['me@x.com'], needs_reauth: ['me@x.com'],
+      last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false,
+    }),
+    // A CalDAV account whose server stopped accepting the stored password.
+    caldavreauth: header({
+      accounts: ['me@icloud.com'], caldav_reauth: ['me@icloud.com'],
       last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false,
     }),
     demo: header({ accounts: [], last_sync_ms: null, demo: true, overlay_titlebar: false }),
@@ -3307,6 +3315,67 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       anchor: ANCHOR,
       occurrenceStartMs: Date.parse('2026-08-13T00:00:00+12:00'),
       occurrenceEndMs: Date.parse('2026-08-14T00:00:00+12:00'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // **A trip of many days** (Plamen, 2026-11-20: a multi-day all-day event
+    // "shows very small amount of information" — its first day and nothing
+    // else). 24 Nov to 12 Dec inclusive: nineteen days.
+    'all-day-trip': {
+      detail: detail({
+        id: 13, title: 'Niki 24.11 - 12.12 (LOT)', is_all_day: true,
+        start_ms: Date.parse('2026-11-24T00:00:00Z'), end_ms: Date.parse('2026-12-13T00:00:00Z'),
+        start_date: '2026-11-24', end_date: '2026-12-12',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-24T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-12-13T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    'all-day-over-new-year': {
+      detail: detail({
+        id: 14, title: 'Ski week', is_all_day: true,
+        start_ms: Date.parse('2026-12-30T00:00:00Z'), end_ms: Date.parse('2027-01-03T00:00:00Z'),
+        start_date: '2026-12-30', end_date: '2027-01-02',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-12-30T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2027-01-03T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // A three-day all-day series; the clicked occurrence is the one a year
+    // after the master's, so its range is the master's moved by a year.
+    'all-day-series-of-three-days': {
+      detail: detail({
+        id: 15, title: 'Festival', is_all_day: true, is_recurring: true,
+        start_ms: Date.parse('2026-07-10T00:00:00Z'), end_ms: Date.parse('2026-07-13T00:00:00Z'),
+        start_date: '2026-07-10', end_date: '2026-07-12',
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2027-07-10T00:00:00Z'),
+      occurrenceEndMs: Date.parse('2027-07-13T00:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // An overnight flight: the time alone, 22:00–06:00, hid that it lands
+    // the next day. Instants in the browser's zone (the spec pins UTC).
+    'timed-overnight': {
+      detail: detail({
+        id: 16, title: 'Flight SOF–DEL',
+        start_ms: Date.parse('2026-11-09T22:00:00Z'), end_ms: Date.parse('2026-11-10T06:00:00Z'),
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-09T22:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-11-10T06:00:00Z'),
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
+    // Ends on the stroke of midnight: still one evening, not two days.
+    'timed-to-midnight': {
+      detail: detail({
+        id: 17, title: 'Late session',
+        start_ms: Date.parse('2026-11-09T22:00:00Z'), end_ms: Date.parse('2026-11-10T00:00:00Z'),
+      }),
+      anchor: ANCHOR,
+      occurrenceStartMs: Date.parse('2026-11-09T22:00:00Z'),
+      occurrenceEndMs: Date.parse('2026-11-10T00:00:00Z'),
       onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
     },
   },

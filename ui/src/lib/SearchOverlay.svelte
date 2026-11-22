@@ -60,6 +60,8 @@
       if (mine !== issued) return;
       result = found;
       error = null;
+      // A new answer is a new list: the old selection pointed into the last one.
+      active = -1;
     } catch (e) {
       if (mine !== issued) return;
       result = { events: [], tasks: [] };
@@ -73,12 +75,45 @@
   // exists. See `escapeCloses` for why the listener is on `window`.
   escapeCloses(() => true, () => onclose());
 
+  /** Every result in the order drawn, events then tasks: what the arrow keys
+   *  walk and Enter opens. */
+  const picks = $derived<Pick[]>([
+    ...result.events.map((hit) => ({ kind: 'event', hit }) as Pick),
+    ...result.tasks.map((hit) => ({ kind: 'task', hit }) as Pick),
+  ]);
+  /** The result the arrows have chosen, as an index into `picks`; -1 for
+   *  none, where Enter opens the top one. Focus stays in the field, so typing
+   *  goes on refining while a result is chosen. */
+  let active = $state(-1);
+
+  function key(e: KeyboardEvent) {
+    if (e.key === 'ArrowDown' && picks.length) {
+      e.preventDefault();
+      active = Math.min(active + 1, picks.length - 1);
+    } else if (e.key === 'ArrowUp' && picks.length) {
+      e.preventDefault();
+      active = Math.max(active - 1, 0);
+    } else if (e.key === 'Enter' && picks.length && !e.isComposing) {
+      e.preventDefault();
+      onpick(picks[Math.max(active, 0)]);
+    }
+  }
+
   const hasEvents = $derived(result.events.length > 0);
   const hasTasks = $derived(result.tasks.length > 0);
   /** The headings name a kind only when there is another to tell it from: one
    *  section needs no label, two do. */
   const sectioned = $derived(hasEvents && hasTasks);
   const empty = $derived(query.trim() !== '' && !hasEvents && !hasTasks);
+
+  /** The day a result names: an all-day one's own date, read in its
+   *  calendar's zone by the backend (`allDayDate`), as local midnight here;
+   *  a timed one's instant. */
+  function hitDayMs(h: { startMs: number; allDayDate: string | null }): number {
+    if (!h.allDayDate) return h.startMs;
+    const [y, m, d] = h.allDayDate.split('-').map(Number);
+    return new Date(y, m - 1, d).getTime();
+  }
 
   /** The day a result sits on, for the line under its title. */
   const when = (ms: number) =>
@@ -105,6 +140,9 @@
     bind:this={fieldEl}
     bind:value={query}
     oninput={() => run(query)}
+    onkeydown={key}
+    aria-controls="search-results"
+    aria-activedescendant={active >= 0 ? `search-hit-${active}` : undefined}
     type="search"
     aria-label="Search events and tasks"
     placeholder="Search events and tasks"
@@ -117,15 +155,18 @@
   {:else if empty}
     <p class="none">Nothing matches “{query.trim()}”.</p>
   {:else if hasEvents || hasTasks}
+    <div id="search-results" role="listbox" aria-label="Results">
     {#if hasEvents}
       <section class="sec">
         {#if sectioned}<h3>Events</h3>{/if}
         <ul>
-          {#each result.events as h (h.eventId)}
+          {#each result.events as h, i (h.eventId)}
             <li>
-              <button class="hit" onclick={() => onpick({ kind: 'event', hit: h })}>
+              <button class="hit" id="search-hit-{i}" role="option" aria-selected={active === i}
+                      class:active={active === i}
+                      onclick={() => onpick({ kind: 'event', hit: h })}>
                 <b>{h.title}</b>
-                <em>{when(h.startMs)}</em>
+                <em>{when(hitDayMs(h))}</em>
               </button>
             </li>
           {/each}
@@ -136,9 +177,12 @@
       <section class="sec">
         {#if sectioned}<h3>Tasks</h3>{/if}
         <ul>
-          {#each result.tasks as t (t.id)}
+          {#each result.tasks as t, i (t.id)}
+            {@const n = result.events.length + i}
             <li>
-              <button class="hit" onclick={() => onpick({ kind: 'task', hit: t })}>
+              <button class="hit" id="search-hit-{n}" role="option" aria-selected={active === n}
+                      class:active={active === n}
+                      onclick={() => onpick({ kind: 'task', hit: t })}>
                 <b>{t.summary}</b>
                 <em>{whenTask(t)} · {t.list}</em>
               </button>
@@ -147,6 +191,7 @@
         </ul>
       </section>
     {/if}
+    </div>
   {/if}
 </div>
 
@@ -180,7 +225,7 @@
   .hit { display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
          font: inherit; cursor: pointer; background: none; border: 0;
          border-radius: 6px; padding: 6px 10px; color: var(--text); }
-  .hit:hover, .hit:focus-visible { background: color-mix(in srgb, var(--text) 7%, transparent); }
+  .hit:hover, .hit:focus-visible, .hit.active { background: color-mix(in srgb, var(--text) 7%, transparent); }
   .hit b { font-size: 12px; font-weight: 600; letter-spacing: -.01em; }
   .hit em { font-style: normal; font-size: 10px; color: var(--muted); }
 

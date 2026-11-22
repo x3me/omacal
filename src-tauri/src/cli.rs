@@ -1208,9 +1208,14 @@ pub(crate) fn run(inv: Invocation) -> i32 {
                     } else {
                         let tz = jiff::tz::TimeZone::system();
                         for h in &results.events {
-                            let when = jiff::Timestamp::from_millisecond(h.start_ms)
-                                .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_default();
+                            // An all-day hit's own date, from its calendar's
+                            // zone: its midnight read here can be the day before.
+                            let when = match &h.all_day_date {
+                                Some(d) => format!("{d} all day"),
+                                None => jiff::Timestamp::from_millisecond(h.start_ms)
+                                    .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
+                                    .unwrap_or_default(),
+                            };
                             println!("{when}  {}  (event {})", h.title, h.event_id);
                         }
                         // A blank line only when both kinds are present: it

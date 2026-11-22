@@ -85,8 +85,12 @@
    *
    *  An all-day event says its day and stops there: it has no time to show,
    *  and printing midnight would invent one. */
-  function whenOf(p: { start_ms: number; all_day: boolean }): string {
-    const day = formatDate(new Date(p.start_ms).getTime(), dateFormat(), DAY_FORMAT);
+  function whenOf(p: { start_ms: number; all_day: boolean; date?: string | null }): string {
+    // An all-day event's day is the file's own date: its instant read in this
+    // webview's zone is the day before for a calendar ahead of it.
+    const civil = p.all_day && p.date ? p.date.split('-').map(Number) : null;
+    const dayMs = civil ? new Date(civil[0], civil[1] - 1, civil[2]).getTime() : new Date(p.start_ms).getTime();
+    const day = formatDate(dayMs, dateFormat(), DAY_FORMAT);
     return p.all_day ? day : `${day} · ${formatClock(p.start_ms, clockFormat())}`;
   }
 </script>

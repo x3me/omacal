@@ -21,8 +21,29 @@ export type Segment =
   | { kind: 'link'; value: string; href: string };
 
 // Step 1: these are the only tags treated as line structure, converted to
-// newlines while they are still real markup.
-const BREAK_RE = /<br\s*\/?>|<\/p>|<\/div>/gi;
+// newlines while they are still real markup. A list item and a table row are
+// lines, as a paragraph is. Bounded (`{0,200}`), never `[^>]*`: an unbounded
+// class on a run of unclosed `<li` would backtrack to the end of the string
+// from every one of them (see stripTags).
+const BREAK_RE = /<br\s*\/?>|<\/p>|<\/div>|<\/li>|<\/tr>|<\/h[1-6]>/gi;
+const ITEM_RE = /<li(?:\s[^<>]{0,200})?>/gi;
+
+// The tag names this module treats as markup. Anything else after a `<` is
+// what the author wrote: an address in angle brackets ("Alice
+// <alice@corp.com>"), or a less-than in a sentence. A namespaced name
+// (`<o:p>`, `<w:WordDocument>`) is Office's markup, and counts too.
+const TAGS = new Set([
+  'a', 'abbr', 'b', 'big', 'blockquote', 'body', 'br', 'caption', 'center', 'cite', 'code', 'col',
+  'colgroup', 'dd', 'del', 'dfn', 'div', 'dl', 'dt', 'em', 'font', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'head', 'hr', 'html', 'i', 'img', 'ins', 'kbd', 'li', 'link', 'mark', 'meta', 'ol', 'p', 'pre', 'q',
+  's', 'samp', 'script', 'section', 'small', 'span', 'strike', 'strong', 'style', 'sub', 'sup',
+  'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'tt', 'u', 'ul', 'var', 'wbr', 'xml',
+]);
+
+// Characters that reorder what follows them on screen (embeddings,
+// overrides, isolates). A description could otherwise show one thing while
+// saying another: `pay \u202Egnp.exe` reads as "pay exe.png".
+const BIDI_RE = /[\u202A-\u202E\u2066-\u2069]/g;
 
 // Step 4: the only place a URL becomes an href, so the only place a scheme
 // check belongs. http/https only — a javascript: or data: URL never matches.
@@ -62,22 +83,64 @@ export function stripTags(input: string): string {
   let out = '';
   let i = 0;
   const n = input.length;
+  // Searched for once each: an element whose end never comes is not looked
+  // for again from every later one, which is what keeps this linear on an
+  // input of a thousand unclosed `<style>`s.
+  const unclosed = new Set<string>();
   while (i < n) {
-    if (input[i] === '<') {
-      const close = input.indexOf('>', i + 1);
-      if (close === -1) {
-        // Nothing from here on can close a tag, so nothing from here on
-        // can be one either — keep the remainder as literal text (a bare
-        // `<` in real text, e.g. "value < 3", is ordinary) and stop. This
-        // is what keeps the scan linear instead of restarting a search at
-        // every subsequent `<`.
-        out += input.slice(i);
-        break;
-      }
-      i = close + 1; // drop the whole <...> run, including both brackets
-    } else {
+    if (input[i] !== '<') {
       out += input[i];
       i++;
+      continue;
+    }
+    // A comment, conditional or not, goes whole: Outlook's `<!--[if mso]>`
+    // blocks hold markup of their own, which must not surface either.
+    if (input.startsWith('<!--', i)) {
+      const end = unclosed.has('-->') ? -1 : input.indexOf('-->', i + 4);
+      if (end === -1) { unclosed.add('-->'); break; }
+      i = end + 3;
+      continue;
+    }
+    // A declaration or processing instruction: `<!DOCTYPE>`, `<![endif]>`,
+    // `<?xml>`.
+    if (input[i + 1] === '!' || input[i + 1] === '?') {
+      const close = input.indexOf('>', i + 2);
+      if (close === -1) { out += input.slice(i); break; }
+      i = close + 1;
+      continue;
+    }
+    let j = i + 1;
+    const closing = input[j] === '/';
+    if (closing) j++;
+    const nameStart = j;
+    while (j < n && j - nameStart < 40 && /[A-Za-z0-9:-]/.test(input[j])) j++;
+    const name = input.slice(nameStart, j).toLowerCase();
+    const shaped = /^[a-z]/.test(name) && (j >= n || /[\s/>]/.test(input[j]));
+    if (!shaped || !(TAGS.has(name) || name.includes(':'))) {
+      // Not markup: the `<` is the author's, kept as written.
+      out += '<';
+      i++;
+      continue;
+    }
+    const close = input.indexOf('>', j);
+    if (close === -1) {
+      // Nothing from here on can close a tag, so nothing from here on
+      // can be one either — keep the remainder as literal text and stop.
+      // This is what keeps the scan linear instead of restarting a search at
+      // every subsequent `<`.
+      out += input.slice(i);
+      break;
+    }
+    i = close + 1; // drop the whole <...> run, including both brackets
+    // A style sheet or a script is not text: its body goes with its tags.
+    // Outlook and Teams invitations open with a `<style>` block, and only
+    // the tags used to go, leaving the CSS on screen.
+    if (!closing && (name === 'style' || name === 'script') && !unclosed.has(name)) {
+      const endRe = new RegExp(`</${name}\\s*>`, 'gi');
+      endRe.lastIndex = i;
+      const m = endRe.exec(input);
+      if (m) i = m.index + m[0].length;
+      else unclosed.add(name);
     }
   }
   return out;
@@ -229,7 +292,9 @@ function splitAnchors(input: string): Chunk[] {
   return chunks;
 }
 
-/** Index of the `<` that opens the next `</a`, or -1. */
+/** Index of the `<` that opens the next `</a`, or -1, which it also is when
+ *  another `<a` opens first: an anchor somebody forgot to close is not a
+ *  link around everything up to the next anchor's `</a>`. */
 function closingAnchor(input: string, from: number): number {
   let i = from;
   while (i < input.length) {
@@ -238,6 +303,7 @@ function closingAnchor(input: string, from: number): number {
     if (input[lt + 1] === '/' && eq(input[lt + 2] ?? '', 'a') && /[\s>]/.test(input[lt + 3] ?? '')) {
       return lt;
     }
+    if (eq(input[lt + 1] ?? '', 'a') && /[\s>]/.test(input[lt + 2] ?? '')) return -1;
     i = lt + 1;
   }
   return -1;
@@ -245,7 +311,7 @@ function closingAnchor(input: string, from: number): number {
 
 /** The old pipeline, minus linkifying: markup in, display text out. */
 function plainText(raw: string): string {
-  return decodeEntities(stripTags(raw.replace(BREAK_RE, '\n')));
+  return decodeEntities(stripTags(raw.replace(ITEM_RE, '• ').replace(BREAK_RE, '\n'))).replace(BIDI_RE, '');
 }
 
 /**
@@ -310,11 +376,33 @@ function linkify(text: string): Segment[] {
     if (match.index > lastIndex) {
       out.push({ kind: 'text', value: text.slice(lastIndex, match.index) });
     }
-    out.push({ kind: 'link', value: match[0], href: match[0] });
-    lastIndex = match.index + match[0].length;
+    const url = withoutTrailingPunctuation(match[0]);
+    out.push({ kind: 'link', value: url, href: url });
+    lastIndex = match.index + url.length;
+    URL_RE.lastIndex = lastIndex;
   }
   if (lastIndex < text.length) {
     out.push({ kind: 'text', value: text.slice(lastIndex) });
   }
   return out;
+}
+
+/** A URL as matched, minus what is the sentence's rather than the link's: a
+ *  closing full stop or comma, or a `)` with no `(` of its own in the URL
+ *  (the parenthesis around a link, where Wikipedia's `Function_(mathematics)`
+ *  keeps its own). */
+function withoutTrailingPunctuation(url: string): string {
+  let end = url.length;
+  for (;;) {
+    const c = url[end - 1];
+    if ('.,;:!?\'"'.includes(c)) { end--; continue; }
+    if (c === ')') {
+      const body = url.slice(0, end);
+      const opens = body.split('(').length - 1;
+      const closes = body.split(')').length - 1;
+      if (closes > opens) { end--; continue; }
+    }
+    break;
+  }
+  return url.slice(0, end);
 }

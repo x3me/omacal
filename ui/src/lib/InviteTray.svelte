@@ -250,7 +250,7 @@
 
     {#if open}
       <button class="scrim" aria-label="Close invitations" onclick={() => (open = false)}></button>
-      <div class="panel" class:alignleft={alignLeft} role="group" aria-label="Pending invitations">
+      <div class="panel" class:alignleft={alignLeft} role="group" aria-label="Pending invitations" data-overlay>
         {#each shownInvites as inv (inv.id)}
           <div class="row" data-testid="invite-row">
             <span class="tick" style:background={calendarInk(inv.color)}></span>

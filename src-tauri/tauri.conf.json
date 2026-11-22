@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "omacal",
   "mainBinaryName": "omacal",
-  "version": "6.5.1",
+  "version": "6.6.3",
   "identifier": "com.omacal.app",
   "build": {
     "beforeDevCommand": "npm --prefix ../ui run dev",
@@ -31,9 +31,6 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
-    "resources": [
-      "icu-tz/*.res"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

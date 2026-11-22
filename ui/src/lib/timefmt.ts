@@ -1,3 +1,4 @@
+import { dateTimeFormat } from './intlcache';
 // Printing a clock — the one place in the app that decides whether an instant
 // reads as `13:30` or as `1:30 PM`.
 //
@@ -72,7 +73,7 @@ export function gutterLabel(hour24: number, format: TimeFormat): string {
  */
 export function zoneParts(ms: number, tz: string): { h: number; m: number } | null {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
+    const parts = dateTimeFormat('en-US', {
       timeZone: tz, hourCycle: 'h23', hour: 'numeric', minute: 'numeric',
     }).formatToParts(new Date(ms));
     const num = (type: string) => Number(parts.find((p) => p.type === type)?.value);
@@ -134,7 +135,7 @@ export function zoneAbbrev(tz: string): string {
   const city = () => tz.split('/').pop()?.replace(/_/g, ' ') ?? tz;
   for (const locale of ['en-US', 'en-GB', 'en-IN']) {
     try {
-      const name = new Intl.DateTimeFormat(locale, {
+      const name = dateTimeFormat(locale, {
         timeZone: tz, timeZoneName: 'short',
       }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value;
       if (name && /^[A-Z]{2,5}$/.test(name)) return name;

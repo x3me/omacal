@@ -577,6 +577,33 @@ pub(crate) fn own_no_rule(
 /// the zone every time in omacal means. Strict `HH:MM`: a CLI is where
 /// scripts speak, not where people mistype, and a guess stored is a guess
 /// on somebody's calendar.
+/// The times an `events update` writes: each flag given replaces its half,
+/// and each one absent keeps the occurrence's own (its start, plus the
+/// event's duration), exactly what the form seeds before the user types.
+pub(crate) fn update_when(
+    date: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    occ_start: i64,
+    occ_end: i64,
+    tz: &jiff::tz::TimeZone,
+) -> Result<(i64, i64), String> {
+    let stamp = |ms: i64| -> Result<(String, String), String> {
+        let z = jiff::Timestamp::from_millisecond(ms).map_err(|e| e.to_string())?.to_zoned(tz.clone());
+        Ok((z.date().to_string(), z.strftime("%H:%M").to_string()))
+    };
+    let (cur_date, cur_start) = stamp(occ_start)?;
+    let (cur_end_date, cur_end) = stamp(occ_end)?;
+    // The end keeps its own date, moved by as many days as a new `--date`
+    // moves the start: read on the start's day, every event that crosses
+    // midnight ended before it began.
+    let day = |d: &str| d.parse::<jiff::civil::Date>().map_err(|_| "--date takes YYYY-MM-DD".to_string());
+    let new_date = date.unwrap_or(&cur_date);
+    let shift = day(new_date)? - day(&cur_date)?;
+    let end_date = day(&cur_end_date)?.checked_add(shift).map_err(|e| e.to_string())?.to_string();
+    timed_when(new_date, start.unwrap_or(&cur_start), end.unwrap_or(&cur_end), Some(&end_date), tz)
+}
+
 pub(crate) fn timed_when(
     date: &str,
     start: &str,
@@ -1008,22 +1035,12 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
             // exactly what the form seeds before the user types.
             let occ_start = args.occurrence;
             let occ_end = occ_start + (t.end_ms - t.start_ms);
-            let stamp = |ms: i64| -> Result<(String, String), String> {
-                let z = jiff::Timestamp::from_millisecond(ms)
-                    .map_err(|e| e.to_string())?
-                    .to_zoned(tz.clone());
-                Ok((z.date().to_string(), z.strftime("%H:%M").to_string()))
-            };
-            let ((cur_date, cur_start), (_, cur_end)) =
-                match (stamp(occ_start), stamp(occ_end)) {
-                    (Ok(a), Ok(b)) => (a, b),
-                    (Err(m), _) | (_, Err(m)) => return refuse(&m),
-                };
-            let when = match timed_when(
-                args.date.as_deref().unwrap_or(&cur_date),
-                args.start.as_deref().unwrap_or(&cur_start),
-                args.end.as_deref().unwrap_or(&cur_end),
-                None,
+            let when = match update_when(
+                args.date.as_deref(),
+                args.start.as_deref(),
+                args.end.as_deref(),
+                occ_start,
+                occ_end,
                 &tz,
             ) {
                 Ok((s, e)) => serde_json::json!({ "kind": "timed", "startMs": s, "endMs": e }),
@@ -1181,6 +1198,29 @@ mod tests {
 
     /// The spec's §3 surface, as the parser reads it — the shapes that must
     /// land and the mistakes that must be named.
+    /// An update that leaves the times alone keeps them, overnight included:
+    /// a 22:00-to-01:00 meeting retitled from the CLI used to be refused with
+    /// "the end is not after the start", because the end was read as 01:00
+    /// on the *start's* day. A new date moves both ends by the same days.
+    #[test]
+    fn an_update_keeps_an_overnight_events_times_and_moves_both_ends_together() {
+        let tz = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        let at = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let (start, end) = (at("2026-11-20T20:00:00Z"), at("2026-11-20T23:00:00Z")); // 22:00 to 01:00 Sofia
+
+        assert_eq!(update_when(None, None, None, start, end, &tz), Ok((start, end)));
+        assert_eq!(
+            update_when(Some("2026-11-27"), None, None, start, end, &tz),
+            Ok((start + 7 * 86_400_000, end + 7 * 86_400_000)),
+        );
+        // A new end that is earlier on the clock than the start still ends
+        // the next day, the occurrence's own shape.
+        assert_eq!(
+            update_when(None, None, Some("02:00"), start, end, &tz),
+            Ok((start, end + 3_600_000)),
+        );
+    }
+
     #[test]
     fn create_parses_both_shapes_and_names_the_mistakes() {
         let timed = parse(

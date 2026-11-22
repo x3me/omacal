@@ -226,18 +226,27 @@ pub(crate) fn reminders_json(r: &RemindersInput) -> Value {
 /// function and not a step inside a command.
 pub(crate) fn validate_reminders(r: &RemindersInput) -> Result<(), String> {
     if r.overrides.len() > 5 {
-        return Err("an event can carry at most 5 reminders".into());
+        return Err(TOO_MANY_REMINDERS.into());
     }
     for o in &r.overrides {
         if o.method != "popup" && o.method != "email" {
-            return Err(format!("'{}' is not a reminder method Google knows", o.method));
+            return Err(format!("{UNKNOWN_REMINDER_METHOD}{}", o.method));
         }
         if !(0..=40_320).contains(&o.minutes) {
-            return Err("a reminder must be 0 to 40320 minutes (four weeks) ahead".into());
+            return Err(REMINDER_OUT_OF_RANGE.into());
         }
     }
     Ok(())
 }
+
+/// `validate_reminders`' three refusals, raised before anything is sent and
+/// allowlisted in `errors.rs`: the user can act on each, and the opaque
+/// "Sync failed" said nothing a person could fix.
+pub(crate) const TOO_MANY_REMINDERS: &str = "an event can carry at most 5 reminders";
+/// A prefix: the method the caller sent follows it (CLI and IPC input only;
+/// the form offers the two that exist).
+pub(crate) const UNKNOWN_REMINDER_METHOD: &str = "not a reminder method Google knows: ";
+pub(crate) const REMINDER_OUT_OF_RANGE: &str = "a reminder must be 0 to 40320 minutes (four weeks) ahead";
 
 /// When an event happens.
 ///

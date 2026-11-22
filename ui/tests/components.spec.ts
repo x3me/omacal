@@ -1159,8 +1159,29 @@ test.describe('Header', () => {
 
   test('disconnected state offers to connect', async ({ page }) => {
     await page.goto(show('Header', 'disconnected'));
-    await expect(page.getByRole('button', { name: 'Connect Google Calendar' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await expect(page.locator('header')).toHaveScreenshot('header-disconnected.png');
+  });
+
+  /** A new user is offered every kind of calendar the app connects, not only
+   *  Google's: the site pitches Google, iCloud and any CalDAV server alike,
+   *  and the other three used to wait behind ☰ → Settings → Accounts.
+   *  Google starts its sign-in; the others open Accounts with their own
+   *  form already open. */
+  test('the empty state offers every kind of calendar, each to its own form', async ({ page }) => {
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    const menu = page.getByRole('menu', { name: 'Connect a calendar' });
+    await expect(menu.getByRole('menuitem')).toHaveText(['Google Calendar', 'iCloud', 'CalDAV server', 'WebCal feed']);
+
+    await menu.getByRole('menuitem', { name: 'iCloud' }).click();
+    await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('textbox', { name: 'Apple ID' })).toBeVisible();
+
+    await page.goto(show('Header', 'disconnected'));
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'WebCal feed' }).click();
+    await expect(page.getByRole('group', { name: 'Subscribe to a calendar URL' }).getByRole('textbox').first()).toBeVisible();
   });
 
   /**
@@ -1195,6 +1216,25 @@ test.describe('Header', () => {
 
     await page.goto(show('Header', 'connected'));
     await expect(page.getByTestId('reauth-banner')).toHaveCount(0);
+  });
+
+  /** A CalDAV account whose server rejects its password is named in words
+   *  that say so, and its Reconnect opens Settings on Accounts, where the
+   *  password is entered again. Google's banner, whose button starts a
+   *  Google sign-in, stays away: that was the wrong fix for this account. */
+  test('a CalDAV account with a rejected password is sent to Accounts, not to Google', async ({ page }) => {
+    await page.goto(show('Header', 'caldavreauth'));
+    const banner = page.getByTestId('caldav-reauth-banner');
+    await expect(banner).toContainText('The calendar server rejected the password for me@icloud.com');
+    await expect(page.getByTestId('reauth-banner')).toHaveCount(0);
+
+    await banner.getByRole('button', { name: 'Reconnect' }).click();
+
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Accounts' })).toHaveAttribute('aria-selected', 'true');
+
+    await page.goto(show('Header', 'connected'));
+    await expect(page.getByTestId('caldav-reauth-banner')).toHaveCount(0);
   });
 
   /** The update notice: present when status carries one, absent otherwise
@@ -1381,7 +1421,7 @@ test.describe('Header', () => {
     // Connect stays in the header rather than moving behind the hamburger: the
     // three controls §1 moves are all rare, and this is the one thing a new
     // user has to find.
-    await expect(page.getByRole('button', { name: /Connect Google Calendar/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect calendar…' })).toBeVisible();
     await openMenu(page);
     await expect(page.getByRole('button', { name: 'Add Google account' })).toHaveCount(0);
   });
@@ -1564,6 +1604,20 @@ test.describe('Header', () => {
 
     const values = await page.evaluate(() => (window as any).__harness.settingValues('photonPlaces'));
     expect(values[0]).toBe(true);
+  });
+
+  /** The daily update check asks GitHub, a third party, so turning it off is
+   *  the user's to do. On by default (the backend starts it off inside a
+   *  Flatpak, whose package manager brings the updates). */
+  test('About carries the update check, on by default and saved off', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'About');
+    const toggle = modal.getByRole('checkbox', { name: 'Check for updates' });
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect(toggle).not.toBeChecked();
+    const values = await page.evaluate(() => (window as any).__harness.settingValues('updateCheck'));
+    expect(values[0]).toBe(false);
   });
 
   /**
@@ -2900,6 +2954,24 @@ test.describe('EventPopover', () => {
     await expect(page.locator('.pop .note')).toHaveText('Copied description');
   });
 
+  /** Copy floated alone above the text's right edge, tiny, on a line of its
+   *  own: "this COPY button is somehow not well placed" (Plamen, 2026-11-20).
+   *  It now sits on a Notes heading's line, at the right, over the text. */
+  test('the description has a Notes heading, with Copy on its line', async ({ page }) => {
+    await page.goto(show('labelled-link-description'));
+    const label = page.locator('.desc .desclabel');
+    await expect(label).toHaveText('Notes');
+    const copy = page.getByRole('button', { name: 'Copy description' });
+    const text = page.locator('.desc p');
+    const [l, c, t] = await Promise.all([label.boundingBox(), copy.boundingBox(), text.boundingBox()]);
+    if (!l || !c || !t) throw new Error('not laid out');
+    expect(Math.abs((l.y + l.height / 2) - (c.y + c.height / 2)), 'one line').toBeLessThan(3);
+    expect(c.x, 'Copy after the heading').toBeGreaterThan(l.x + l.width);
+    expect(c.y + c.height, 'above the text, not beside it').toBeLessThanOrEqual(t.y + 1);
+    expect(t.y - (l.y + l.height), 'the text right under its heading, no empty line between').toBeLessThan(8);
+    expect(Math.abs((c.x + c.width) - (t.x + t.width)), 'at the text column\'s right edge').toBeLessThan(6);
+  });
+
   test('a description containing markup is shown as text', async ({ page }) => {
     await page.goto(show('nasty-description'));
     await expect(page.locator('.desc')).toContainText('<script>alert(1)</script>');
@@ -2919,6 +2991,19 @@ test.describe('EventPopover', () => {
     await expect(page.locator('.desc p')).toHaveText('Please read the pre-read first.');
     // Copying a link copies where it goes, not what it is called.
     await expect(link).toHaveAttribute('data-copy-value', 'https://docs.example.com/pre-read');
+  });
+
+  /** A click on a description's link is opened by the backend, as Join is,
+   *  never by the webview: the webview's own spawn hands the browser this
+   *  process's AppImage environment (issue #1), and the backend is where a
+   *  link is checked for being a web link at all. */
+  test('a link in the description is opened by the backend', async ({ page }) => {
+    await page.goto(show('labelled-link-description'));
+    await page.locator('.desc a').click();
+    const calls = await page.evaluate(() => (window as any).__harness.calls);
+    expect(calls.filter((c: any) => c.cmd === 'open_link')).toEqual([
+      expect.objectContaining({ args: { url: 'https://docs.example.com/pre-read' } }),
+    ]);
   });
 
   test('a one-off event offers no scope choice', async ({ page }) => {
@@ -3217,6 +3302,50 @@ test.describe('EventPopover on an all-day series east of the browser', () => {
     // be read off instants on the other arm without this one having to care.
     await page.goto('/tests/harness/index.html?c=EventPopover&f=all-day-series-east-of-the-browser');
     await expect(page.locator('.when')).not.toContainText(':');
+  });
+});
+
+/** A multi-day event says where it starts, where it ends and how long it is:
+ *  the line showed the first day alone (Plamen, 2026-11-20). Every view opens
+ *  this one popover, so this is the fix for Week, Month and both Year views. */
+test.describe('EventPopover: an event of more than one day', () => {
+  test.use({ timezoneId: 'UTC' });
+  const open = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
+
+  test('a trip names its first and last day and counts them', async ({ page }) => {
+    await page.goto(open('all-day-trip'));
+    await expect(page.locator('.when')).toHaveText('Tue, Nov 24 – Sat, Dec 12 · 19 days');
+  });
+
+  test('across New Year both ends carry their year', async ({ page }) => {
+    await page.goto(open('all-day-over-new-year'));
+    await expect(page.locator('.when')).toHaveText('Wed, Dec 30, 2026 – Sat, Jan 2, 2027 · 4 days');
+  });
+
+  test('an occurrence of a series shows its own range', async ({ page }) => {
+    await page.goto(open('all-day-series-of-three-days'));
+    await expect(page.locator('.when')).toHaveText('Sat, Jul 10 – Mon, Jul 12 · 3 days');
+  });
+
+  test('a one-day all-day event is still just its day', async ({ page }) => {
+    await page.goto(open('all-day-series-east-of-the-browser'));
+    await expect(page.locator('.when')).toHaveText('Thu, Aug 13');
+  });
+
+  test('a timed event that lands the next day names both days', async ({ page }) => {
+    await page.goto(open('timed-overnight'));
+    await expect(page.locator('.when')).toHaveText('Mon, Nov 9 22:00 – Tue, Nov 10 06:00');
+  });
+
+  test('a timed event ending at midnight stays one evening', async ({ page }) => {
+    await page.goto(open('timed-to-midnight'));
+    await expect(page.locator('.when')).toHaveText('Mon, Nov 9 · 22:00–00:00');
+  });
+
+  test('the date line copies as it reads', async ({ page }) => {
+    await page.goto(open('all-day-trip'));
+    await expect(page.getByRole('button', { name: 'Copy date and time' }))
+      .toHaveAttribute('data-copy-value', 'Tue, Nov 24 – Sat, Dec 12 · 19 days');
   });
 });
 
@@ -5359,6 +5488,54 @@ test.describe('EventForm', () => {
     await expect(page.getByRole('button', { name: 'Save without notifying' })).toBeVisible();
   });
 
+  /** A new event with guests is an invitation: telling them is what
+   *  creating it is for, so notifying is the primary choice there (Plamen,
+   *  2026-11-19), as Quick Add's direct create already does. An edit that
+   *  leaves the time and place alone keeps "without notifying" primary:
+   *  mailing everyone about a typo fix is the outcome that choice exists to
+   *  prevent. */
+  test('notifying is primary on a create, and not on an untouched edit', async ({ page }) => {
+    await open(page, 'create-guests');
+    await addGuest(page, 'ana@x.com');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Create and notify guests' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Create without notifying' })).not.toHaveClass(/\bprimary\b/);
+
+    await open(page, 'with-guests');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Save without notifying' })).toHaveClass(/\bprimary\b/);
+    await expect(page.getByRole('button', { name: 'Save and notify guests' })).not.toHaveClass(/\bprimary\b/);
+  });
+
+  /** An edit that changes when or where is news the guests act on, and
+   *  guests outside Google learn of it only from the email: notifying is the
+   *  default answer, as it is for a drag (Plamen, 2026-11-20). A title fix
+   *  keeps not notifying first. Each arm against the other, or a panel that
+   *  always or never put notifying first would pass. */
+  test('an edit that moves the event or its place puts notifying first', async ({ page }) => {
+    const primaryAfter = async (edit: () => Promise<void>) => {
+      await open(page, 'with-guests');
+      await edit();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      const notify = page.getByRole('button', { name: 'Save and notify guests' });
+      const quiet = page.getByRole('button', { name: 'Save without notifying' });
+      await expect(notify).toBeVisible();
+      return (await notify.getAttribute('class'))?.match(/\bprimary\b/) ? 'notify'
+        : (await quiet.getAttribute('class'))?.match(/\bprimary\b/) ? 'quiet' : 'neither';
+    };
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Start', { exact: true }).fill('11:00');
+      await page.getByLabel('End', { exact: true }).fill('12:00');
+    }), 'a new time').toBe('notify');
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Location').fill('Room 4');
+    }), 'a new place').toBe('notify');
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Title').fill('A typo fixed');
+    }), 'a title fix').toBe('quiet');
+    expect(await primaryAfter(async () => {}), 'nothing changed').toBe('quiet');
+  });
+
   test('an address typed in is added, and reaches the save', async ({ page }) => {
     await open(page, 'with-guests');
     await addGuest(page, 'dan@x.com');
@@ -5371,6 +5548,26 @@ test.describe('EventForm', () => {
     // whole-list replace, so a payload carrying only the new person removes
     // the rest.
     expect(saved.fields.guests).toHaveLength(6);
+  });
+
+  /** An address typed and left in the field is a guest, not a draft to
+   *  throw away: Save adds it, as Return or Add would, before saving. It
+   *  used to be dropped without a word, and the meeting saved without the
+   *  person the user had just typed. An address that is not one stops the
+   *  save, with the field marked. */
+  test('an address left in the field when Save is clicked is added, not dropped', async ({ page }) => {
+    await open(page, 'with-guests');
+    await page.getByLabel('Add guest', { exact: true }).fill('dan@x.com');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await answerNotify(page, 'Save without notifying');
+    const [saved] = await saves(page);
+    expect(saved.fields.guests.map((g: any) => g.email)).toContain('dan@x.com');
+
+    await open(page, 'with-guests');
+    await page.getByLabel('Add guest', { exact: true }).fill('not an address');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByText('not an address is not an email address.')).toBeVisible();
+    expect(await saves(page)).toHaveLength(0);
   });
 
   test('Return in the address field adds a guest rather than saving', async ({ page }) => {
@@ -6745,6 +6942,9 @@ test.describe('the ICS import panel', () => {
     // hour keeps this independent of the clock-format preference.
     await expect(rows.filter({ hasText: 'Berlin trip' })).not.toContainText('·');
     await expect(rows.filter({ hasText: 'Lunch' })).toContainText('·');
+    // And its day is the file's own, not the day its instant falls on here.
+    await expect(rows.filter({ hasText: 'Berlin trip' })).toContainText('8');
+    await expect(rows.filter({ hasText: 'Berlin trip' })).not.toContainText('7');
   });
 
   test('a file with nothing to import lists nothing', async ({ page }) => {

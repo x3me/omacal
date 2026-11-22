@@ -20,6 +20,7 @@ import {
 } from './fixtures';
 import { NO_CONFIG_ERROR } from './harness/tauri';
 import { APP_CHROME_PX } from './harness/viewbox';
+import { MACOS_GESTURES, type Wheel } from './macos-trackpad';
 
 const WEEK = 7 * 24 * 3_600_000;
 /** The week the app opens on, and the one a click on › moves to. */
@@ -446,7 +447,8 @@ test.describe('App', () => {
   // line threw away.
   test('the first-run config error is readable in full', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
 
     const err = page.locator('.err');
     await expect(err).toContainText('Create it with client_id and client_secret');
@@ -461,7 +463,8 @@ test.describe('App', () => {
 
   test('the error clears when the user moves to another week', async ({ page }) => {
     await page.goto(app('no-config'));
-    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.err')).toContainText(NO_CONFIG_ERROR);
 
     await page.getByRole('button', { name: 'Next week' }).click();
@@ -496,7 +499,8 @@ test.describe('App', () => {
   // never left syncing behind the user's back without them having seen it.
   test('signing in opens the picker with the new calendars in it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await expect(page.locator('.acct')).toHaveCount(1);
   });
@@ -510,7 +514,8 @@ test.describe('App', () => {
   // true and unable to reopen the (by-then-closed) child.
   test('closing the picker then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('.panel')).toHaveCount(0);
@@ -527,7 +532,8 @@ test.describe('App', () => {
   // reviewer who found this confirmed both propagate up correctly.
   test('clicking away then signing in again reopens it', async ({ page }) => {
     await page.goto(app('sign-in-adds-account'));
-    await page.getByRole('button', { name: /Connect|Add Google account/ }).click();
+    await page.getByRole('button', { name: 'Connect calendar…' }).click();
+    await page.getByRole('menuitem', { name: 'Google Calendar' }).click();
     await expect(page.locator('.panel')).toBeVisible();
     // **The picker's own scrim**, named exactly: the menu it now sits inside
     // has one too, and clicking the wrong one would close the wrong layer.
@@ -1214,6 +1220,27 @@ test.describe('App', () => {
       return { cx, cy };
     };
 
+    /** A drag the window loses mid-gesture (Alt-Tab, a notification taking
+     *  focus, a touchpad palm-rejected) is abandoned, as Escape abandons it.
+     *  It used to stay armed until the next release anywhere, which then
+     *  committed a move the user never finished. */
+    test('a drag the window loses is abandoned, not dropped on the next release', async ({ page }) => {
+      await writable(page);
+      const b = block(page, 'Board prep').first();
+      await b.scrollIntoViewIfNeeded();
+      const box = (await b.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx, cy + 60, { steps: 4 });
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await page.mouse.move(cx, cy + 120, { steps: 4 });
+      await page.mouse.up();
+      await page.waitForTimeout(300);
+      expect(await callsTo(page, 'update_event'), 'nothing was moved').toHaveLength(0);
+    });
+
     /**
      * **A dragged block is drawn as it would land, not as it was packed.**
      * Its lane — second of two, say, beside a meeting it overlapped — belongs
@@ -1384,7 +1411,11 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('none');
     });
 
-    test('an event with guests asks, and Move without notifying sends none', async ({ page }) => {
+    /** A meeting moved is a meeting its guests need to hear about, so the
+     *  notify answer is the default one, the one Enter takes (Plamen,
+     *  2026-11-20: "when rescheduling a meeting the default should be to
+     *  Notify"). The dialog itself still stands between a drag and the mail. */
+    test('an event with guests asks, and notifying is the default Enter takes', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
 
@@ -1396,10 +1427,21 @@ test.describe('App', () => {
       // A one-off: there is no scope to choose, so the chooser is not offered.
       await expect(movePanel(page).getByRole('radiogroup')).toHaveCount(0);
 
-      await expect(
-        movePanel(page).getByRole('button', { name: 'Move without notifying' }),
-      ).toBeFocused();
+      const notify = movePanel(page).getByRole('button', { name: 'Move and notify guests' });
+      await expect(notify).toBeFocused();
+      await expect(notify).toHaveClass(/primary/);
       await page.keyboard.press('Enter');
+
+      await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      const [args] = await callsTo(page, 'update_event');
+      expect(args.sendUpdates).toBe('all');
+    });
+
+    test('Move without notifying is one click away and sends none', async ({ page }) => {
+      await writable(page);
+      await dragBy(page, 'Client call', 60);
+
+      await movePanel(page).getByRole('button', { name: 'Move without notifying' }).click();
 
       await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
       const [args] = await callsTo(page, 'update_event');
@@ -1454,11 +1496,7 @@ test.describe('App', () => {
       expect(args.sendUpdates).toBe('all');
     });
 
-    /**
-     * **The only route to `all` in the whole drag path.** Sending mail is the
-     * deliberate choice, never the default and never a side effect of a
-     * gesture — which is why the *other* button is the primary one.
-     */
+    /** Clicked, not only by Enter: the notify button sends `all`. */
     test('Move and notify guests is the one path that sends all', async ({ page }) => {
       await writable(page);
       await dragBy(page, 'Client call', 60);
@@ -1895,6 +1933,17 @@ test.describe('App', () => {
         await expect(block(page, 'Board prep')).toHaveClass(/pending/);
         expect(await topOfBlock(page, 'Board prep')).toBeCloseTo(moved, 0);
         await page.evaluate(() => window.__harness.releaseSync());
+      });
+
+      /** The sync a write waits on is the written calendar's, not every
+       *  account's: a full sync fails when any account or feed does, and a
+       *  failed follow-up sync leaves the saved event dimmed and locked. The
+       *  backend half (only that calendar is asked) is `sync_one_calendar`'s
+       *  test; this is the wiring that asks for it. */
+      test("a write's follow-up sync names the written calendar", async ({ page }) => {
+        await writable(page);
+        await dragBy(page, 'Board prep', 60);
+        await expect.poll(() => callsTo(page, 'sync_now')).toEqual([{ calendarId: APP_PRIMARY_CALENDAR_ID }]);
       });
 
       test('a background reload while the follow-up sync runs does not undo a move', async ({ page }) => {
@@ -2421,15 +2470,59 @@ test.describe('App', () => {
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toHaveCount(0);
       });
 
-      test('Reopen goes when the banner clears', async ({ page }) => {
+      /** A refused write is news about something the user did, and a
+       *  week step is not an answer to it: the banner, and its Reopen, stay
+       *  until the user dismisses them. It used to clear on the next load,
+       *  so stepping a week erased the only record that a change was lost. */
+      test('a refused write stays through a week step until it is dismissed', async ({ page }) => {
         await writable(page);
         await page.evaluate(() => window.__harness.holdNextWrite('create_event'));
         await createLunch(page);
         await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
         await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
-        await page.getByRole('button', { name: 'Next week' }).click(); // a load clears the banner
+
+        await page.getByRole('button', { name: 'Next week' }).click();
+        await expect(page.locator('.err')).toContainText('Could not create “Lunch”');
+        await expect(page.locator('.err').getByRole('button', { name: 'Reopen' })).toBeVisible();
+
+        await page.locator('.err').getByRole('button', { name: 'Dismiss' }).click();
         await expect(page.locator('.err')).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Reopen' })).toHaveCount(0);
+      });
+
+      /** A refused edit is as much typing as a refused create, and gets the
+       *  same way back to it. */
+      test('a refused edit offers to reopen what was typed', async ({ page }) => {
+        await writable(page);
+        await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+        await openBoardPrepForm(page);
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await editForm(page).getByRole('button', { name: 'Save' }).click();
+        await page.evaluate(() => window.__harness.rejectWrite('the server said no'));
+        await expect(page.locator('.err')).toContainText('Could not save “Board review”');
+
+        await page.locator('.err').getByRole('button', { name: 'Reopen' }).click();
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+      });
+
+      /** A click beside a form with changes in it is a missed click, not a
+       *  decision to throw them away: the form stays. One with nothing
+       *  changed still closes on it, and Cancel discards either way. */
+      test('a click outside a form keeps what was typed in it', async ({ page }) => {
+        await writable(page);
+        await openBoardPrepForm(page);
+        const outside = page.locator('button.scrim[aria-label="Cancel"]');
+        await editForm(page).getByLabel('Title', { exact: true }).fill('Board review');
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toBeVisible();
+        await expect(editForm(page).getByLabel('Title', { exact: true })).toHaveValue('Board review');
+
+        await editForm(page).getByRole('button', { name: 'Cancel' }).click();
+        await expect(editForm(page)).toHaveCount(0);
+        await openBoardPrepForm(page);
+        await outside.click({ position: { x: 5, y: 5 } });
+        await expect(editForm(page)).toHaveCount(0);
       });
 
       test('an edited occurrence survives a week step while its sync runs', async ({ page }) => {
@@ -3248,6 +3341,25 @@ test.describe('App', () => {
 
     await page.reload();
     await expect(page.locator('.vswitch button.active')).toHaveText('Month');
+  });
+
+  /** A launch fetches the view it will show, once. The app used to start on
+   *  Week, fetch that week, and then switch to the stored default when the
+   *  settings arrived: a flash of the wrong view, and a fetch thrown away.
+   *  The first fetch now waits for the settings. */
+  test('a launch on a stored Month view fetches no week first', async ({ page }) => {
+    await writable(page);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.locator('#default-view').selectOption('month');
+    await page.keyboard.press('Escape');
+
+    await page.reload();
+    await expect(page.locator('.vswitch button.active')).toHaveText('Month');
+    await expect.poll(() => callsTo(page, 'get_month').then((c) => c.length)).toBeGreaterThan(0);
+    expect(await callsTo(page, 'get_week'), 'no week fetched on the way to Month').toHaveLength(0);
   });
 
   /**
@@ -4300,6 +4412,75 @@ test.describe('App', () => {
     await expect(results(page)).toHaveCount(0);
   });
 
+  /** Search is keyboard-first like the rest of the app: Enter opens the top
+   *  result, and the arrows move a selection Enter then opens. Before, the
+   *  field took neither, so a result could be reached only by Tab or the
+   *  mouse. The second "standup" hit is the guests fixture, whose details
+   *  are titled "Client call", which is what tells the two picks apart. */
+  test('Enter opens the top result, and the arrows choose another', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    await page.keyboard.press('Enter');
+    await expect(search(page)).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'Standup' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.press('/');
+    await field(page).fill('standup');
+    await expect(results(page)).toHaveCount(2);
+    const hits = search(page).getByRole('option');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(hits.nth(1)).toHaveAttribute('aria-selected', 'true');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowDown'); // the last stays chosen
+    await page.keyboard.press('ArrowUp');
+    await expect(hits.nth(0)).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('ArrowDown');
+    await expect(field(page)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Client call' })).toBeVisible();
+  });
+
+  /** An all-day result is named by its own date, in its calendar's zone.
+   *  Read from its instant in this webview's zone, an Auckland all-day event
+   *  was listed as the day before. */
+  test('an all-day result shows its own date', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('/');
+    await field(page).fill('valentines');
+    await expect(results(page)).toHaveCount(1);
+    await expect(results(page).first()).toContainText('14');
+    await expect(results(page).first()).not.toContainText('13');
+  });
+
+  /** A hidden window does not redraw for nobody. Closing the window only
+   *  hides it, and every background sync used to reload the week, the
+   *  calendars, the invitations and the tasks into a window nobody could
+   *  see. Now a sync that finishes while hidden marks it stale, and the
+   *  reload runs once, when the window is shown. */
+  test('a sync that finishes while the window is hidden reloads when it is shown', async ({ page }) => {
+    await writable(page);
+    const setHidden = (hidden: boolean) => page.evaluate((h) => {
+      Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+      Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+    const weeks = async () => (await callsTo(page, 'get_week')).length;
+
+    await setHidden(true);
+    const before = await weeks();
+    await page.evaluate(() => window.__harness.emit('sync-finished', null));
+    await page.waitForTimeout(300);
+    expect(await weeks(), 'no reload into a hidden window').toBe(before);
+
+    await setHidden(false);
+    await expect.poll(weeks).toBeGreaterThan(before);
+  });
+
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
     await page.keyboard.press('/');
@@ -4386,11 +4567,11 @@ test.describe('App', () => {
     await writable(page);
     await page.keyboard.press('/');
     await field(page).fill('board');
-    // The **button**, not the `<li>` around it. A list item is not focusable,
+    // The **result** (an option), not the `<li>` around it. A list item is not focusable,
     // so focusing one leaves focus in the field — where `isTypingTarget`
     // already spares the key, and the guard under test never runs. That is
     // what the first version of this spec did, and a mutation is what said so.
-    await results(page).first().getByRole('button').focus();
+    await results(page).first().getByRole('option').focus();
     await expect(field(page)).not.toBeFocused();
 
     await page.keyboard.press('4');
@@ -4439,7 +4620,7 @@ test.describe('App', () => {
     await field(page).fill('milk');
     await expect(results(page)).toHaveCount(1);
     await expect(results(page).first()).toContainText('Buy milk');
-    await results(page).first().getByRole('button').click();
+    await results(page).first().getByRole('option').click();
 
     await expect(search(page), 'search does not linger').toHaveCount(0);
     const side = page.getByRole('complementary', { name: 'Tasks' });
@@ -5934,6 +6115,19 @@ test.describe('App: keyboard event navigation', () => {
     expect(await deleteCalls(page)).toEqual([]);
   });
 
+  /** An event opened from the keyboard gets the fresh copy a click gets:
+   *  the popover is drawn from the store at once and then refreshed, so an
+   *  answer or a move made elsewhere since the last sync shows. Opened from
+   *  the keyboard (or search), it used to stay as the store had it. */
+  test('an event opened from the keyboard is refreshed like a clicked one', async ({ page }) => {
+    await page.keyboard.press('j');
+    await page.keyboard.press('j');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Review notes' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      window.__harness.calls.filter((c) => c.cmd === 'refresh_event').length)).toBe(1);
+  });
+
   test('Backspace on an open event asks before deleting', async ({ page }) => {
     await page.keyboard.press('j');
     await page.keyboard.press('j');
@@ -5999,6 +6193,26 @@ test.describe('App: keyboard event navigation', () => {
 
   /* `h` and `l` are the keyboard's own arrows, so they page and keep it
      showing. Fails the moment the hide moves into `step`, which all four share. */
+  /** `n` and `q` create on the day the keyboard has selected, not on the
+   *  day the view is anchored to: moving the selection to Tuesday (`w`) and
+   *  pressing `n` used to open a form for Monday, the anchor. */
+  test('n and q create on the selected day', async ({ page }) => {
+    await page.keyboard.press('w'); // next day: Tuesday 30 January
+    await expect(page.locator('.kbd-status')).toContainText('Selected');
+    await page.keyboard.press('n');
+    const form = page.getByRole('dialog', { name: 'New event' });
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2024-01-30');
+  });
+
+  /** A shortcut does nothing while a menu or a panel of the header is open:
+   *  `n` opened a form behind the open menu, and the view keys moved the
+   *  calendar under an open invitation tray or calendar list. */
+  test('shortcuts wait while a header menu is open', async ({ page }) => {
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.keyboard.press('n');
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
+  });
+
   test('h and l keep the keyboard selection', async ({ page }) => {
     await page.keyboard.press('w');
     await page.keyboard.press('l');
@@ -6162,6 +6376,226 @@ test.describe('App: week panning', () => {
     await expect(page.locator('.col')).toHaveCount(7);
     await page.waitForTimeout(400);
     const moved = (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - aligned) / 86_400_000;
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(7);
+  });
+
+  /** A strong swipe lands on a whole week even after gentle swipes slid the
+   *  window off its Monday. Counted from where the gesture began, the slide
+   *  was kept, and a fast swipe landed, say, Thursday to Wednesday (Plamen,
+   *  2026-11-20: "the strong swipe moves randomly to the next week"). The
+   *  witness is the second step: the first leaves the week slid, which the
+   *  spec checks, or a landing on a Monday would prove nothing. */
+  test('a strong swipe after gentle ones lands on a whole week, not a slid one', async ({ page }) => {
+    // On the paused clock of the Mac replays below (`openWeek`), with a Linux
+    // wheel: neither this machine's load nor a Mac's give can bend it.
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    await replay(page, Array.from({ length: 6 }, (): Wheel => [16, 8])); // the slow scroll above
+    await rest(page);
+    const slid = await startDay();
+    expect(slid, 'the gentle scroll left the week slid off its Monday').toBeGreaterThan(0);
+    expect(slid).toBeLessThan(7);
+    await replay(page, [[0, 60], [8, 60], [8, 60], [8, 60]]); // the flick of "a strong horizontal swipe pages exactly one week"
+    await rest(page);
+    expect(await startDay(), 'next week, from its Monday').toBe(7);
+  });
+
+  /** A Mac's own momentum, replayed from a recording of Plamen's trackpad
+   *  (`macos-trackpad.ts`). macOS keeps sending wheel events for a second
+   *  after the hand lifts, so the settle, waiting for the lull, read the
+   *  tail's speed: no Mac swipe was ever strong, and a flick stopped
+   *  wherever the momentum ran out, ten, twenty, fifty days on (Plamen,
+   *  2026-11-20: "stronger swipe moves random N of days, usually more than
+   *  10-12"). The synthetic flick above has no momentum, which is why it
+   *  passed on a build that failed on the Mac. */
+  /** Each recorded event dispatched after the page's clock (Playwright's,
+   *  installed and paused by `openWeek`) has run on by its recorded gap: the page's
+   *  timers, frames and `performance.now()` all follow the recording exactly,
+   *  however loaded the machine running it. Replayed on the wall clock, a busy
+   *  WebKit fired its timers 75 ms late and the stream arrived in bursts. */
+  const replay = async (page: Page, events: Wheel[], deltaY = 0) => {
+    const prevented: boolean[] = [];
+    let due = 0;
+    let ran = 0;
+    for (const [dt, deltaX] of events) {
+      due += dt;
+      const step = Math.round(due) - ran;
+      if (step > 0) { await page.clock.runFor(step); ran += step; }
+      prevented.push(await page.evaluate(([deltaX, deltaY]) => {
+        const body = document.querySelector('[data-testid="week-body"]')!;
+        const r = body.getBoundingClientRect();
+        const e = new WheelEvent('wheel', {
+          deltaX, deltaY, clientX: r.left + r.width / 2, clientY: r.top + 100, bubbles: true, cancelable: true,
+        });
+        body.dispatchEvent(e);
+        return e.defaultPrevented;
+      }, [deltaX, deltaY] as const));
+    }
+    return prevented;
+  };
+  /** Long enough for any settle to come to rest and any tail to have ended. */
+  const rest = (page: Page) => page.clock.runFor(1_500);
+  const swipe = (gesture: number, i: number) => MACOS_GESTURES[gesture - 1].swipes[i].events;
+  /** The app on a Mac (or `platform`), counting days from the window's first
+   *  day as it opened. The platform is set, not inherited from the machine
+   *  the tests run on, so this Mac and Linux CI run the same thing. */
+  const openWeek = async (
+    page: Page,
+    o: { platform?: string; settings?: Record<string, unknown>; dayView?: boolean } = {},
+  ) => {
+    await page.addInitScript(([platform, settings]) => {
+      Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform });
+      if (settings) sessionStorage.setItem('omacal-stub-settings', JSON.stringify(settings));
+    }, [o.platform ?? 'MacIntel', o.settings ?? null] as const);
+    await page.clock.install({ time: APP_NOW });
+    await page.goto(app());
+    const cols = o.dayView ? 1 : 7;
+    await expect(page.locator('.col')).toHaveCount(7);
+    if (o.dayView) {
+      await page.keyboard.press('1');
+      await expect(page.locator('.col')).toHaveCount(1);
+    }
+    // Paused from here: after `install` the clock also flows with real time,
+    // and a slow round trip between two events would stretch their gap.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 500);
+    const first = Number(await page.locator('.col').first().getAttribute('data-start-ms'));
+    // Read at rest only: while the track moves it also draws the padding,
+    // and its first column is not the window's.
+    const startDay = async () => {
+      if ((await page.locator('.col').count()) !== cols) return NaN;
+      return (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - first) / 86_400_000;
+    };
+    return Object.assign(startDay, { first });
+  };
+  /** `replay`, and the farthest the track was ever drawn from where it began,
+   *  in days, read off the column under the pane's left edge every frame. */
+  const replayWatching = async (page: Page, first: number, events: Wheel[]) => {
+    await page.evaluate((first) => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      w.__reach = [];
+      const look = () => {
+        const track = document.querySelector('[data-testid="week-body"] .track');
+        if (track) {
+          const left = track.getBoundingClientRect().left + 0.5;
+          for (const c of track.querySelectorAll<HTMLElement>('.col')) {
+            const r = c.getBoundingClientRect();
+            if (r.left <= left && left < r.right) {
+              w.__reach.push((Number(c.dataset.startMs) - first) / 86_400_000 + (left - r.left) / r.width);
+              break;
+            }
+          }
+        }
+        w.__watch = requestAnimationFrame(look);
+      };
+      look();
+    }, first);
+    await replay(page, events);
+    await rest(page);
+    return page.evaluate(() => {
+      const w = window as unknown as { __reach: number[]; __watch: number };
+      cancelAnimationFrame(w.__watch);
+      return { max: Math.max(...w.__reach), min: Math.min(...w.__reach) };
+    });
+  };
+
+  test('a Mac flick, momentum and all, turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    // Rightward on the pad, content leftward: later days. Its momentum runs
+    // down to 10 px an event, so a settle that waits for the lull reads it
+    // as gentle and stops it 17 days on.
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+
+    await replay(page, swipe(7, 0)); // the other way, with a tail all the way down to 1 px
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('a Mac flick there and back, as recorded, lands where it began', async ({ page }) => {
+    // One hand: a flick, 83 ms without events while the fingers touch down
+    // and stop the momentum, then a flick back. The second is a new swipe,
+    // not more of the first one's tail.
+    const startDay = await openWeek(page);
+    await replay(page, MACOS_GESTURES[0].events);
+    await rest(page);
+    expect(await startDay()).toBe(0);
+  });
+
+  test('two Mac flicks the same way, a touch-down apart, turn two weeks', async ({ page }) => {
+    // The second flick begins as small as the first one's tail has shrunk
+    // to; only the 70 ms pause of the fingers landing tells it apart.
+    const startDay = await openWeek(page);
+    const [, ...rest2] = swipe(2, 2);
+    await replay(page, [...swipe(2, 0), [70, swipe(2, 2)[0][1]], ...rest2]);
+    await rest(page);
+    expect(await startDay()).toBe(14);
+  });
+
+  test('a borderline Mac flick is judged on its speed as the hand lifted', async ({ page }) => {
+    // The gentlest recorded flick at nine tenths: about 2.05 px/ms as its
+    // momentum began, 1.9 by the time five shrinking events prove it is
+    // momentum. Linux judges a swipe at the lift; so does this.
+    const startDay = await openWeek(page);
+    await replay(page, swipe(3, 0).map(([dt, dx]): Wheel => [dt, dx * 0.9]));
+    await rest(page);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac tail with an empty event in it is still the tail', async ({ page }) => {
+    const events = [...swipe(7, 0)];
+    events.splice(30, 0, [16, 0]);
+    const startDay = await openWeek(page);
+    await replay(page, events);
+    await rest(page);
+    expect(await startDay()).toBe(-7);
+  });
+
+  test('a vertical scroll straight after a Mac flick scrolls the hours', async ({ page }) => {
+    await openWeek(page);
+    await replay(page, swipe(7, 0).slice(0, 30));
+    const prevented = await replay(page, [[16, 0], [16, 0], [16, 0], [16, 0]], 40);
+    expect(prevented, 'none of the vertical events is taken for the tail').toEqual([false, false, false, false]);
+  });
+
+  /** The hand alone carries a Mac flick five to thirteen days before it
+   *  lifts; the settle then pulled the week back onto the page it landed on
+   *  ("it visually goes forward and then comes back", Plamen, 2026-11-20).
+   *  Now a fast swipe meets that line and gives only a little past it. */
+  test('a hard Mac flick slows into the next week instead of flying past it', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1)); // the hardest recorded
+    expect(reach.max, 'never drawn more than the give past next Monday').toBeLessThanOrEqual(7.35);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('on Linux a fast swipe is not held at the line: its wheel is not accelerated', async ({ page }) => {
+    const startDay = await openWeek(page, { platform: 'Linux x86_64' });
+    const reach = await replayWatching(page, startDay.first, swipe(7, 1));
+    expect(reach.max).toBeGreaterThan(8);
+    expect(await startDay()).toBe(7);
+  });
+
+  test('a Mac flick in a rolling week turns exactly one week', async ({ page }) => {
+    const startDay = await openWeek(page, { settings: { weekStartsToday: true } });
+    const reach = await replayWatching(page, startDay.first, swipe(2, 0));
+    expect(await startDay()).toBe(7);
+    expect(reach.max).toBeLessThanOrEqual(7.35);
+  });
+
+  test('a Mac flick in Day view turns exactly one day', async ({ page }) => {
+    const startDay = await openWeek(page, { dayView: true });
+    await replay(page, swipe(2, 0));
+    await rest(page);
+    expect(await startDay()).toBe(1);
+  });
+
+  test('a slow Mac swipe still moves by days, not a week', async ({ page }) => {
+    const startDay = await openWeek(page);
+    const slow = MACOS_GESTURES[5].swipes.find((s) => s.kind === 'slow' && s.events.length === 24)!;
+    await replay(page, slow.events);
+    await rest(page);
+    const moved = await startDay();
     expect(moved).toBeGreaterThan(0);
     expect(moved).toBeLessThan(7);
   });
@@ -6652,6 +7086,38 @@ test.describe('App: hiding weekends', () => {
     await expect(columns.last()).toHaveAttribute('data-start-ms', String(APP_MON + 4 * 24 * 3_600_000)); // Friday
   });
 
+  /** With weekends hidden a week is five columns, and a strong swipe crosses
+   *  five; counted as five calendar days, the second swipe from a Monday
+   *  landed on a Thursday (Gemini, 2026-11-20). Each flick turns the week. */
+  test('strong swipes with weekends hidden turn whole weeks, Monday to Monday', async ({ page }) => {
+    const day = 24 * 3_600_000;
+    await openApp(page);
+    await setHideWeekends(page, true);
+    const columns = page.locator('[data-testid="week-body"] .col');
+    await expect(columns).toHaveCount(5);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON));
+    const flick = () => page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
+          bubbles: true, cancelable: true,
+        }));
+        const t = performance.now();
+        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
+      }
+    });
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 7 * day));
+    await page.waitForTimeout(600);
+    await flick();
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await page.waitForTimeout(600);
+    await expect(columns.first()).toHaveAttribute('data-start-ms', String(APP_MON + 14 * day));
+    await expect(columns).toHaveCount(5);
+  });
+
   test('Day view\'s arrows step past Saturday and Sunday, landing on the weekday either side', async ({ page }) => {
     const day = 24 * 3_600_000;
     await openApp(page);
@@ -7122,6 +7588,21 @@ test.describe('the tasks sidebar', () => {
   };
   const lastCall = (page: import('@playwright/test').Page, cmd: string) => page.evaluate((c) =>
     (window as any).__harness.calls.filter((x: any) => x.cmd === c).pop()?.args, cmd);
+
+  /** Deleting a task removes it from the server at once and there is no
+   *  undo, so the × asks first: one click turns it into "Delete?", and only
+   *  that deletes. Anything else (another row, Escape) leaves the task. */
+  test('the × asks before a task is deleted', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByText('Buy milk').hover(); // the × shows on the row's hover
+    await side.getByRole('button', { name: 'Delete Buy milk' }).click();
+    expect(await lastCall(page, 'delete_task_cmd')).toBeUndefined();
+    await expect(side.getByText('Buy milk')).toBeVisible();
+
+    await side.getByRole('button', { name: 'Confirm delete Buy milk' }).click();
+    await expect.poll(() => lastCall(page, 'delete_task_cmd')).toEqual({ id: 11 });
+    await expect(side.getByText('Buy milk')).toHaveCount(0);
+  });
 
   /** The sidebar sits beside the week rather than over it: tasks are worked
    *  next to the calendar, and a panel covering the grid hides the thing the

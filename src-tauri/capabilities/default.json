@@ -5,7 +5,6 @@
   "windows": ["main", "menubar"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging",
-    "opener:default"
+    "core:window:allow-start-dragging"
   ]
 }
