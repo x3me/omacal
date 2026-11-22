@@ -515,7 +515,9 @@ pub(crate) async fn update(
                 end,
                 recurrence: recurrence_for(&fields.recurrence, Some(&master)),
                 recurrence_id: None,
-                alarms: alarms_for(&fields.reminders, Some(&master)),
+                // Untouched reminders are the ones the dialog showed: the
+                // clicked occurrence's, which a moved one may have of its own.
+                alarms: alarms_for(&fields.reminders, Some(&viewed)),
                 sequence: 0,
                 attendees: attendees_for(&fields.guests),
                 conference: None,
