@@ -69,9 +69,11 @@ async fn invites_where(
             -- guest list (a paste did this, 2026-08-20) comes back from
             -- Google with a needsAction self row, and announcing it invites
             -- the user to their own meeting. Same identity rule as
-            -- `declines.rs`: the organizer's copy lives on the organizer's
-            -- calendar, whose google_id is the address that organizes it.
-            AND (e.organizer_email IS NULL OR e.organizer_email != c.google_id)
+            -- `declines.rs` (`is_users_own`): the account's address, or on
+            -- Google the calendar's own, whose google_id is the address.
+            AND (e.organizer_email IS NULL
+                 OR (LOWER(e.organizer_email) != LOWER(a.email)
+                     AND LOWER(e.organizer_email) != LOWER(c.google_id)))
             {extra_clause}
           ORDER BY e.start_utc, e.id",
     );
@@ -198,6 +200,31 @@ mod tests {
         )
         .execute(&pool).await.unwrap();
         pool
+    }
+
+    /// The user's own CalDAV meeting, with the user on its guest list, is not
+    /// an invitation to it. The calendar id cannot say so on CalDAV (it is a
+    /// URL), so the account's address does, case aside.
+    #[tokio::test]
+    async fn the_users_own_caldav_meeting_is_not_an_invitation() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:me@icloud.com', 'me@icloud.com', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (2, 'https://caldav.example.com/me/home/', 'Home', 'Europe/Sofia', 'owner')",
+        )
+        .execute(&pool).await.unwrap();
+        let mut own = event("own", NOW + HOUR);
+        own.calendar_id = 2;
+        own.self_response = Some("needsAction".into());
+        own.organizer_email = Some("Me@iCloud.com".into());
+        upsert_event(&pool, &own).await.unwrap();
+
+        assert!(pending_invites(&pool, NOW).await.unwrap().is_empty());
     }
 
     fn event(gid: &str, start: i64) -> StoredEvent {

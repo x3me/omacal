@@ -106,6 +106,19 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// How many civil days an all-day series' occurrences span, read off the
+/// master's own two dates in the series' zone, never off its length in
+/// milliseconds. At least one: an all-day event covers its day.
+fn all_day_span_days(series: &Series) -> u64 {
+    let date = |ms: i64| {
+        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, series.dtstart_tz), "%Y-%m-%d").ok()
+    };
+    match (date(series.dtstart_ms), date(series.dtstart_ms + series.duration_ms)) {
+        (Some(first), Some(end)) => (end - first).num_days().max(1) as u64,
+        _ => 1,
+    }
+}
+
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
 ///
 /// `limit` bounds the number of occurrences generated, guarding against
@@ -154,16 +167,30 @@ pub fn expand(
         .before(to_chrono(to_ms)?)
         .all(limit);
 
+    let span_days = all_day_span_days(series);
     let intervals = result
         .dates
         .into_iter()
         .map(|d| {
-            let start = if series.is_all_day {
-                midnight_in_zone(d.date_naive(), zone)
+            if series.is_all_day {
+                // Both ends are midnights of civil dates, so the occurrence
+                // covers whole days whatever their length. The master's
+                // duration in milliseconds is only right on days as long as
+                // the master's own: on a 25-hour fall-back day it ended an
+                // hour short of midnight, and a master on a 23-hour
+                // spring-forward day ended every ordinary occurrence an hour
+                // short. Either way the span ended on the day before it
+                // started, and the occurrence vanished.
+                let date = d.date_naive();
+                let last = date + chrono::Days::new(span_days);
+                Interval {
+                    start_ms: midnight_in_zone(date, zone),
+                    end_ms: midnight_in_zone(last, zone),
+                }
             } else {
-                d.timestamp_millis()
-            };
-            Interval { start_ms: start, end_ms: start + series.duration_ms }
+                let start = d.timestamp_millis();
+                Interval { start_ms: start, end_ms: start + series.duration_ms }
+            }
         })
         .filter(|i| i.start_ms < to_ms && i.end_ms > from_ms)
         .collect();

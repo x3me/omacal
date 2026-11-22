@@ -139,25 +139,26 @@
         onclick={() => onconfirm({ scope, sendUpdates: 'none' })}
       >Move my copy</button>
     {:else if guests > 0}
-      <!-- **Not notifying is the primary action**, and the order says so:
-           sending mail is the deliberate choice, never the default and never a
-           side effect of a gesture (spec §2). A drag can happen by accident;
-           an accident that emails a meeting's whole guest list is the outcome
-           this whole dialog exists to prevent. -->
+      <!-- **Notifying is the primary action** (Plamen, 2026-11-20: "when
+           rescheduling a meeting the default should be to Notify"): a meeting
+           moved is a meeting its guests need to hear about. It was the other
+           way round, so that an accidental drag could not mail the guest
+           list; the dialog itself still stands between a drag and any mail,
+           and not notifying is one click away. -->
       <button
         type="button"
         class="ghost"
         data-choice
-        onclick={() => onconfirm({ scope, sendUpdates: 'all' })}
-      >Move and notify guests</button>
+        onclick={() => onconfirm({ scope, sendUpdates: 'none' })}
+      >Move without notifying</button>
       <button
         type="button"
         class="primary"
         data-choice
         data-default-choice-action
         data-initial-choice={detail.is_recurring ? undefined : ''}
-        onclick={() => onconfirm({ scope, sendUpdates: 'none' })}
-      >Move without notifying</button>
+        onclick={() => onconfirm({ scope, sendUpdates: 'all' })}
+      >Move and notify guests</button>
     {:else}
       <!-- Nobody to tell, so there is nothing to choose between. This panel is
            only open at all because the event repeats. -->

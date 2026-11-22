@@ -19,6 +19,7 @@
   import SaveConfirm from './SaveConfirm.svelte';
   import { editReach, type SendUpdates } from './eventdetail';
   import { zoneName } from './zonename.svelte';
+  import { openLink } from './api';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
     isCalendarAddress, mailableGuests, normalizedWeeklyDays, onlyShowAsChanged, previewSpan, removableGuest,
@@ -122,6 +123,19 @@
     weeklyDays: [...initial.weeklyDays],
     repeatEnd: { ...initial.repeatEnd },
   });
+  /** The value as the form opened, normalised as above: what "changed"
+   *  is measured against. Read once on purpose, at open. */
+  // svelte-ignore state_referenced_locally
+  const opened = JSON.stringify(value);
+  /** Whether anything in the form differs from how it opened. */
+  const changed = $derived(JSON.stringify(value) !== opened);
+
+  /** A click beside the form. With nothing changed it is a way out, as it
+   *  always was. With changes it is a missed click, not a decision to throw
+   *  them away: Cancel and Escape are the explicit ways to discard. */
+  function clickedOutside() {
+    if (!changed) oncancel();
+  }
   // The Zoom URL gets its own draft because the choice can be switched away
   // from and back to without throwing away a link somebody just pasted. The
   // actual event value is still updated on every keystroke, so the grid
@@ -318,6 +332,16 @@
    *  already here and nothing about it is the caller's business — the same
    *  reason the scope radios live in this form rather than in `App`. */
   let asking = $state<{ result: Omit<EventFormResult, 'notify'> } | null>(null);
+  /** When and where, as one comparable value: the fields a guest acts on. */
+  const whenAndWhere = (v: EventFormValue) => JSON.stringify([
+    v.date, v.endDate, v.start, v.end, v.isAllDay,
+    v.repeat, v.weeklyDays, v.repeatEnd, v.recurrence,
+    v.location.trim(), v.videoCall,
+  ]);
+  /** An edit that moved the event, changed how it repeats, or changed where it
+   *  is: notifying is then the save's default answer (`SaveConfirm`), as it
+   *  is for a drag. A title or description fix keeps not notifying first. */
+  const rescheduled = $derived(initial.isEdit && whenAndWhere(value) !== whenAndWhere(initial));
 
   /** The event arrived carrying a rule omacal cannot express. Read from
    *  `initial`, not `value`: once the user picks something else the entry stays
@@ -497,6 +521,13 @@
   function save() {
     error = null;
     invalidField = null;
+    // An address typed and not yet added is a guest the user meant: add it
+    // the way Return and Add do, and stop on one that is not an address.
+    // It used to be dropped, and the meeting saved without that person.
+    if (draft.trim() !== '') {
+      addTyped();
+      if (invalidField === 'guest') return;
+    }
     if (value.calendarId === null) {
       error = 'There is no calendar here you can write to.';
       return;
@@ -662,7 +693,7 @@
 
 <!-- A sibling of `.pop`, not a wrapper, so a click inside the panel never
      reaches this button. -->
-<button class="scrim" aria-label="Cancel" onclick={oncancel}></button>
+<button class="scrim" aria-label="Cancel" onclick={clickedOutside}></button>
 
 <div
   class="pop"
@@ -845,7 +876,8 @@
           {/if}
         </select>
         {#if value.videoCall?.uri}
-          <a href={value.videoCall.uri} target="_blank" rel="noopener noreferrer">Open ↗</a>
+          <a href={value.videoCall.uri} target="_blank" rel="noopener noreferrer"
+             onclick={(e) => { e.preventDefault(); if (value.videoCall?.uri) void openLink(value.videoCall.uri).catch(() => {}); }}>Open ↗</a>
         {/if}
       </div>
       {#if videoChoice === 'googleMeet' && value.videoCall?.uri === null}
@@ -861,6 +893,7 @@
             oninput={(e) => updateZoomCall(e.currentTarget.value)}
           />
           <a href="https://zoom.us/meeting/schedule" target="_blank" rel="noopener noreferrer"
+             onclick={(e) => { e.preventDefault(); void openLink('https://zoom.us/meeting/schedule').catch(() => {}); }}
             >Schedule ↗</a
           >
         </div>
@@ -1248,6 +1281,7 @@
     guests={guests}
     {reach}
     {verb}
+    notifyFirst={verb === 'Create' || rescheduled}
     title={value.title.trim() === '' ? '(no title)' : value.title}
     {anchor}
     onconfirm={confirmSave}

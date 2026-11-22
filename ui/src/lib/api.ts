@@ -49,6 +49,10 @@ export type UiEvent = {
  *  event, not choose a destination. It is also what routes the click around
  *  the AppImage environment that crashes a spawned browser (issue #1). */
 export const openConference = (id: number) => invoke<void>('open_conference', { id });
+/** Opens a clicked link through the backend (`commands::open_link`), which
+ *  opens web links only and keeps the AppImage environment out of the
+ *  browser. Never the webview's own `target="_blank"`. */
+export const openLink = (url: string) => invoke<void>('open_link', { url });
 
 /** Saves one occurrence as an `.ics` the user names (#113). Resolves to the
  *  path written, or `null` when the chooser was dismissed — a cancel is an

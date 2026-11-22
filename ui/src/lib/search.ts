@@ -12,6 +12,10 @@ export type Hit = {
   title: string;
   startMs: number;
   endMs: number;
+  /** For an all-day occurrence, its date (`yyyy-mm-dd`) in its own calendar's
+   *  zone: what the result names and where a jump lands. `startMs` read in
+   *  this webview's zone can be the day before. `null` when timed. */
+  allDayDate: string | null;
 };
 
 /**

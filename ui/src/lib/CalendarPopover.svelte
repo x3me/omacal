@@ -74,7 +74,7 @@
          no global state to leak if the component unmounts while open. -->
     <button class="scrim" aria-label="Close" onclick={close}></button>
 
-    <div class="panel" role="group" aria-label="Calendars">
+    <div class="panel" role="group" aria-label="Calendars" data-overlay>
       <CalendarGroupsPanel {calendars} {groups} onapply={onapplygroup} onsave={onsavegroups} {onchange} />
     </div>
   {/if}

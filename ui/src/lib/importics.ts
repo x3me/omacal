@@ -7,6 +7,9 @@ export type Planned =
       summary: string;
       start_ms: number;
       all_day: boolean;
+      /** An all-day event's date as the file states it (`yyyy-mm-dd`);
+       *  `null` when timed. */
+      date: string | null;
       /** The repeat in the preview's words, end included ("weekly on Mon,
        *  Wed, 10 times"), or `null` for a single event. */
       repeat: string | null;

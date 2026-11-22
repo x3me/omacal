@@ -45,6 +45,17 @@ pub struct ChangedMeeting {
     pub attendees: Vec<Attendee>,
 }
 
+/// Whether `organizer` is the user: the account's own address, or the
+/// calendar's id where that is an address (a Google calendar, including one
+/// shared into the account). Mailboxes are compared without regard to case.
+/// The store-side twin of the app's `events::is_organizer`, for the readers
+/// here that decide what the invitation tray says: on CalDAV a calendar's id
+/// is a collection URL, so the account's address is the only witness.
+pub fn is_users_own(organizer: &str, account_email: &str, calendar_google_id: &str) -> bool {
+    (!account_email.is_empty() && organizer.eq_ignore_ascii_case(account_email))
+        || (!calendar_google_id.is_empty() && organizer.eq_ignore_ascii_case(calendar_google_id))
+}
+
 /// Every unacknowledged change worth telling the user about, soonest first
 /// (by the time they knew, for a cancellation; by the new time, for a move).
 pub async fn changed_meetings(
@@ -59,7 +70,9 @@ pub async fn changed_meetings(
                 e.start_utc AS cur_start, e.end_utc AS cur_end, e.status AS cur_status,
                 e.recurrence AS cur_recurrence, e.summary AS cur_summary,
                 e.organizer_email AS cur_organizer,
-                c.google_id AS cal_gid, c.timezone, c.access_role, a.provider,
+                c.google_id AS cal_gid, a.email AS account_email,
+                e.self_response AS cur_self_response,
+                c.timezone, c.access_role, a.provider,
                 COALESCE(c.color_override, c.color_hex) AS color_hex
            FROM event_changes ec
            JOIN calendars c ON c.id = ec.calendar_id
@@ -69,6 +82,9 @@ pub async fn changed_meetings(
           WHERE ec.dismissed = 0
             AND c.selected = 1
             AND c.sync_enabled = 1
+            -- A subscribed feed asks nothing of the user: its events are
+            -- somebody's published schedule, not meetings they attend.
+            AND a.provider != 'webcal'
           ORDER BY ec.old_start_utc, ec.gid",
     )
     .fetch_all(pool)
@@ -77,14 +93,23 @@ pub async fn changed_meetings(
     let mut out: Vec<ChangedMeeting> = Vec::new();
     for row in &rows {
         let cal_gid: String = row.get("cal_gid");
+        let account_email: String = row.get("account_email");
         // The current row's organizer where one still exists, the snapshot's
         // otherwise. Unknown organizer reads as "mine" — silence over noise.
         let organizer: Option<String> = row
             .get::<Option<String>, _>("cur_organizer")
             .or_else(|| row.get("organizer_email"));
         match organizer {
-            Some(o) if o != cal_gid => {}
+            Some(o) if !is_users_own(&o, &account_email, &cal_gid) => {}
             _ => continue,
+        }
+        // Only a meeting the user is on. A live row says so by carrying the
+        // user's own answer; a deleted one has no row left to ask, and its
+        // cancellation is still news if it was ever the user's to attend.
+        if row.get::<Option<i64>, _>("event_id").is_some()
+            && row.get::<Option<String>, _>("cur_self_response").is_none()
+        {
+            continue;
         }
 
         let kind: String = row.get("kind");
@@ -222,6 +247,29 @@ pub async fn dismiss_all_changes(
     Ok(listed.len())
 }
 
+/// Whether this calendar has never finished a sync: no cursor stored yet.
+/// Read inside the sync's own transaction, before it writes its cursor.
+pub async fn is_first_sync(conn: &mut sqlx::SqliteConnection, calendar_id: i64) -> sqlx::Result<bool> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_state WHERE calendar_id = ?1")
+        .bind(calendar_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(n == 0)
+}
+
+/// Drops the ledger rows a calendar's **first** sync wrote. That sync is the
+/// baseline: it brings in every moved or cancelled occurrence of other
+/// people's series, ever, and the insert triggers file each one as news.
+/// Connecting an account used to fill the tray with them. Whatever changes
+/// after the baseline is news, and is recorded as before.
+pub async fn forget_baseline_changes(conn: &mut sqlx::SqliteConnection, calendar_id: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// Erases the ledger's memory of one meeting — the user's own delete flow
 /// calls this, because leaving a meeting on purpose must not come back as
 /// "cancelled" news. Takes the exceptions with the series.
@@ -303,6 +351,65 @@ mod tests {
             reminders: Default::default(),
             calendar_default_reminders: Vec::new(),
         }
+    }
+
+    /// The user's own meeting is not news, on any provider. On CalDAV a
+    /// calendar's id is its collection URL, never an address, so the only
+    /// way to recognise the user's own is the account's address, compared
+    /// as mailboxes are: without regard to case.
+    #[tokio::test]
+    async fn the_users_own_caldav_meeting_moving_is_not_news() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('caldav:me@icloud.com', 'me@icloud.com', 0, 'caldav')",
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (2, 'https://caldav.example.com/me/home/', 'Home', 'Europe/Sofia', 'owner')",
+        )
+        .execute(&pool).await.unwrap();
+        let mut own = attended("own", NOW + HOUR);
+        own.calendar_id = 2;
+        own.organizer_email = Some("Me@iCloud.com".into());
+        upsert_event(&pool, &own).await.unwrap();
+        own.start_utc = NOW + 5 * HOUR;
+        own.end_utc = NOW + 6 * HOUR;
+        upsert_event(&pool, &own).await.unwrap();
+
+        assert!(changed_meetings(&pool, NOW).await.unwrap().is_empty());
+    }
+
+    /// Only meetings the user is on are news. A subscribed feed's events and
+    /// a meeting on a shared calendar the user is no guest of move all the
+    /// time, and neither asks anything of the user.
+    #[tokio::test]
+    async fn a_feed_or_a_meeting_the_user_is_not_on_is_not_news() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO accounts (google_sub, email, created_at, provider)
+             VALUES ('webcal:feed', 'Team holidays', 0, 'webcal')",
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (2, 'https://feeds.example.com/team.ics', 'Team', 'Europe/Sofia', 'reader')",
+        )
+        .execute(&pool).await.unwrap();
+        let mut feed = attended("feed", NOW + HOUR);
+        feed.calendar_id = 2;
+        let mut stranger = attended("stranger", NOW + HOUR);
+        stranger.self_response = None;
+        stranger.attendees.clear();
+        for mut e in [feed, stranger] {
+            upsert_event(&pool, &e).await.unwrap();
+            e.start_utc = NOW + 5 * HOUR;
+            e.end_utc = NOW + 6 * HOUR;
+            upsert_event(&pool, &e).await.unwrap();
+        }
+
+        assert!(changed_meetings(&pool, NOW).await.unwrap().is_empty());
     }
 
     #[tokio::test]

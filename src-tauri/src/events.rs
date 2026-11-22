@@ -871,6 +871,21 @@ async fn refresh_event_impl(state: &AppState, id: i64) -> Result<EventDetail, St
 /// open. Its failures are the caller's to ignore: whatever `EventDetail` is
 /// already on screen is still valid if this does not succeed.
 async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> {
+    // Google's events only. A CalDAV or WebCal event's "calendar id" is a
+    // collection or feed URL, and an address shared with a Google account
+    // found that account's token: the popover sent the URL and the event's
+    // UID to googleapis.com on every open. On a CalDAV-only install it just
+    // failed at the missing Google config. Its stored details are the answer.
+    let provider: Option<String> = sqlx::query_scalar(
+        "SELECT a.provider FROM events e JOIN calendars c ON c.id = e.calendar_id
+         JOIN accounts a ON a.id = c.account_id WHERE e.id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if !provider.as_deref().is_some_and(refreshes_from_google) {
+        return event_detail_impl(state, id).await;
+    }
     let (ev, _access_role, cal_google_id, account_email) = omacal_store::event_for_write(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
@@ -885,6 +900,12 @@ async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> 
         crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     }
     event_detail_impl(state, id).await
+}
+
+/// Whether opening an event of this account's provider asks Google for a
+/// fresher copy: only a Google account's. See [`refresh_impl`].
+fn refreshes_from_google(provider: &str) -> bool {
+    provider == "google"
 }
 
 /// The Google half of [`refresh_impl`], split out so it runs against a
@@ -1017,7 +1038,7 @@ async fn create_impl(
     // and the form never asks one on these calendars.
     if crate::caldav_write::is_caldav_calendar(&state.pool, calendar_id).await? {
         if fields.conference.is_some() {
-            anyhow::bail!("Google Meet can only be added to a Google calendar");
+            anyhow::bail!(MEET_ONLY_ON_GOOGLE);
         }
         return crate::caldav_write::create(state, calendar_id, fields, uid).await;
     }
@@ -1205,6 +1226,33 @@ pub(crate) const CREATED_NOT_STORED: &str =
 pub(crate) const SAVED_NOT_STORED: &str =
     "The change was saved, but OmaCal could not record it locally. \
      The next sync will bring it in.";
+
+/// A Meet link asked for on a calendar that is not Google's, which cannot
+/// make one. Raised before anything is sent; allowlisted in `errors.rs`.
+pub(crate) const MEET_ONLY_ON_GOOGLE: &str = "Google Meet can only be added to a Google calendar";
+
+/// A "this and following" split refused because the series ends after a set
+/// number of times: the rest would need the original's count minus what the
+/// first half used, a number only a full expansion knows. Shared by the
+/// Google and CalDAV splits so both refuse in the same words. Raised by
+/// `bail!` before either write; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_REFUSES_COUNT: &str =
+    "OmaCal cannot split a series that ends after a set number of times — \
+     edit all events instead";
+
+/// A split refused because later occurrences were changed on their own and
+/// would be lost; the count follows. Shared by both splits; a prefix in
+/// `errors.rs`'s `SAFE_PREFIXES`.
+pub(crate) const SPLIT_STRANDS_PREFIX: &str =
+    "some later occurrences of this series were moved or deleted on their own, and a \
+     split cannot carry them across — edit all events instead, or re-create them \
+     afterwards. Occurrences affected: ";
+
+/// A split whose new series landed but whose original would not shorten.
+/// Shared by both splits; allowlisted in `errors.rs`.
+pub(crate) const SPLIT_LEFT_TWO_SERIES: &str =
+    "the new series was created but the original could not be shortened — \
+     you now have two overlapping series and should delete one";
 
 /// What a CalDAV move reports when the copy landed and the original would not
 /// go — the one partial outcome the PUT-then-DELETE order can produce.
@@ -1671,7 +1719,7 @@ async fn update_impl(
         if let Some(cal_id) = cal_id {
             if crate::caldav_write::is_caldav_calendar(&state.pool, cal_id).await? {
                 if fields.conference.is_some() {
-                    anyhow::bail!("Google Meet can only be added to a Google calendar");
+                    anyhow::bail!(MEET_ONLY_ON_GOOGLE);
                 }
                 let detail =
                     crate::caldav_write::update(state, id, scope, occurrence_start_ms, fields)
@@ -2272,10 +2320,7 @@ async fn split_series(
     // not valid iCalendar and Google does not emit it, but checking one and
     // truncating both is the shape a real bug hides in.
     if rules.iter().any(|r| crate::write::has_count(r)) {
-        anyhow::bail!(
-            "OmaCal cannot split a series that ends after a set number of times — \
-             edit all events instead"
-        );
+        anyhow::bail!(SPLIT_REFUSES_COUNT);
     }
 
     // Occurrences in the tail that somebody has already changed on their own.
@@ -2314,11 +2359,7 @@ async fn split_series(
     )
     .await?;
     if stranded > 0 {
-        anyhow::bail!(
-            "some later occurrences of this series were moved or deleted on their own, and a \
-             split cannot carry them across — edit all events instead, or re-create them \
-             afterwards. Occurrences affected: {stranded}"
-        );
+        anyhow::bail!("{SPLIT_STRANDS_PREFIX}{stranded}");
     }
 
     // ---- 1. The tail. -----------------------------------------------------
@@ -2479,10 +2520,7 @@ async fn split_series(
         .map_err(|e| {
             tracing::error!(master = %master.id, created = %created.id, %e,
                 "series split created the new series but could not shorten the original");
-            anyhow::anyhow!(
-                "the new series was created but the original could not be shortened — \
-                 you now have two overlapping series and should delete one"
-            )
+            anyhow::anyhow!(SPLIT_LEFT_TWO_SERIES)
         })?;
 
     // ---- 3. Only now, the local store. ------------------------------------
@@ -4458,6 +4496,36 @@ mod tests {
     /// An `AppState` a test can hold: demo mode's whole point is that nothing
     /// below the gate runs, so the token cache starts empty and stays that
     /// way.
+    /// Only a Google event is refreshed from Google.
+    #[test]
+    fn only_a_google_event_is_refreshed_from_google() {
+        assert!(refreshes_from_google("google"));
+        for other in ["caldav", "webcal", "local", ""] {
+            assert!(!refreshes_from_google(other), "{other}");
+        }
+    }
+
+    /// A CalDAV event's refresh is its stored details, reached without the
+    /// Google config at all. (Run only against the fixed path: the unfixed
+    /// one reads the machine's real `~/.config/omacal/config.toml`, which a
+    /// test must not touch, so the call-site is proven by the rule above and
+    /// by this returning Ok.)
+    #[tokio::test]
+    async fn a_caldav_event_refreshes_to_its_stored_details() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider) VALUES ('caldav:e@x','e@x',0,'caldav')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1,'https://dav.example.com/cal/','Home','UTC','owner')")
+            .execute(&pool).await.unwrap();
+        let mut ev = stored(vec![]);
+        ev.calendar_id = 1;
+        let id = omacal_store::upsert_event(&pool, &ev).await.unwrap();
+        let state = state_with(pool, false);
+
+        let detail = refresh_impl(&state, id).await.unwrap();
+        assert_eq!(detail.id, id);
+    }
+
     fn state_with(pool: SqlitePool, demo: bool) -> AppState {
         AppState { pool, demo, tokens: Default::default(), reauth: Default::default(), update: Default::default(), update_checked_at: Default::default(), system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default() }
     }
