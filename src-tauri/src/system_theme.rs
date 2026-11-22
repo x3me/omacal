@@ -44,7 +44,10 @@ pub async fn changed_async(app: &AppHandle, scheme: SystemScheme) {
     if appearance.is_pinned() {
         return;
     }
-    let palette = theme::resolve(None, appearance);
+    // The pair is re-read on every flip, not captured at launch: it can be
+    // changed in Settings while the app runs, and the next flip must wear it.
+    let auto = crate::settings::auto_pair(&pool).await;
+    let palette = theme::resolve(None, appearance, auto);
     tracing::info!(?scheme, "system appearance changed, repainting");
     let dark = palette.is_dark;
     let _ = app.run_on_main_thread(move || crate::apply_gtk_dark_hint(dark));

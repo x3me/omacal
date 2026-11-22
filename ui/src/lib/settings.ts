@@ -59,9 +59,10 @@ export const START_ON_LOGIN_OPTIONS: ReadonlyArray<[StartOnLogin, string]> = [
  * and a second copy of that number in TypeScript is one that drifts from the
  * `sync_loop::MIN_INTERVAL_MS` actually enforced.
  */
-/** Which palette the app wears. `'auto'` is the desktop's — the Omarchy
- *  theme if there is one, dark if there is not — and the two others are the
- *  built-in palettes, chosen explicitly. */
+/** Which palette the app wears. `'auto'` is the desktop's: the Omarchy theme
+ *  if there is one, and otherwise the theme chosen for the system's light or
+ *  dark mode (`autoLightTheme`, `autoDarkTheme`). Every other value is a
+ *  palette chosen explicitly. */
 export type Appearance =
   | 'auto' | 'light' | 'dark'
   | 'tokyo-night' | 'catppuccin-mocha' | 'catppuccin-latte' | 'rose-pine-dawn' | 'retro-bloom'
@@ -228,6 +229,13 @@ export type AppSettings = {
    *  exist: off Omarchy there was no theme to wear and dark was the only
    *  answer the app had (issue #30). */
   appearance: Appearance;
+  /** The themes `'auto'` wears while the system is in light mode and in dark
+   *  mode, off Omarchy. `'daylight'` and `'daylight-dark'` unless chosen; the
+   *  backend reads a stored `'light'` or `'dark'` as its successor and any
+   *  other stale row as that side's default, so these are always a theme of
+   *  their side that its picker offers. */
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   /** Whether the window draws a title bar, or `null` where the choice is not
    *  omacal's — macOS, whose overlay title bar *is* the frame. The modal
    *  shows the row only when there is an answer, so this is the one place
@@ -318,6 +326,8 @@ export type SettingValues = {
   keepRemindersOnScreen: boolean;
   trayIcon: boolean;
   appearance: Appearance;
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   windowFrame: WindowFrame;
   quitOnClose: boolean;
   startOnLogin: StartOnLogin;

@@ -852,12 +852,54 @@
   /** Each card's colours, fetched when the pane opens: the backend resolves
    *  them, and "Follow the desktop" is whatever the desktop is right now. */
   let themePreviews = $state<ReadonlyMap<Appearance, Palette>>(new Map());
-  $effect(() => {
-    if (tab !== 'Appearance') return;
+  function loadPreviews() {
     appearancePreviews()
       .then((list) => { themePreviews = new Map(list.map((p) => [p.appearance, p.palette])); })
       .catch(() => { /* cards draw in the app's own colours without it */ });
+  }
+  $effect(() => {
+    if (tab !== 'Appearance') return;
+    loadPreviews();
   });
+
+  /** `ListPicker` names its rows by number, so a theme's row is its place in
+   *  `APPEARANCE_OPTIONS`: one number per theme, whichever side lists it. */
+  const themeIndex = (theme: Appearance) => APPEARANCE_OPTIONS.findIndex(([id]) => id === theme);
+
+  /** The themes each side of "Follow the desktop" may wear: every pinned
+   *  theme but the plain Light and Dark, retired wherever these rows show
+   *  (`PLAIN_THEMES`), sorted onto the side its palette is by the backend's
+   *  own `is_dark` in the previews, so a theme added there joins the right
+   *  list with nothing to remember here. Until the previews arrive a side
+   *  offers only its current choice, so the field never shows a blank. */
+  const autoThemes = $derived.by(() => {
+    const side = (dark: boolean, current: Appearance): ListChoice[] => {
+      const fits = APPEARANCE_OPTIONS.filter(([id]) =>
+        id !== 'auto' && !PLAIN_THEMES.has(id) && themePreviews.get(id)?.is_dark === dark);
+      return (fits.length ? fits : APPEARANCE_OPTIONS.filter(([id]) => id === current))
+        .map(([id, name]) => ({ id: themeIndex(id), name, color: null }));
+    };
+    return {
+      light: side(false, settings?.autoLightTheme ?? 'daylight'),
+      dark: side(true, settings?.autoDarkTheme ?? 'daylight-dark'),
+    };
+  });
+
+  /** `saveAppearance`'s shape, for the row `ListPicker` hands back. A refusal
+   *  (a stale form offering a theme of the other side) leaves the field on
+   *  the stored choice, which it draws from and which has not changed. */
+  async function saveAutoTheme(dark: boolean, row: number | null) {
+    if (row === null) return;
+    note = null;
+    try {
+      settings = await setSetting(dark ? 'autoDarkTheme' : 'autoLightTheme', APPEARANCE_OPTIONS[row][0]);
+      onsettingschange?.(settings);
+      // The "Follow the desktop" card is drawn in what it resolves to now.
+      loadPreviews();
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+    }
+  }
 
   async function saveAppearance(appearance: Appearance) {
     note = null;
@@ -1244,9 +1286,27 @@
           onchange={saveAppearance}
         />
       </div>
+      <!-- Only while following the desktop, and never on Omarchy, where what
+           the desktop wears is its own theme rather than a light or a dark.
+           The app's own picker rather than a <select>: these rows show on
+           Linux without Omarchy, where GTK would draw a select's list
+           outside the theme. -->
+      {#if settings?.appearance === 'auto' && settings.desktop !== 'omarchy'}
+        {#each [false, true] as dark (dark)}
+          {@const label = dark ? 'In dark mode' : 'In light mode'}
+          <div class="row wide">
+            <span class="lab" aria-hidden="true">{label}</span>
+            <div class="inline">
+              <ListPicker noDot wide {label} choices={dark ? autoThemes.dark : autoThemes.light}
+                value={themeIndex(dark ? settings.autoDarkTheme : settings.autoLightTheme)}
+                onpick={(row) => saveAutoTheme(dark, row)} />
+            </div>
+          </div>
+        {/each}
+      {/if}
       <p class="hint">
         {#if settings?.desktop === 'omarchy'}Following the desktop wears your Omarchy theme and follows it as you switch.
-        {:else}Following the desktop wears its light or dark setting, and follows it when that changes.{/if}
+        {:else}Following the desktop wears your light or dark theme as the system is set, and switches when that changes.{/if}
         Any other choice replaces the whole palette, including the accent, without a restart.
       </p>
 

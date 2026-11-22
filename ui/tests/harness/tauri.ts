@@ -20,6 +20,7 @@ import type { Appearance, StartOnLogin, WeekViewDays, WindowFrame } from '../../
 import type { View } from '../../src/lib/views';
 import type { TaskSort } from '../../src/lib/tasks';
 import type { EventCornerStyle } from '../../src/lib/appearance';
+import type { Palette } from '../../src/lib/theme';
 import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
@@ -36,6 +37,23 @@ const PALETTE = {
   bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea',
   muted: '#8a8a90', accent: '#5b8def', is_dark: true,
 };
+
+/** `appearance_previews`, with the backend's own palettes
+ *  (`theme::Palette::named` and the built-in two), and Auto as this stub's own
+ *  `get_palette` resolves it. Also what `set_setting` sorts a theme onto a
+ *  side of Auto by, as the backend reads `is_dark` off the same palettes. */
+const STUB_PREVIEWS: ReadonlyArray<[Appearance, Palette]> = [
+  ['auto', PALETTE],
+  ['light', { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false }],
+  ['dark', { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true }],
+  ['tokyo-night', { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#7aa2f7', is_dark: true }],
+  ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
+  ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
+  ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
+  ['retro-bloom', { bg: '#282828', surface: '#2f2f2f', text: '#ebdbb2', muted: '#a89984', accent: '#fe8019', is_dark: true }],
+  ['daylight', { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270', accent: '#d32f3a', is_dark: false, style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85, today: '#f2f2f4', heading_size: 24, heading_weight: 700 } }],
+  ['daylight-dark', { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab', accent: '#ef5350', is_dark: true, style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85, today: '#1e2024', heading_size: 24, heading_weight: 700, tint_space: 'srgb-linear', accent_fill: '#d32f3a' } }],
+];
 
 /** The first-run failure a user is most likely to meet: no config file. */
 export const NO_CONFIG_ERROR =
@@ -764,6 +782,8 @@ type StubSettings = {
   startOnLoginAsked: boolean;
   quitOnClose: boolean;
   appearance: Appearance;
+  autoLightTheme: Appearance;
+  autoDarkTheme: Appearance;
   // `WindowFrame | null` on the wire; the stub is Linux-shaped, so a spec
   // that wants the macOS answer seeds `null` explicitly.
   windowFrame: WindowFrame | null;
@@ -870,6 +890,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   // The backend's default: whatever the desktop says, which off Omarchy is
   // the dark fallback — the behaviour every install already has.
   appearance: 'auto',
+  // The backend's defaults: Auto wears Daylight and Daylight Dark.
+  autoLightTheme: 'daylight',
+  autoDarkTheme: 'daylight-dark',
   // The backend's default, Linux-shaped: the row exists (macOS reports none)
   // and follows the desktop.
   windowFrame: 'auto',
@@ -1021,22 +1044,9 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'get_palette':
         return PALETTE;
-      // The theme picker's cards: `appearance_previews`, with the backend's
-      // own palettes (`theme::Palette::named` and the built-in two), and Auto
-      // as this stub's own `get_palette` resolves it.
+      // The theme picker's cards (`STUB_PREVIEWS`).
       case 'appearance_previews':
-        return [
-          ['auto', PALETTE],
-          ['light', { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false }],
-          ['dark', { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true }],
-          ['tokyo-night', { bg: '#1a1b26', surface: '#21222d', text: '#c0caf5', muted: '#a9b1d6', accent: '#7aa2f7', is_dark: true }],
-          ['catppuccin-mocha', { bg: '#1e1e2e', surface: '#252535', text: '#cdd6f4', muted: '#a6adc8', accent: '#cba6f7', is_dark: true }],
-          ['catppuccin-latte', { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false }],
-          ['rose-pine-dawn', { bg: '#faf4ed', surface: '#f5efe8', text: '#575279', muted: '#6e6a86', accent: '#286983', is_dark: false }],
-          ['retro-bloom', { bg: '#282828', surface: '#2f2f2f', text: '#ebdbb2', muted: '#a89984', accent: '#fe8019', is_dark: true }],
-          ['daylight', { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270', accent: '#d32f3a', is_dark: false, style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85, today: '#f2f2f4', heading_size: 24, heading_weight: 700 } }],
-          ['daylight-dark', { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab', accent: '#ef5350', is_dark: true, style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85, today: '#1e2024', heading_size: 24, heading_weight: 700, tint_space: 'srgb-linear', accent_fill: '#d32f3a' } }],
-        ].map(([appearance, palette]) => ({ appearance, palette }));
+        return STUB_PREVIEWS.map(([appearance, palette]) => ({ appearance, palette }));
       // Recorded in `calls` like everything else; the real one opens a
       // browser, which a test can only assert was *asked for*.
       case 'open_latest_release':
@@ -1311,6 +1321,17 @@ export function installTauriStub(scenario: string): Harness {
           case 'defaultView':
             settings = saveSettings({ ...settings, defaultView: value, defaultViewFollowsLast: false });
             return { ...settings };
+          // `Appearance::suits`, mirrored on the stub's own previews: a theme
+          // of the other side is refused, as the backend refuses it.
+          case 'autoLightTheme':
+          case 'autoDarkTheme': {
+            const dark = key === 'autoDarkTheme';
+            if (value === 'auto' || STUB_PREVIEWS.find(([a]) => a === value)?.[1].is_dark !== dark) {
+              throw new Error(dark ? 'dark mode needs a dark theme' : 'light mode needs a light theme');
+            }
+            settings = saveSettings({ ...settings, [key]: value });
+            return { ...settings };
+          }
           // Any answer is an answer: the backend writes the mode and "asked"
           // together, so the first-run card does not come back.
           case 'startOnLogin':
