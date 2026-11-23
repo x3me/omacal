@@ -379,13 +379,15 @@ test.describe('App', () => {
 
   test('partial sync refreshes Year while keeping the failed-account message visible', async ({ page }) => {
     await page.goto(app());
+    const yearButton = page.getByRole('button', { name: 'Year', exact: true });
+    await expect(yearButton).toBeVisible();
     const year = new Date(APP_NOW).getUTCFullYear();
     const months = Array.from({ length: 12 }, (_, index) => ({
       month: index + 1, lead_blanks: 0,
       days: [{ start_ms: Date.UTC(year, index, 1), day: 1, has_all_day: false, unsynced: true }],
     }));
     await page.evaluate((year) => window.__harness.setResponseData({ year }), { year, months });
-    await page.getByRole('button', { name: 'Year', exact: true }).click();
+    await yearButton.click();
     await expect(page.locator('.yday.unsynced')).toHaveCount(12);
     for (const month of months) month.days[0].unsynced = false;
     await page.evaluate(async (year) => {
