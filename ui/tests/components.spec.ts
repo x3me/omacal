@@ -3093,6 +3093,14 @@ test.describe('EventPopover', () => {
     await expect(page.locator('.scope')).toHaveCount(0);
   });
 
+  test('a fortnightly series says every 2 weeks, not weekly', async ({ page }) => {
+    // Since #181 the backend answers `weekly` with an interval of 2 for this
+    // rule, and the preset's word alone — "Repeats weekly" — would tell the
+    // reader the meeting is twice as often as it is.
+    await page.goto(show('fortnightly'));
+    await expect(page.locator('.cadence')).toHaveText('Every 2 weeks on Tuesday and Thursday');
+  });
+
   test('the scope is asked when a response is chosen, and Cancel withdraws it', async ({ page }) => {
     await page.goto(show('recurring'));
     await page.getByRole('button', { name: 'No' }).click();
@@ -5178,7 +5186,7 @@ test.describe('EventForm', () => {
 
   test('an unrepresentable repeat rule is shown as a disabled Custom option', async ({ page }) => {
     // Spec §6's UI half. `write::repeat_from_rrule` answered `custom` for this
-    // fortnightly rule, and the form's job is to show what it cannot rewrite
+    // last-Friday rule, and the form's job is to show what it cannot rewrite
     // rather than quietly present it as something it can.
     await open(page, 'custom-repeat');
     const select = page.getByLabel('Repeat', { exact: true });
@@ -5196,9 +5204,12 @@ test.describe('EventForm', () => {
     expect(await custom.evaluate((el) => (el as HTMLOptionElement).disabled)).toBe(true);
     await expect(select.locator('option:not([disabled])')).toHaveCount(6);
     await expect(select).toBeEnabled();
-    // In words, not as the raw rule: `RRULE:FREQ=WEEKLY;INTERVAL=2` is not
+    // In words, not as the raw rule: `RRULE:FREQ=MONTHLY;BYDAY=-1FR` is not
     // something to ask a user to read before deciding whether to replace it.
-    await expect(custom).toHaveText('Custom · Every 2 weeks');
+    await expect(custom).toHaveText('Custom · Monthly on the last Friday');
+    // And no "Every" beside it: a custom rule's interval, if it has one, is
+    // part of the rule the form cannot write, not a field it can offer.
+    await expect(page.getByLabel('Repeat every', { exact: true })).toHaveCount(0);
   });
 
   test('Weekly exposes SMTWRFS buttons and saves the pushed day pattern', async ({ page }) => {
@@ -5249,6 +5260,122 @@ test.describe('EventForm', () => {
     await page.getByRole('button', { name: 'Create' }).click();
     await expect(page.getByTestId('form-error')).toContainText('at least 1 occurrence');
     expect(await saves(page)).toEqual([]);
+  });
+
+  /** "Every N" (#181): the fortnightly meeting, made from the form — with
+   *  the weekly days and an ending beside it, because the interval has to
+   *  travel with every other part of the rule, not instead of one. */
+  test('Every N saves an interval with the weekly days and the ending', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('weekly');
+    const every = page.getByLabel('Repeat every', { exact: true });
+    await expect(every).toHaveValue('1');
+    await expect(page.locator('.aftercount', { has: every })).toHaveText('week');
+    await every.fill('2');
+    await expect(page.locator('.aftercount', { has: every })).toHaveText('weeks');
+    await page.getByRole('group', { name: 'Repeat on' }).getByRole('button', { name: 'Friday' }).click();
+    await page.getByLabel('Repeat ends').selectOption('after');
+    await page.getByLabel('Number of occurrences').fill('6');
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields).toMatchObject({
+      repeat: 'weekly', repeatInterval: 2, weeklyDays: ['WE', 'FR'],
+      repeatEnd: { kind: 'after', count: 6 },
+    });
+  });
+
+  /** Every one is the default, and it is said by sending nothing: the
+   *  backend writes no INTERVAL part for an absent one. Proved by the key's
+   *  absence on each cadence that offers the field. */
+  test('Every 1 sends no interval at all', async ({ page }) => {
+    for (const repeat of ['daily', 'weekly', 'monthly', 'yearly']) {
+      await open(page, 'create');
+      await page.getByLabel('Repeat', { exact: true }).selectOption(repeat);
+      await expect(page.getByLabel('Repeat every', { exact: true })).toHaveValue('1');
+      await page.getByRole('button', { name: 'Create' }).click();
+      const [saved] = (await saves(page)).slice(-1);
+      expect(saved.fields.repeat, repeat).toBe(repeat);
+      expect(Object.keys(saved.fields), repeat).not.toContain('repeatInterval');
+    }
+  });
+
+  /** Every weekday is a cadence of its own and offers no "Every". Leaving a
+   *  fortnightly series for it must not carry the hidden 2 along: the
+   *  backend refuses that pair rather than guess which one was meant. */
+  test('Every weekday offers no interval, and leaving a fortnightly rule for it sends none', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('weekdays');
+    await expect(page.getByLabel('Repeat every', { exact: true })).toHaveCount(0);
+
+    await open(page, 'fortnightly-edit');
+    await page.getByLabel('Repeat', { exact: true }).selectOption('weekdays');
+    await page.getByRole('button', { name: 'Save' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields.repeat).toBe('weekdays');
+    expect(Object.keys(saved.fields)).not.toContain('repeatInterval');
+  });
+
+  test('an invalid interval is named and never saved', async ({ page }) => {
+    for (const typed of ['0', '1000', '']) {
+      await open(page, 'create');
+      await page.getByLabel('Repeat', { exact: true }).selectOption('daily');
+      const every = page.getByLabel('Repeat every', { exact: true });
+      await every.fill(typed);
+      await page.getByRole('button', { name: 'Create' }).click();
+      await expect(page.getByTestId('form-error'), typed).toHaveText(
+        'Repeat every must be a whole number from 1 to 999.',
+      );
+      await expect(every, typed).toHaveAttribute('aria-invalid', 'true');
+      expect(await saves(page), typed).toEqual([]);
+    }
+  });
+
+  /** **Editing a fortnightly series shows it, and saving keeps it** (#181).
+   *  Every control reads the backend's answer — Weekly, every 2 weeks, Tue
+   *  and Thu, after 8 — and a save that changes only the ending re-sends the
+   *  interval with it. That save rewrites the whole rule, so without the
+   *  interval the meeting would quietly become weekly. */
+  test('a fortnightly series opens as every 2 weeks, and a new ending keeps the interval', async ({ page }) => {
+    await open(page, 'fortnightly-edit');
+    await expect(page.getByLabel('Repeat', { exact: true })).toHaveValue('weekly');
+    await expect(page.getByLabel('Repeat every', { exact: true })).toHaveValue('2');
+    const days = page.getByRole('group', { name: 'Repeat on' });
+    await expect(days.getByRole('button', { name: 'Tuesday' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(days.getByRole('button', { name: 'Thursday' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(days.getByRole('button', { name: 'Wednesday' })).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByLabel('Number of occurrences')).toHaveValue('8');
+
+    await page.getByLabel('Number of occurrences').fill('10');
+    await page.getByRole('button', { name: 'Save' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields).toMatchObject({
+      repeat: 'weekly', repeatInterval: 2, weeklyDays: ['TU', 'TH'],
+      repeatEnd: { kind: 'after', count: 10 },
+    });
+  });
+
+  /** The two other edits to a fortnightly series: one that leaves Repeat
+   *  alone sends no rule at all, so the series' own line stays exactly as
+   *  the server holds it; one that changes only the interval sends the
+   *  whole rule, days and ending included. Each against the other, or a form
+   *  that always or never sent the rule would pass one of them. */
+  test('a fortnightly edit sends no rule untouched, and the whole rule when only the interval moves', async ({ page }) => {
+    await open(page, 'fortnightly-edit');
+    await page.getByLabel('Title').fill('Sprint review (moved room)');
+    await page.getByRole('button', { name: 'Save' }).click();
+    let [saved] = await saves(page);
+    expect(Object.keys(saved.fields)).not.toContain('repeat');
+    expect(Object.keys(saved.fields)).not.toContain('repeatInterval');
+
+    await open(page, 'fortnightly-edit');
+    await page.getByLabel('Repeat every', { exact: true }).fill('3');
+    await page.getByRole('button', { name: 'Save' }).click();
+    [saved] = (await saves(page)).slice(-1);
+    expect(saved.fields).toMatchObject({
+      repeat: 'weekly', repeatInterval: 3, weeklyDays: ['TU', 'TH'],
+      repeatEnd: { kind: 'after', count: 8 },
+    });
   });
 
   test('an event with guests says the choice is on the buttons, not on Save', async ({ page }) => {
@@ -5591,6 +5718,28 @@ test.describe('EventForm', () => {
       await page.getByLabel('Title').fill('A typo fixed');
     }), 'a title fix').toBe('quiet');
     expect(await primaryAfter(async () => {}), 'nothing changed').toBe('quiet');
+  });
+
+  /** Every 2 weeks to every 3 is a new schedule for everyone on it — the
+   *  same news as a new time — so notifying comes first (#181). The title
+   *  fix on the same series is the other arm. */
+  test('changing only how far apart a series repeats puts notifying first', async ({ page }) => {
+    const primaryAfter = async (edit: () => Promise<void>) => {
+      await open(page, 'fortnightly-with-guests');
+      await edit();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      const notify = page.getByRole('button', { name: 'Save and notify guests' });
+      const quiet = page.getByRole('button', { name: 'Save without notifying' });
+      await expect(notify).toBeVisible();
+      return (await notify.getAttribute('class'))?.match(/\bprimary\b/) ? 'notify'
+        : (await quiet.getAttribute('class'))?.match(/\bprimary\b/) ? 'quiet' : 'neither';
+    };
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Repeat every', { exact: true }).fill('3');
+    }), 'a new interval').toBe('notify');
+    expect(await primaryAfter(async () => {
+      await page.getByLabel('Title').fill('A typo fixed');
+    }), 'a title fix').toBe('quiet');
   });
 
   test('an address typed in is added, and reaches the save', async ({ page }) => {

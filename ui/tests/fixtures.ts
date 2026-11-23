@@ -507,6 +507,7 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   // defaults agree. A fixture that sets one must set the other.
   repeat: 'never',
   weekly_days: [],
+  repeat_interval: 1,
   repeat_end: { kind: 'never' },
   color: '#5b8def',
   organizer_email: null,
@@ -1517,6 +1518,10 @@ export const FORM_FALLBACK_ID = 1;
  *  mapping the app will actually use in Task 10 is the one under test here. */
 const editing = (d: EventDetail, startMs = FORM_START, endMs = FORM_END): EventFormValue =>
   valueFromDetail(d, startMs, endMs);
+
+/** Tuesday 4 Aug 2026, 09:00 — the occurrence the `fortnightly-edit` form is
+ *  opened on, the day before `FORM_START`'s Wednesday. */
+const FORTNIGHTLY_START = Date.UTC(2026, 7, 4, 9, 0);
 
 /** Monday 10 Aug 2026, all day, for three days: Mon, Tue, Wed. `end_ms` is the
  *  *exclusive* midnight Google and the store both use — Thursday — so a form
@@ -3057,6 +3062,22 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 9 * H + 30 * 60_000,
       onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
     },
+    // Every other Tuesday and Thursday, as the backend answers it since #181:
+    // `weekly`, the two days, and an interval of 2 — the shape whose preset
+    // word ("weekly") is half the truth. Starting on a Tuesday, which a
+    // series on those days has to.
+    fortnightly: {
+      detail: detail({
+        id: 3,
+        is_recurring: true,
+        start_ms: MON + 33 * H, end_ms: MON + 33 * H + 30 * 60_000,
+        recurrence: 'RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH',
+        repeat: 'weekly', weekly_days: ['TU', 'TH'], repeat_interval: 2,
+        attendees: [attendee({ email: 'me@x.com', is_self: true })],
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 33 * H, occurrenceEndMs: MON + 33 * H + 30 * 60_000,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
     /* A series whose detail start and clicked block deliberately disagree —
      * the master's DTSTART against a later occurrence, which is the shape
      * `POPOVER_DETAILS[42]` exists for one layer up. Every other fixture here
@@ -3499,17 +3520,53 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       initial: { ...blankValue(FORM_NOW, 1), start: '14:00', end: '13:00' },
       calendars: FORM_CALENDARS,
     },
-    // Spec §6's UI half: a fortnightly rule, which `write::rrule_for` has no
+    // Spec §6's UI half: the last Friday of the month, which the form has no
     // way to author, so `write::repeat_from_rrule` answers `custom` and the
     // form must refuse to overwrite it by accident. `repeat` and `recurrence`
     // are set together — the backend derives one from the other, and a fixture
     // where they disagreed would be describing an event that cannot exist.
+    // (This was a fortnightly rule until the form learned "Every N" in #181;
+    // a fixture left on it would describe a `custom` the backend no longer
+    // answers.)
     'custom-repeat': {
       anchor: ANCHOR,
       initial: editing(detail({
         id: 10, title: 'Sprint review', is_recurring: true,
-        recurrence: 'RRULE:FREQ=WEEKLY;INTERVAL=2', repeat: 'custom', can_edit: true,
+        recurrence: 'RRULE:FREQ=MONTHLY;BYDAY=-1FR', repeat: 'custom', can_edit: true,
       })),
+      calendars: FORM_CALENDARS,
+    },
+    // Every other Tuesday and Thursday, ending after 8: the rule the form
+    // can now hold whole (#181). The four fields are the backend's answer for
+    // that `recurrence`, set together for the same reason as above — and the
+    // interval is not 1, so a form that dropped it on the next save would
+    // send something a spec can see. Opened on a Tuesday occurrence, Tuesday
+    // 4 August, because a series on those days has no Wednesday to open on.
+    'fortnightly-edit': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 19, title: 'Sprint review', is_recurring: true, can_edit: true,
+        recurrence: 'RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=8',
+        repeat: 'weekly', weekly_days: ['TU', 'TH'], repeat_interval: 2,
+        repeat_end: { kind: 'after', count: 8 },
+      }), FORTNIGHTLY_START, FORTNIGHTLY_START + 30 * 60_000),
+      calendars: FORM_CALENDARS,
+    },
+    // `fortnightly-edit` with somebody to tell, on Google: what decides
+    // whether a change to the interval alone counts as moving the meeting.
+    'fortnightly-with-guests': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 20, title: 'Sprint review', is_recurring: true, can_edit: true,
+        recurrence: 'RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=8',
+        repeat: 'weekly', weekly_days: ['TU', 'TH'], repeat_interval: 2,
+        repeat_end: { kind: 'after', count: 8 },
+        organizer_email: 'me@x.com',
+        attendees: [
+          attendee({ email: 'me@x.com', is_self: true }),
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+        ],
+      }), FORTNIGHTLY_START, FORTNIGHTLY_START + 30 * 60_000),
       calendars: FORM_CALENDARS,
     },
     // Five attendees, one of them the signed-in user: the notice must say

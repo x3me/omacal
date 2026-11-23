@@ -54,8 +54,9 @@ export type EventFormResult = {
  * appears here, and nothing in this file decides whether a given RRULE is one
  * of these — that answer arrives already made, on `EventDetail.repeat`, from
  * `write::repeat_from_rrule`. That Rust function also strictly recognises the
- * plain weekly BYDAY shape represented by `weeklyDays`; the UI never parses
- * raw recurrence to make this decision.
+ * plain weekly BYDAY shape represented by `weeklyDays` and the INTERVAL
+ * represented by `repeatInterval`; the UI never parses raw recurrence to make
+ * this decision.
  */
 export const REPEAT_OPTIONS: Array<[key: string, label: string]> = [
   ['never', 'Does not repeat'],
@@ -69,6 +70,32 @@ export const REPEAT_OPTIONS: Array<[key: string, label: string]> = [
 /** The value `write::repeat_from_rrule` answers for a rule omacal cannot
  *  express. Not in `REPEAT_OPTIONS`: it is never something a user may pick. */
 export const CUSTOM_REPEAT = 'custom';
+
+/**
+ * The repeats that take an "Every N", with the unit N counts — singular and
+ * plural, for "Every 1 week" and "Every 2 weeks". Mirrors
+ * `write::repeat_takes_interval`, which refuses an interval on anything else.
+ *
+ * `weekdays` is not here on purpose: Monday to Friday is already a cadence,
+ * and every other week on those days is Weekly with five days ticked — which
+ * is also how `write.rs` reads such a rule back.
+ */
+export const INTERVAL_UNITS: Readonly<Record<string, readonly [one: string, many: string]>> = {
+  daily: ['day', 'days'],
+  weekly: ['week', 'weeks'],
+  monthly: ['month', 'months'],
+  yearly: ['year', 'years'],
+};
+
+/** The largest "Every N" — `write::MAX_REPEAT_INTERVAL`, where the reason is.
+ *  Repeated here only so the form can name the limit before Save; the Rust
+ *  side refuses past it whatever this says. */
+export const MAX_REPEAT_INTERVAL = 999;
+
+/** Whether `repeat` is a cadence that takes an "Every N". An own key, not
+ *  `in`: `'constructor' in INTERVAL_UNITS` is true. */
+export const takesInterval = (repeat: string): boolean =>
+  Object.prototype.hasOwnProperty.call(INTERVAL_UNITS, repeat);
 
 /** The visual pattern the user asked for: `S M T W R F S`, with `R` for
  * Thursday so both Tuesdays and Thursdays stay one keystroke/wide button. */
@@ -171,6 +198,13 @@ export type EventFormValue = {
   /** The selected days when `repeat === 'weekly'`. Always Sunday-first and
    *  non-empty for values built by this module. */
   weeklyDays: WeekdayCode[];
+  /** "Every N": how many days, weeks, months or years apart the occurrences
+   *  fall, when `repeat` takes one (`INTERVAL_UNITS`). `1` is every one.
+   *  Kept while Repeat is something else, as `repeatEnd` is, so trying
+   *  another cadence and coming back does not lose what was typed. A
+   *  `number` because the input is one — an emptied field reads as `null`
+   *  or `NaN`, which `repeatIntervalProblem` names rather than repairs. */
+  repeatInterval: number;
   /** How the series stops. Kept even while Repeat is Never so switching a
    * cadence off and back on does not discard what was typed. */
   repeatEnd: RepeatEnd;
@@ -616,6 +650,17 @@ export function sameRepeatEnd(a: RepeatEnd, b: RepeatEnd): boolean {
   return true;
 }
 
+/** The "Every N" error a Save must name instead of silently repairing.
+ *  Clamping 0 to 1, or an emptied field to the last good number, would save
+ *  a cadence nobody typed — and on an edit, mail it to the guest list. */
+export function repeatIntervalProblem(value: EventFormValue): string | null {
+  if (!takesInterval(value.repeat)) return null;
+  const n = value.repeatInterval;
+  return Number.isInteger(n) && n >= 1 && n <= MAX_REPEAT_INTERVAL
+    ? null
+    : `Repeat every must be a whole number from 1 to ${MAX_REPEAT_INTERVAL}.`;
+}
+
 /** The repeat-ending error a Save must name instead of silently repairing. */
 export function repeatEndProblem(value: EventFormValue): string | null {
   if (value.repeat === 'never' || value.repeat === CUSTOM_REPEAT
@@ -760,6 +805,7 @@ export function blankValueAt(
     calendarId,
     repeat: 'never',
     weeklyDays: [weekdayCodeForDate(dateOf(startMs))],
+    repeatInterval: 1,
     repeatEnd: { kind: 'never' },
     recurrence: null,
     // Nobody, until the user types somebody in. The guest editor is on this
@@ -1015,6 +1061,7 @@ export function valueFromDetail(
     weeklyDays: detail.weekly_days.length > 0
       ? normalizedWeeklyDays(detail.weekly_days)
       : [weekdayCodeForDate(displayedDate)],
+    repeatInterval: detail.repeat_interval,
     repeatEnd: { ...detail.repeat_end },
     recurrence: detail.recurrence,
     // **Everyone** — see `EventFormValue.guests` for how this differs from
@@ -1385,10 +1432,21 @@ export function toEventInput(
   const blank = (s: string) => (s.trim() === '' ? null : s);
   const repeatChanged = value.repeat !== initial.repeat
     || (value.repeat === 'weekly' && !sameWeeklyDays(value.weeklyDays, initial.weeklyDays))
+    || (takesInterval(value.repeat) && value.repeatInterval !== initial.repeatInterval)
     || (value.repeat !== 'never' && value.repeat !== CUSTOM_REPEAT
       && !sameRepeatEnd(value.repeatEnd, initial.repeatEnd));
+  // The whole rule, every part the form holds — and the interval is the part
+  // that cannot be left to default. A save that touched only the days or the
+  // ending of a fortnightly series rewrites its rule from this, so leaving
+  // the interval out would quietly make the meeting weekly and, with guests
+  // on it, tell them so. One is sent as absent, the way every one is said;
+  // `weekdays` and `never` take no interval, so a hidden one never travels
+  // beside them — the backend refuses that pair rather than guessing.
   const authoredRepeat = {
     repeat: value.repeat,
+    ...(takesInterval(value.repeat) && value.repeatInterval > 1
+      ? { repeatInterval: value.repeatInterval }
+      : {}),
     ...(value.repeat === 'weekly'
       ? { weeklyDays: normalizedWeeklyDays(value.weeklyDays) }
       : {}),

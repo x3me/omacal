@@ -57,15 +57,20 @@ pub struct EventDetail {
     /// the UI.
     ///
     /// Deliberately not derivable from `recurrence` on the TypeScript side.
-    /// The Rust authority matches base rules exactly and admits only one
-    /// strictly parsed extension: plain weekly `BYDAY`, whose every fact is
-    /// represented by `weekly_days`, plus COUNT/UNTIL endings represented by
-    /// `repeat_end`. A second copy in the UI could drift and
-    /// silently turn "every 2nd Tuesday" into "weekly" on the next save.
+    /// The Rust authority matches base rules exactly and admits only strictly
+    /// parsed extensions, each with a field of its own: plain weekly `BYDAY`
+    /// in `weekly_days`, `INTERVAL` in `repeat_interval`, and COUNT/UNTIL
+    /// endings in `repeat_end`. A second copy in the UI could drift and
+    /// silently turn "the last Friday of the month" into "monthly" on the
+    /// next save.
     pub repeat: String,
     /// The Sunday-first weekday codes in a plain weekly `BYDAY` rule. Empty
     /// for bare weekly (whose day is DTSTART) and for every other cadence.
     pub weekly_days: Vec<String>,
+    /// "Every N" (#181): `2` for a fortnightly rule, and `1` for a rule with
+    /// no `INTERVAL` part — and for `never` and `custom`, which have no
+    /// interval the form could show.
+    pub repeat_interval: u32,
     /// Whether the representable recurrence is unbounded, ends on a calendar
     /// date, or stops after a fixed number of occurrences.
     pub repeat_end: crate::write::RepeatEnd,
@@ -302,6 +307,7 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         is_series_exception,
         repeat: recurrence_controls.repeat,
         weekly_days: recurrence_controls.weekly_days,
+        repeat_interval: recurrence_controls.interval,
         repeat_end: recurrence_controls.repeat_end,
         recurrence: event.recurrence,
         color: event.color_hex,
@@ -4310,11 +4316,18 @@ mod tests {
         let counted = detail_for(Some("RRULE:FREQ=DAILY;COUNT=8")).await;
         assert_eq!(counted.repeat, "daily");
         assert_eq!(counted.repeat_end, crate::write::RepeatEnd::After { count: 8 });
+        // Every other week is the form's own since #181, and says so in a
+        // field of its own rather than by becoming `custom`.
+        let fortnightly = detail_for(Some("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH")).await;
+        assert_eq!(fortnightly.repeat, "weekly");
+        assert_eq!(fortnightly.weekly_days, ["TU", "TH"]);
+        assert_eq!(fortnightly.repeat_interval, 2);
+        assert_eq!(counted.repeat_interval, 1, "no INTERVAL part is every one");
         // A rule it does not, and could not: the form must refuse to overwrite it.
         assert_eq!(
-            detail_for(Some("RRULE:FREQ=WEEKLY;INTERVAL=2")).await.repeat,
+            detail_for(Some("RRULE:FREQ=MONTHLY;BYDAY=-1FR")).await.repeat,
             "custom",
-            "a fortnightly rule must not be reported as one omacal can express"
+            "the last Friday of the month must not be reported as one omacal can express"
         );
         // No rule at all is not the same as an unrepresentable one.
         assert_eq!(detail_for(None).await.repeat, "never");
@@ -4444,7 +4457,7 @@ mod tests {
             "id", "calendar_id", "title", "description", "location",
             "conference_uri", "start_ms", "end_ms", "start_date", "end_date",
             "is_all_day", "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
-            "repeat_end", "color",
+            "repeat_interval", "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit", "is_organizer", "guests_can_modify",
             "transparency", "visibility", "mails_guests", "attendees", "reminders", "calendar_default_reminders",
         ];
@@ -7449,6 +7462,76 @@ mod tests {
             .await
             .expect("the new series was not stored locally");
         assert_ne!(tail, row.id, "the tail was written over the master's own row");
+    }
+
+    /// **A fortnightly series splits into two fortnightly series** (#181).
+    /// Both halves keep `INTERVAL=2`: the tail because Repeat was not touched
+    /// and the series' own line travels verbatim, the original because the
+    /// truncation rewrites its ending and nothing else. Either half losing it
+    /// doubles a meeting the user only retitled — on the tail, from the split
+    /// onwards; on the original, every week of the past it keeps.
+    ///
+    /// `OCCURRENCE` is two weeks after `DTSTART`, so it is on the series'
+    /// grid. Both bodies matched whole, with `.expect(1)`: a body that dropped
+    /// the interval would answer 404 and fail the save, not pass beside it.
+    #[tokio::test]
+    async fn a_following_split_of_a_fortnightly_series_keeps_the_interval_on_both_halves() {
+        const FORTNIGHTLY: &str = "RRULE:FREQ=WEEKLY;INTERVAL=2";
+        const FORTNIGHTLY_UNTIL: &str = "RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL=20260810T085959Z";
+        let mut ev = weekly_master(FORTNIGHTLY);
+        let (pool, id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+
+        let server = wiremock::MockServer::start().await;
+        mount_master(&server, &[FORTNIGHTLY]).await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "start": timed_json(OCCURRENCE, OCCURRENCE + HOUR, "UTC").0,
+                "end":   timed_json(OCCURRENCE, OCCURRENCE + HOUR, "UTC").1,
+                "summary": "Review (from here)",
+                "recurrence": [FORTNIGHTLY],
+                "attendees": expected_guests(),
+            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(wire_new_series(OCCURRENCE)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "recurrence": [FORTNIGHTLY_UNTIL],
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "master1", "status": "confirmed", "etag": "\"m2\"",
+                "summary": "Standup",
+                "recurrence": [FORTNIGHTLY_UNTIL],
+                "attendees": wire_guests(),
+                "start": {"dateTime": omacal_sync::to_rfc3339(DTSTART)},
+                "end":   {"dateTime": omacal_sync::to_rfc3339(DTSTART + HOUR)}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = omacal_google::CalendarClient::new(server.uri(), "tok");
+        update_via_client(
+            &pool,
+            "following",
+            OCCURRENCE,
+            ev,
+            "cal@x.com",
+            "UTC",
+            form("Review (from here)", OCCURRENCE, OCCURRENCE + HOUR),
+            "all",
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let (row, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.recurrence.as_deref(), Some(FORTNIGHTLY_UNTIL));
     }
 
     /// **"This and following" carries the guest list the user asked for.**

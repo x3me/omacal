@@ -533,6 +533,15 @@ pub(crate) struct EventInput {
     /// keeps the TypeScript union symmetric with [`RepeatEnd`].
     #[serde(default)]
     pub repeat_end: Option<RepeatEnd>,
+    /// How many days, weeks, months or years apart the occurrences fall —
+    /// the form's "Every N" (#181). Absent and `1` both mean every one, and
+    /// neither writes an `INTERVAL` part: a rule carrying `INTERVAL=1` says
+    /// nothing a bare rule does not. Meaningful for daily, weekly, monthly
+    /// and yearly only; [`rrule_for_input`] refuses it anywhere else rather
+    /// than dropping it, because a dropped interval is a fortnightly meeting
+    /// saved as a weekly one.
+    #[serde(default)]
+    pub repeat_interval: Option<u32>,
     /// Absent when the user did not touch the guest list — see
     /// [`EventFields::guests`], which this becomes unchanged. `#[serde(default)]`
     /// so every payload written before this field existed still deserializes,
@@ -596,6 +605,24 @@ pub enum RepeatEnd {
     Never,
     On { date: String },
     After { count: u32 },
+}
+
+/// The largest "Every N" omacal writes or reads as its own (#181).
+///
+/// Not RFC 5545's — its INTERVAL is any positive integer — but the display's:
+/// the `rrule` crate that expands every series (`omacal_core::recur`) holds
+/// the interval as a `u16` and refuses a rule past it, so a larger one would
+/// save, sync, and then never draw. 999 is far beyond any real cadence (every
+/// 999 days is over two and a half years) and expands under every frequency
+/// the form offers; `the_largest_interval_still_expands` holds that. A rule
+/// arriving with more is `custom`, which leaves it exactly as it was.
+pub(crate) const MAX_REPEAT_INTERVAL: u32 = 999;
+
+/// The repeats that take an interval: one unit of time each. `weekdays` is
+/// not among them — Monday to Friday is already a cadence, and "every other
+/// week on weekdays" is weekly with five days and an interval of two.
+pub(crate) fn repeat_takes_interval(repeat: &str) -> bool {
+    matches!(repeat, "daily" | "weekly" | "monthly" | "yearly")
 }
 
 impl WeekdayCode {
@@ -663,6 +690,7 @@ pub(crate) fn fields_from_input(input: EventInput) -> Result<EventFields, String
             rrule_for_input(
                 repeat,
                 input.weekly_days.as_deref(),
+                input.repeat_interval,
                 input.repeat_end.as_ref(),
                 &when,
                 &input.tz,
@@ -705,21 +733,46 @@ pub(crate) fn rrule_for(repeat: &str) -> Option<String> {
 }
 
 /// The RRULE for a command payload. `rrule_for` remains the dropdown's base
-/// vocabulary; this adds the two structured refinements the form can author:
-/// a weekly day pattern and an optional COUNT/UNTIL termination.
+/// vocabulary; this adds the three structured refinements the form can
+/// author: an interval, a weekly day pattern and an optional COUNT/UNTIL
+/// termination.
 fn rrule_for_input(
     repeat: &str,
     weekly_days: Option<&[WeekdayCode]>,
+    interval: Option<u32>,
     repeat_end: Option<&RepeatEnd>,
     when: &When,
     tz: &str,
 ) -> Result<Option<String>, String> {
+    // One means every one: the value the form holds while nobody touches
+    // "Every", and a part that would say nothing. Anything else is either an
+    // interval this rule will carry or a refusal — never a value dropped on
+    // the way, which would save a fortnightly meeting as a weekly one.
+    let interval = interval.filter(|n| *n != 1);
+    if let Some(n) = interval {
+        if n == 0 || n > MAX_REPEAT_INTERVAL {
+            return Err(format!(
+                "a repeat interval is a whole number from 1 to {MAX_REPEAT_INTERVAL}"
+            ));
+        }
+    }
     let Some(mut rule) = rrule_for(repeat) else {
         if matches!(repeat_end, Some(end) if end != &RepeatEnd::Never) {
             return Err("a repeat ending needs a repeating schedule".into());
         }
+        if interval.is_some() {
+            return Err("a repeat interval needs a repeating schedule".into());
+        }
         return Ok(None);
     };
+    if let Some(n) = interval {
+        if !repeat_takes_interval(repeat) {
+            return Err(format!("\"{repeat}\" does not take a repeat interval"));
+        }
+        // Straight after FREQ, where Google and every client we have read
+        // put it; the reader below takes the parts in any order regardless.
+        rule.push_str(&format!(";INTERVAL={n}"));
+    }
 
     if repeat == "weekly" {
         if let Some(days) = weekly_days {
@@ -827,31 +880,36 @@ pub(crate) fn basic_utc_timestamp(value: &str) -> Option<jiff::Timestamp> {
 pub(crate) struct RecurrenceControls {
     pub repeat: String,
     pub weekly_days: Vec<String>,
+    /// "Every N": `1` for a rule with no `INTERVAL` part, and for every
+    /// answer that is not a cadence (`never`, `custom`).
+    pub interval: u32,
     pub repeat_end: RepeatEnd,
 }
 
 /// Reads exactly the recurrence grammar the editor can write: one of its five
-/// cadences, an optional weekly BYDAY list, and at most one COUNT or UNTIL.
-/// Parts may arrive in any order because other calendar clients reorder them;
-/// unknown, duplicate, contradictory or value-type-mismatched parts make the
-/// whole rule custom. That all-or-nothing rule is what prevents a title-only
-/// save from simplifying somebody else's recurrence behind their back.
+/// cadences, an interval on the four that take one, an optional weekly BYDAY
+/// list, and at most one COUNT or UNTIL. Parts may arrive in any order
+/// because other calendar clients reorder them; unknown, duplicate,
+/// contradictory or value-type-mismatched parts make the whole rule custom.
+/// That all-or-nothing rule is what prevents a title-only save from
+/// simplifying somebody else's recurrence behind their back.
 pub(crate) fn recurrence_controls_from_rrule(
     rule: Option<&str>,
     is_all_day: bool,
     tz: &str,
 ) -> RecurrenceControls {
     let custom = || RecurrenceControls {
-        repeat: "custom".into(), weekly_days: vec![], repeat_end: RepeatEnd::Never,
+        repeat: "custom".into(), weekly_days: vec![], interval: 1, repeat_end: RepeatEnd::Never,
     };
     let Some(rule) = rule else {
         return RecurrenceControls {
-            repeat: "never".into(), weekly_days: vec![], repeat_end: RepeatEnd::Never,
+            repeat: "never".into(), weekly_days: vec![], interval: 1, repeat_end: RepeatEnd::Never,
         };
     };
     let Some(body) = rule.strip_prefix("RRULE:") else { return custom(); };
 
     let mut freq: Option<&str> = None;
+    let mut interval: Option<&str> = None;
     let mut byday: Option<&str> = None;
     let mut count: Option<&str> = None;
     let mut until: Option<&str> = None;
@@ -860,6 +918,7 @@ pub(crate) fn recurrence_controls_from_rrule(
         if value.is_empty() { return custom(); }
         let slot = match key {
             "FREQ" => &mut freq,
+            "INTERVAL" => &mut interval,
             "BYDAY" => &mut byday,
             "COUNT" => &mut count,
             "UNTIL" => &mut until,
@@ -869,6 +928,18 @@ pub(crate) fn recurrence_controls_from_rrule(
     }
     if count.is_some() && until.is_some() { return custom(); }
 
+    // Digits and nothing else, which is RFC 5545's whole grammar for it
+    // (`1*DIGIT`): `parse::<u32>` alone would also take `+2`, a rule other
+    // clients refuse, and the form would then write it back as one they
+    // accept — a change to the user's data nobody asked for.
+    let interval = match interval {
+        None => 1,
+        Some(raw) if raw.bytes().all(|b| b.is_ascii_digit()) => match raw.parse::<u32>() {
+            Ok(n) if (1..=MAX_REPEAT_INTERVAL).contains(&n) => n,
+            _ => return custom(),
+        },
+        Some(_) => return custom(),
+    };
     let days = match byday {
         Some(list) => match parse_weekdays(list) {
             Some(days) => days,
@@ -880,8 +951,14 @@ pub(crate) fn recurrence_controls_from_rrule(
         (Some("DAILY"), None) => "daily",
         (Some("WEEKLY"), None) => "weekly",
         (Some("WEEKLY"), Some(_)) => {
-            if days == [WeekdayCode::Mo, WeekdayCode::Tu, WeekdayCode::We,
-                        WeekdayCode::Th, WeekdayCode::Fr] {
+            // Only every week makes Monday to Friday the weekdays preset,
+            // which takes no interval. Every other week on those five days is
+            // weekly with five days ticked, which the form can hold whole;
+            // read as `weekdays`, the next save that touched the ending would
+            // write it back as every week.
+            if interval == 1
+                && days == [WeekdayCode::Mo, WeekdayCode::Tu, WeekdayCode::We,
+                            WeekdayCode::Th, WeekdayCode::Fr] {
                 "weekdays"
             } else {
                 "weekly"
@@ -915,6 +992,7 @@ pub(crate) fn recurrence_controls_from_rrule(
     RecurrenceControls {
         repeat: repeat.into(),
         weekly_days: days.into_iter().map(|day| day.text().to_string()).collect(),
+        interval,
         repeat_end,
     }
 }
@@ -1399,6 +1477,7 @@ mod tests {
             repeat: None,
             weekly_days: None,
             repeat_end: None,
+            repeat_interval: None,
             guests: None,
             reminders: None,
             conference: None,
@@ -1495,7 +1574,7 @@ mod tests {
                 .filter_map(|(i, day)| (mask & (1 << i) != 0).then_some(day))
                 .collect::<Vec<_>>();
             let rule = rrule_for_input(
-                "weekly", Some(&days), None, &base().when, "UTC",
+                "weekly", Some(&days), None, None, &base().when, "UTC",
             ).unwrap().unwrap();
             let expected = days.iter().map(|day| day.text().to_string()).collect::<Vec<_>>();
             let controls = recurrence_controls_from_rrule(Some(&rule), false, "UTC");
@@ -1516,6 +1595,7 @@ mod tests {
         let rule = rrule_for_input(
             "weekly",
             Some(&[WeekdayCode::Fr, WeekdayCode::Mo, WeekdayCode::Fr, WeekdayCode::We]),
+            None,
             None,
             &base().when,
             "UTC",
@@ -1613,7 +1693,16 @@ mod tests {
     fn a_rule_we_cannot_express_is_custom() {
         for exotic in [
             "RRULE:FREQ=MONTHLY;BYDAY=-1FR",
-            "RRULE:FREQ=WEEKLY;INTERVAL=2",
+            // An interval is the form's now (#181); these are not intervals
+            // it can hold. Zero is no cadence at all, `+2` is not RFC 5545's
+            // `1*DIGIT`, past the cap would never draw, and two of them is a
+            // rule two parsers can read two ways.
+            "RRULE:FREQ=WEEKLY;INTERVAL=0",
+            "RRULE:FREQ=WEEKLY;INTERVAL=+2",
+            "RRULE:FREQ=WEEKLY;INTERVAL=1000",
+            "RRULE:FREQ=WEEKLY;INTERVAL=2;INTERVAL=2",
+            "RRULE:FREQ=WEEKLY;INTERVAL=two",
+            "RRULE:FREQ=HOURLY;INTERVAL=2",
             "RRULE:FREQ=WEEKLY;BYDAY=MO,MO",
             "RRULE:FREQ=WEEKLY;BYDAY=1MO",
             "RRULE:FREQ=WEEKLY;BYDAY=MO,WE;WKST=SU",
@@ -1623,6 +1712,134 @@ mod tests {
             "RRULE:FREQ=DAILY;UNTIL=20261231",
         ] {
             assert_eq!(repeat_from_rrule(Some(exotic), false, "UTC"), "custom", "{exotic}");
+        }
+    }
+
+    /// The rule one payload asks for, as `fields_from_input` builds it.
+    fn rule_for(payload: serde_json::Value) -> Result<Option<String>, String> {
+        let mut input = serde_json::json!({
+            "when": { "kind": "timed", "startMs": 1_785_398_400_000_i64,
+                      "endMs": 1_785_400_200_000_i64 },
+            "tz": "Europe/Sofia",
+        });
+        input.as_object_mut().unwrap().extend(payload.as_object().unwrap().clone());
+        let input: EventInput = serde_json::from_value(input).expect("a payload the UI can send");
+        fields_from_input(input).map(|f| f.recurrence.flatten())
+    }
+
+    /// **Every N, written and read back whole (#181).** The fortnightly
+    /// meeting is the case the issue is about, so it is the first one, with
+    /// days and an ending beside it: the interval has to survive next to every
+    /// other part the form can author, and come back as the same three
+    /// controls. Sent as the UI's own JSON (`repeatInterval`), so a serde
+    /// rename that left this side unreadable is caught here too.
+    #[test]
+    fn an_interval_is_written_after_freq_and_reads_back_whole() {
+        for (payload, rule, repeat, days, interval, end) in [
+            (serde_json::json!({ "repeat": "weekly", "weeklyDays": ["TH", "TU"],
+                                 "repeatInterval": 2 }),
+             "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH", "weekly", vec!["TU", "TH"], 2,
+             RepeatEnd::Never),
+            (serde_json::json!({ "repeat": "daily", "repeatInterval": 3,
+                                 "repeatEnd": { "kind": "after", "count": 10 } }),
+             "RRULE:FREQ=DAILY;INTERVAL=3;COUNT=10", "daily", vec![], 3,
+             RepeatEnd::After { count: 10 }),
+            (serde_json::json!({ "repeat": "monthly", "repeatInterval": 6,
+                                 "repeatEnd": { "kind": "on", "date": "2027-12-31" } }),
+             "RRULE:FREQ=MONTHLY;INTERVAL=6;UNTIL=20271231T215959Z", "monthly", vec![], 6,
+             RepeatEnd::On { date: "2027-12-31".into() }),
+            (serde_json::json!({ "repeat": "yearly", "repeatInterval": 4 }),
+             "RRULE:FREQ=YEARLY;INTERVAL=4", "yearly", vec![], 4, RepeatEnd::Never),
+            // Every other week, Monday to Friday: five days ticked, which is
+            // not the weekdays preset — that one takes no interval.
+            (serde_json::json!({ "repeat": "weekly", "repeatInterval": 2,
+                                 "weeklyDays": ["MO", "TU", "WE", "TH", "FR"] }),
+             "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TU,WE,TH,FR", "weekly",
+             vec!["MO", "TU", "WE", "TH", "FR"], 2, RepeatEnd::Never),
+        ] {
+            assert_eq!(rule_for(payload.clone()).unwrap().as_deref(), Some(rule), "{payload}");
+            let controls = recurrence_controls_from_rrule(Some(rule), false, "Europe/Sofia");
+            assert_eq!(controls.repeat, repeat, "{rule}");
+            assert_eq!(controls.weekly_days, days, "{rule}");
+            assert_eq!(controls.interval, interval, "{rule}");
+            assert_eq!(controls.repeat_end, end, "{rule}");
+        }
+        // Another client's order, and its spelling of every week.
+        let theirs = recurrence_controls_from_rrule(
+            Some("RRULE:BYDAY=TU,TH;INTERVAL=2;FREQ=WEEKLY"), false, "UTC",
+        );
+        assert_eq!((theirs.repeat.as_str(), theirs.interval), ("weekly", 2));
+        let every = recurrence_controls_from_rrule(Some("RRULE:FREQ=WEEKLY;INTERVAL=1"), false, "UTC");
+        assert_eq!((every.repeat.as_str(), every.interval), ("weekly", 1));
+        // And no INTERVAL is an interval of one, which is what every answer
+        // that is not a cadence carries too.
+        assert_eq!(recurrence_controls_from_rrule(Some("RRULE:FREQ=WEEKLY"), false, "UTC").interval, 1);
+        assert_eq!(recurrence_controls_from_rrule(None, false, "UTC").interval, 1);
+    }
+
+    /// The other half of every week: **one writes no `INTERVAL` part at
+    /// all.** Proved by its absence, on every cadence that takes one, both as
+    /// an explicit `1` and as the field left out — the two things the form
+    /// and the CLI send for "every".
+    #[test]
+    fn an_interval_of_one_writes_no_interval_part() {
+        for repeat in ["daily", "weekly", "monthly", "yearly"] {
+            for payload in [
+                serde_json::json!({ "repeat": repeat, "repeatInterval": 1 }),
+                serde_json::json!({ "repeat": repeat }),
+            ] {
+                let rule = rule_for(payload.clone()).unwrap().expect("a rule");
+                assert!(!rule.contains("INTERVAL"), "{payload} wrote {rule}");
+                assert_eq!(Some(rule), rrule_for(repeat), "{payload}");
+            }
+        }
+    }
+
+    /// Refused, every one of them, rather than written without the interval:
+    /// a dropped interval is the fortnightly meeting saved as a weekly one.
+    #[test]
+    fn an_interval_the_form_cannot_hold_is_refused_before_any_write() {
+        for payload in [
+            serde_json::json!({ "repeat": "weekly", "repeatInterval": 0 }),
+            serde_json::json!({ "repeat": "weekly", "repeatInterval": MAX_REPEAT_INTERVAL + 1 }),
+            serde_json::json!({ "repeat": "weekdays", "repeatInterval": 2 }),
+            serde_json::json!({ "repeat": "never", "repeatInterval": 2 }),
+        ] {
+            assert!(rule_for(payload.clone()).is_err(), "accepted {payload}");
+        }
+        assert_eq!(
+            rule_for(serde_json::json!({ "repeat": "weekly", "repeatInterval": MAX_REPEAT_INTERVAL }))
+                .unwrap()
+                .as_deref(),
+            Some(format!("RRULE:FREQ=WEEKLY;INTERVAL={MAX_REPEAT_INTERVAL}").as_str()),
+            "the cap itself is an interval the form can write",
+        );
+    }
+
+    /// Why the cap is 999 and not RFC 5545's unbounded integer: the expander
+    /// behind every view refuses an interval past `u16`. Every cadence that
+    /// takes an interval, timed and all-day, must still draw at the cap — or
+    /// a rule the form wrote, or an import accepted, saves and never shows.
+    #[test]
+    fn the_largest_interval_still_expands() {
+        use omacal_core::recur::{expand, Series};
+        let start = 1_785_398_400_000_i64; // 2026-07-30T08:00:00Z
+        for freq in ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] {
+            for is_all_day in [false, true] {
+                let rule = [format!("RRULE:FREQ={freq};INTERVAL={MAX_REPEAT_INTERVAL}")];
+                let series = Series {
+                    dtstart_ms: start, dtstart_tz: "Europe/Sofia",
+                    duration_ms: 3_600_000, is_all_day, recurrence: &rule,
+                };
+                let out = expand(&series, start - 86_400_000, start + 86_400_000, 10)
+                    .unwrap_or_else(|e| panic!("{freq} all-day={is_all_day}: {e}"));
+                assert_eq!(out.intervals.len(), 1, "{freq} all-day={is_all_day}: its first occurrence");
+                assert_eq!(
+                    recurrence_controls_from_rrule(Some(&rule[0]), is_all_day, "Europe/Sofia").interval,
+                    MAX_REPEAT_INTERVAL,
+                    "and the form reads it as its own",
+                );
+            }
         }
     }
 

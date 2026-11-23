@@ -208,7 +208,7 @@ export const CALENDAR_SYNC_REMOVED = 143;
 const RESPOND_STUB_DETAIL = {
   id: 0, title: null, description: null, location: null, conference_uri: null,
   start_ms: 0, end_ms: 0, is_all_day: false, is_recurring: false, color: null,
-  recurrence: null, repeat: 'never', weekly_days: [], repeat_end: { kind: 'never' },
+  recurrence: null, repeat: 'never', weekly_days: [], repeat_interval: 1, repeat_end: { kind: 'never' },
   organizer_email: null, self_response: null, can_respond: true, can_edit: false,
   attendees: [],
 };
