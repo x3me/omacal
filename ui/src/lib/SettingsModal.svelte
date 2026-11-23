@@ -2,7 +2,7 @@
 <script lang="ts">
   import { DEFAULT_MEETING_FORMAT, meetingLabel } from '../../../packaging/omarchy-plugin/Timeline.mjs';
   import { DATE_FORMATS, type DateFormat } from './datefmt';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   import { escapeCloses } from './dismiss.svelte';
@@ -14,7 +14,7 @@
   import TimezoneSelect from './TimezoneSelect.svelte';
   import { calendarColor, offerableCalendarId, writableCalendars, type Calendar } from './calendars';
   import { connectCaldav } from './tasks';
-  import { listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
+  import { ICLOUD_BASE, listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
     getSettings, setSetting, setDisplayTimezone, setWeatherLocation, listTimezones,
     minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, APPEARANCE_OPTIONS,
@@ -72,6 +72,7 @@
     onsettingschange,
     initialTab = 'General',
     initialAccountForm = null,
+    initialReconnect = null,
   }: {
     /** The connected accounts, from `AppStatus`. Read only — this modal adds
      *  one through `onSignIn` and cannot remove one, because nothing can yet. */
@@ -97,6 +98,9 @@
     /** The connect form Accounts opens with, when the empty state's chooser
      *  sent the user here for one; none otherwise. */
     initialAccountForm?: 'icloud' | 'caldav' | 'webcal' | null;
+    /** The CalDAV account to open the Reconnect form for, by email: the
+     *  reconnect banner's account, when there is exactly one. */
+    initialReconnect?: string | null;
     /** Live appearance preview. Separate from `onsettingschange`: dragging a
      *  range should repaint the calendar behind this modal without causing
      *  every unrelated settings reaction (including a weather cache read). */
@@ -693,7 +697,13 @@
 
   $effect(() => {
     listAccounts()
-      .then((rows) => (accountRows = rows))
+      .then((rows) => {
+        accountRows = rows;
+        // The banner sent the user here for one account: its form, filled
+        // in, waiting for the password.
+        const row = initialReconnect ? rows.find((r) => r.email === initialReconnect && r.provider === 'caldav') : undefined;
+        if (row && reconnecting === null && caldavForm === null) openReconnect(row);
+      })
       .catch(() => (accountRows = null));
   });
 
@@ -730,10 +740,31 @@
   let caldavUser = $state('');
   let caldavPassword = $state('');
   let caldavBusy = $state(false);
+  /** The account the form is reconnecting, by email, or null for a new one.
+   *  Reconnecting is the same `connect_caldav` (it updates the account it
+   *  already has under that address), with everything but the password
+   *  filled in: re-adding the account was the only way back, and nothing
+   *  said so. */
+  let reconnecting = $state<string | null>(null);
+  let caldavPasswordField = $state<HTMLInputElement | null>(null);
+
+  function openReconnect(row: Account) {
+    note = null;
+    webcalForm = false;
+    const icloud = (row.serverUrl ?? '').replace(/\/?$/, '/') === ICLOUD_BASE;
+    caldavForm = icloud ? 'icloud' : 'caldav';
+    caldavUrl = icloud ? '' : (row.serverUrl ?? '');
+    caldavEmail = row.email;
+    caldavUser = row.username ?? '';
+    caldavPassword = '';
+    reconnecting = row.email;
+    void tick().then(() => caldavPasswordField?.focus());
+  }
 
   function openCaldavForm(kind: 'icloud' | 'caldav') {
     note = null;
     webcalForm = false;
+    reconnecting = null;
     caldavForm = kind;
     caldavUrl = '';
     caldavEmail = '';
@@ -753,13 +784,18 @@
         username: caldavForm === 'caldav' ? caldavUser : undefined,
         password: caldavPassword,
       });
+      const again = reconnecting !== null;
       caldavForm = null;
-      note = { text: `${email} connected — syncing…`, kind: 'info' };
+      reconnecting = null;
+      note = { text: `${email} ${again ? 'reconnected' : 'connected'} — syncing…`, kind: 'info' };
       // The account's calendars are in the store already (connect wrote
       // them); the sync fills in their events and tasks.
       await invoke('sync_now').catch(() => {});
       oncalendarchange?.();
-      note = { text: `${email} connected. Its calendars are in the list — pick which to show under Calendars.`, kind: 'info' };
+      accountRows = await listAccounts().catch(() => accountRows);
+      note = again
+        ? { text: `${email} reconnected. Its calendars sync again.`, kind: 'info' }
+        : { text: `${email} connected. Its calendars are in the list — pick which to show under Calendars.`, kind: 'info' };
     } catch (e) {
       note = { text: String(e), kind: 'error' };
     } finally {
@@ -1874,7 +1910,7 @@
 
     {:else if pane === 'Accounts'}
       <ul class="accounts">
-        {#each accountRows ?? accounts.map((email, i) => ({ id: -1 - i, email, provider: 'google' })) as row (row.id)}
+        {#each accountRows ?? accounts.map((email, i): Account => ({ id: -1 - i, email, provider: 'google' })) as row (row.id)}
           <li class="account-row">
             <span class="acct-email">{row.email}</span>
             <span class="acct-prov">{row.provider === 'caldav' ? 'CalDAV' : row.provider === 'webcal' ? 'WebCal' : 'Google'}</span>
@@ -1890,6 +1926,12 @@
                   Keep
                 </button>
               {:else}
+                {#if row.provider === 'caldav'}
+                  <button type="button" class:primary={row.needsReconnect}
+                          aria-label="Reconnect {row.email}"
+                          onclick={() => openReconnect(row)}
+                          disabled={busy || caldavBusy || webcalBusy}>Reconnect…</button>
+                {/if}
                 <button type="button" onclick={() => (confirmingSignOut = row.id)}>Sign out…</button>
               {/if}
             {/if}
@@ -1943,11 +1985,17 @@
                  browser's own email validation would refuse to submit
                  (issue #28). An Apple ID is always an address, so iCloud
                  keeps the check. -->
+            {#if reconnecting !== null}
+              <p class="hint">Enter the password again for {reconnecting}.</p>
+            {/if}
+            <!-- Read-only when reconnecting: the address is which account this
+                 is, and changing it would connect another one instead. -->
             <input
               type={caldavForm === 'icloud' ? 'email' : 'text'}
               placeholder={caldavForm === 'icloud' ? 'Apple ID' : 'Email or account name'}
               aria-label={caldavForm === 'icloud' ? 'Apple ID' : 'Email or account name'}
               bind:value={caldavEmail}
+              readonly={reconnecting !== null}
               disabled={caldavBusy}
             />
             {#if caldavForm === 'caldav'}
@@ -1964,6 +2012,7 @@
               placeholder={caldavForm === 'icloud' ? 'App-specific password' : 'Password'}
               aria-label="Password"
               bind:value={caldavPassword}
+              bind:this={caldavPasswordField}
               disabled={caldavBusy}
             />
             {#if caldavForm === 'icloud'}
@@ -1983,9 +2032,9 @@
             {/if}
             <div class="provider-row">
               <button type="submit" disabled={caldavBusy}>
-                {caldavBusy ? 'Connecting…' : 'Connect'}
+                {caldavBusy ? 'Connecting…' : reconnecting !== null ? 'Reconnect' : 'Connect'}
               </button>
-              <button type="button" onclick={() => (caldavForm = null)} disabled={caldavBusy}>
+              <button type="button" onclick={() => { caldavForm = null; reconnecting = null; }} disabled={caldavBusy}>
                 Cancel
               </button>
             </div>
@@ -2356,6 +2405,9 @@
   .acct-prov { color: var(--muted); font-size: 11px; letter-spacing: 0.04em;
     text-transform: uppercase; }
   .account-row .danger { color: var(--danger, #e66); border-color: var(--danger, #e66); }
+  /* The account whose password the server rejected: its Reconnect is the
+     thing to do, filled the way the header's own primary buttons are. */
+  .account-row .primary { background: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
 
   .caldav { align-self: stretch; min-width: 0; display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
   .caldav.empty { display: none; }

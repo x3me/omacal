@@ -2594,7 +2594,8 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     }),
     // A CalDAV account whose server stopped accepting the stored password.
     caldavreauth: header({
-      accounts: ['me@icloud.com'], caldav_reauth: ['me@icloud.com'],
+      // Its account rows are the harness's `caldavreauth` status.
+      accounts: ['me@icloud.com', 'ana'], caldav_reauth: ['me@icloud.com'],
       last_sync_ms: FIVE_MIN_AGO, demo: false, overlay_titlebar: false,
     }),
     demo: header({ accounts: [], last_sync_ms: null, demo: true, overlay_titlebar: false }),

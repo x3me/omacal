@@ -498,6 +498,20 @@ function statusFor(scenario: string): AppStatus {
         update: { version: '0.2.0', url: 'https://github.com/x3me/omacal/releases/tag/v0.2.0' },
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
+    // A CalDAV install whose iCloud password the server rejected, beside a
+    // generic CalDAV account: what the Header's `caldavreauth` props show,
+    // and the rows `list_accounts` answers with (`account_rows`), carrying
+    // what the Reconnect form fills in.
+    case 'caldavreauth':
+      return {
+        accounts: ['me@icloud.com', 'ana'], caldav_reauth: ['me@icloud.com'], needs_reauth: [], update: null,
+        system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO, demo: false,
+        overlay_titlebar: false, self_update: false,
+        account_rows: [
+          { id: 1, email: 'me@icloud.com', provider: 'caldav', serverUrl: 'https://caldav.icloud.com/', username: null, needsReconnect: true },
+          { id: 2, email: 'ana', provider: 'caldav', serverUrl: 'https://dav.example.com/', username: 'ana-login', needsReconnect: false },
+        ],
+      } as AppStatus;
     // A connected account the backend has stopped syncing: a dead refresh
     // token, discovered by a sync, waiting on a re-consent.
     case 'needs-reauth':
@@ -1091,12 +1105,17 @@ export function installTauriStub(scenario: string): Harness {
         }
         return null;
       }
-      case 'list_accounts':
-        // The richer per-account shape the Accounts tab fetches: the same
-        // emails the scenario's status carries, as Google accounts.
+      case 'list_accounts': {
+        // The richer per-account shape the Accounts tab fetches: a scenario's
+        // own rows when it gives them (CalDAV accounts, with what Reconnect
+        // fills in), otherwise the same emails its status carries, as Google
+        // accounts.
+        const rows = (status as { account_rows?: unknown[] }).account_rows;
+        if (rows) return rows;
         return (status as { accounts: string[] }).accounts.map((email, i) => ({
           id: i + 1, email, provider: 'google',
         }));
+      }
       case 'sign_out':
         // Signing out the only fixture account leaves none.
         return [];

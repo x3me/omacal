@@ -1237,6 +1237,63 @@ test.describe('Header', () => {
     await expect(page.getByTestId('caldav-reauth-banner')).toHaveCount(0);
   });
 
+  /** The arguments of every call the page made to `cmd`, in order. */
+  const callsTo = (page: Page, cmd: string): Promise<any[]> =>
+    page.evaluate((cmd) => (window as any).__harness.calls.filter((c: any) => c.cmd === cmd).map((c: any) => c.args), cmd);
+
+  /** Reconnecting was re-adding the account, which nothing said (2026-11-23).
+   *  The banner's Reconnect now opens that account's form filled in, iCloud-
+   *  worded for an iCloud account, with only the password to type; the
+   *  address is read-only, because changing it would connect another account. */
+  test('the banner\'s Reconnect opens that account\'s form, waiting for the password', async ({ page }) => {
+    await page.goto(show('Header', 'caldavreauth'));
+    await page.getByTestId('caldav-reauth-banner').getByRole('button', { name: 'Reconnect' }).click();
+    const form = page.getByRole('group', { name: 'Connect a CalDAV account' });
+    const appleId = form.getByRole('textbox', { name: 'Apple ID' });
+    await expect(appleId).toHaveValue('me@icloud.com');
+    await expect(appleId).toHaveAttribute('readonly', '');
+    await expect(form.getByRole('textbox', { name: 'Server address' })).toHaveCount(0);
+    await expect(form).toContainText('Enter the password again for me@icloud.com');
+    await expect(form.getByLabel('Password')).toBeFocused();
+
+    await page.keyboard.type('abcd-efgh-ijkl-mnop');
+    await form.getByRole('button', { name: 'Reconnect' }).click();
+    await expect.poll(() => callsTo(page, 'connect_caldav')).toHaveLength(1);
+    const [args] = await callsTo(page, 'connect_caldav');
+    expect(args).toMatchObject({ kind: 'icloud', email: 'me@icloud.com', password: 'abcd-efgh-ijkl-mnop' });
+    await expect(page.getByRole('dialog')).toContainText('me@icloud.com reconnected');
+  });
+
+  /** Every iCloud and CalDAV row offers Reconnect, the one whose password
+   *  was rejected first; a generic server's form comes back with its address
+   *  and login name. A Google account has none: its banner signs in again. */
+  test('a CalDAV row reconnects with its server and login name filled in', async ({ page }) => {
+    await page.goto(show('Header', 'caldavreauth'));
+    await page.getByTestId('caldav-reauth-banner').getByRole('button', { name: 'Reconnect' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(dialog.getByRole('button', { name: 'Reconnect me@icloud.com' })).toHaveClass(/\bprimary\b/);
+    const ana = dialog.getByRole('button', { name: 'Reconnect ana' });
+    await expect(ana).not.toHaveClass(/\bprimary\b/);
+    await ana.click();
+    const form = page.getByRole('group', { name: 'Connect a CalDAV account' });
+    await expect(form.getByRole('textbox', { name: 'Server address' })).toHaveValue('https://dav.example.com/');
+    await expect(form.getByRole('textbox', { name: 'Email or account name' })).toHaveValue('ana');
+    await expect(form.getByRole('textbox', { name: 'Username' })).toHaveValue('ana-login');
+    await form.getByLabel('Password').fill('secret');
+    await form.getByRole('button', { name: 'Reconnect' }).click();
+    await expect.poll(() => callsTo(page, 'connect_caldav')).toHaveLength(1);
+    const [args] = await callsTo(page, 'connect_caldav');
+    expect(args).toMatchObject({ kind: 'caldav', serverUrl: 'https://dav.example.com/', email: 'ana', username: 'ana-login' });
+
+    await page.goto(show('Header', 'connected'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await page.getByRole('tab', { name: 'Accounts' }).click();
+    await expect(page.getByRole('dialog').getByRole('button', { name: /^Reconnect/ })).toHaveCount(0);
+  });
+
   /** The update notice: present when status carries one, absent otherwise
    *  (the absence over `connected` is what pins the field as the gate), calm
    *  rather than alarming (not `.err` — teaching users to ignore red is the
