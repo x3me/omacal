@@ -23,6 +23,15 @@ pub struct AccountVm {
     pub id: i64,
     pub email: String,
     pub provider: String,
+    /// Where a CalDAV account's server is, and the name it logs in with when
+    /// that differs from the email: neither is secret, and the Reconnect form
+    /// fills them in so only the password has to be typed again. `None` for
+    /// Google and feeds.
+    pub server_url: Option<String>,
+    pub username: Option<String>,
+    /// The server stopped accepting this account's password (the reconnect
+    /// banner's account): its row offers Reconnect first.
+    pub needs_reconnect: bool,
 }
 
 const GOOGLE_REVOKE: &str = "https://oauth2.googleapis.com/revoke";
@@ -32,14 +41,29 @@ pub async fn list_accounts(state: tauri::State<'_, AppState>) -> Result<Vec<Acco
     accounts_of(&state).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
+/// `id, email, provider, server_url, username`, as `accounts_of` selects them.
+type AccountRow = (i64, String, String, Option<String>, Option<String>);
+
 async fn accounts_of(state: &AppState) -> anyhow::Result<Vec<AccountVm>> {
-    let rows: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, email, provider FROM accounts ORDER BY id")
-            .fetch_all(&state.pool)
-            .await?;
+    let rows: Vec<AccountRow> = sqlx::query_as(
+        "SELECT id, email, provider, server_url, username FROM accounts ORDER BY id",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let marked = state.reauth.lock().expect("reauth mark poisoned").clone();
     Ok(rows
         .into_iter()
-        .map(|(id, email, provider)| AccountVm { id, email, provider })
+        .map(|(id, email, provider, server_url, username)| {
+            let caldav = provider == "caldav";
+            AccountVm {
+                needs_reconnect: caldav && marked.contains(&reauth_mark(&provider, &email)),
+                server_url: server_url.filter(|_| caldav),
+                username: username.filter(|_| caldav),
+                id,
+                email,
+                provider,
+            }
+        })
         .collect())
 }
 
@@ -129,6 +153,54 @@ mod tests {
     /// The mark signing out clears is the one the sync set (`lib.rs`'s
     /// `sync_accounts`): `caldav_account::reauth_key` for a rejected CalDAV
     /// password, and the bare address for a Google account whose grant died.
+    /// A CalDAV row carries what the Reconnect form fills in, its server and
+    /// login name, and says when the server stopped taking its password. A
+    /// Google account and a feed carry neither, even with a mark under the
+    /// same address: a Google mark is the Google banner's business.
+    #[tokio::test]
+    async fn a_caldav_row_carries_its_server_and_whether_it_needs_reconnecting() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for (sub, email, provider, url, user) in [
+            ("g1", "me@gmail.com", "google", None, None),
+            ("caldav:me@icloud.com", "me@icloud.com", "caldav", Some(omacal_caldav::ICLOUD_BASE), None),
+            ("caldav:ana", "ana", "caldav", Some("https://dav.example.com/"), Some("ana-login")),
+            ("webcal:x", "https://feeds.example.com/h.ics", "webcal", Some("https://feeds.example.com/h.ics"), None),
+        ] {
+            sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider, server_url, username)
+                         VALUES (?1, ?2, 0, ?3, ?4, ?5)")
+                .bind(sub).bind(email).bind(provider).bind(url).bind(user)
+                .execute(&pool).await.unwrap();
+        }
+        let state = AppState {
+            pool, demo: false, tokens: Default::default(), reauth: Default::default(),
+            update: Default::default(), update_checked_at: Default::default(),
+            system_tz_change: Default::default(), quit_on_close: Default::default(),
+            open_date: Default::default(),
+        };
+        {
+            let mut marked = state.reauth.lock().unwrap();
+            marked.insert(crate::caldav_account::reauth_key("me@icloud.com"));
+            marked.insert("me@gmail.com".to_string());
+        }
+        let rows = accounts_of(&state).await.unwrap();
+        let by = |email: &str| rows.iter().find(|r| r.email == email).unwrap();
+
+        let icloud = by("me@icloud.com");
+        assert!(icloud.needs_reconnect, "its password was rejected");
+        assert_eq!(icloud.server_url.as_deref(), Some(omacal_caldav::ICLOUD_BASE));
+
+        let ana = by("ana");
+        assert!(!ana.needs_reconnect, "nothing marked for it");
+        assert_eq!(ana.server_url.as_deref(), Some("https://dav.example.com/"));
+        assert_eq!(ana.username.as_deref(), Some("ana-login"));
+
+        let google = by("me@gmail.com");
+        assert!(!google.needs_reconnect, "the Google banner handles a Google mark");
+        assert_eq!((google.server_url.as_deref(), google.username.as_deref()), (None, None));
+        let feed = by("https://feeds.example.com/h.ics");
+        assert_eq!((feed.server_url.as_deref(), feed.needs_reconnect), (None, false));
+    }
+
     #[test]
     fn signing_out_clears_the_mark_the_sync_set() {
         let email = "user@icloud.com";
