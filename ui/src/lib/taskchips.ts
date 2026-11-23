@@ -14,6 +14,9 @@ export type TaskChip = {
   completed: boolean;
   overdue: boolean;
   canWrite: boolean;
+  /** The raw wire priority, 0 for none; `priorityLabel` reads it. The grid
+   *  draws it as marks (#190). */
+  priority: number;
   /** The due instant. A timed chip is drawn at it; a row chip only needs
    *  its day, which is the key it is filed under. */
   dueMs: number;
@@ -69,6 +72,7 @@ export function taskChips(
       completed: false,
       overdue,
       canWrite: t.canWrite,
+      priority: t.priority,
       dueMs: t.dueMs,
     };
     if (overdue) file(out.row, today, chip);

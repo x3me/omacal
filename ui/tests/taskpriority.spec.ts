@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { PRIORITY_CHOICES, priorityLabel, priorityOption, sortTasks, type Task } from '../src/lib/tasks';
+import { PRIORITY_CHOICES, PRIORITY_MARKS, priorityLabel, priorityOption, sortTasks, type Task } from '../src/lib/tasks';
 
 /**
  * The priority rules behind the tasks pane, kept separate from the pixels:
@@ -23,6 +23,12 @@ test.describe('the level a stored priority reads as', () => {
     expect(priorityLabel(6)).toBe('Low');
     expect(priorityLabel(9)).toBe('Low');
     expect(priorityLabel(10)).toBeNull();
+  });
+
+  /** What the grid draws for a level (#190): one more mark for each step up. */
+  test('draws one more mark for each step up, and none for no level', () => {
+    const marks = (raw: number) => { const l = priorityLabel(raw); return l && PRIORITY_MARKS[l]; };
+    expect([1, 4, 5, 6, 9, 0].map(marks)).toEqual(['!!!', '!!!', '!!', '!', '!', null]);
   });
 
   test('offers exactly the four levels, none first', () => {

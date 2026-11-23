@@ -20,7 +20,9 @@ export type TaskLanding = {
   allDay: boolean;
 };
 
-type Carry = { id: number; summary: string; color: string | null; x: number; y: number };
+/** `priority` rides along so the chip the grid draws where it would land
+ *  carries the marks of the chip it will become (#190). */
+type Carry = { id: number; summary: string; color: string | null; priority: number; x: number; y: number };
 
 let carry = $state<Carry | null>(null);
 let landing = $state<TaskLanding | null>(null);
@@ -41,7 +43,7 @@ export function registerTaskLanding(fn: (x: number, y: number) => TaskLanding | 
   };
 }
 
-export function beginCarry(task: { id: number; summary: string; color: string | null }, x: number, y: number) {
+export function beginCarry(task: Omit<Carry, 'x' | 'y'>, x: number, y: number) {
   carry = { ...task, x, y };
   landing = resolve?.(x, y) ?? null;
 }
