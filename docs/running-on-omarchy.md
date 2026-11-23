@@ -76,6 +76,19 @@ because `omarchy-theme-set` replaces the theme wholesale — Omarchy 4 swaps in
 a freshly staged directory, pre-4 relinked a symlink — rather than editing
 files beneath it; watching the theme path would never fire.
 
+### Font
+
+Settings → Appearance → **Use the Omarchy font** draws the interface in the
+monospace family `omarchy font set` chose. It is off by default: monospace is
+wider, so titles in narrow event blocks cut off sooner. The family is read the
+way `omarchy font current` reads it, `fc-match monospace`, and only while the
+switch is on; the usual stack stays behind it for any glyph it lacks.
+`omarchy font set` writes `~/.config/fontconfig` and nothing under the theme,
+so omacal watches that directory beside the theme's, and every theme switch
+reads the font again too. The directory has to exist when omacal starts; if
+the first `omarchy font set` is what creates it, that change shows at the next
+theme switch or restart.
+
 ### Opacity
 
 Omarchy blends every window a little on its own — 98.5% focused, 96%

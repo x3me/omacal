@@ -5,7 +5,17 @@ export type Account = {
   id: number;
   email: string;
   provider: string; // 'google' | 'caldav' | 'webcal'
+  /** A CalDAV account's server and login name, for the Reconnect form to fill
+   *  in; null for Google and feeds. Optional: older stubs leave them out. */
+  serverUrl?: string | null;
+  username?: string | null;
+  /** The server stopped accepting this account's password. */
+  needsReconnect?: boolean;
 };
+
+/** iCloud's CalDAV address (`omacal_caldav::ICLOUD_BASE`): an account there
+ *  reconnects with the iCloud-worded form. */
+export const ICLOUD_BASE = 'https://caldav.icloud.com/';
 
 /** Subscribes to a public read-only WebCal feed (`webcal://` or `https://`).
  *  Resolves to the calendar id the feed syncs into. */

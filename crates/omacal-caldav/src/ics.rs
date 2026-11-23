@@ -3031,6 +3031,28 @@ END:VEVENT\r\nEND:VCALENDAR";
         assert_eq!(out.matches("BEGIN:VEVENT").count(), 1, "the moved (later) occurrence died");
     }
 
+    /// The CalDAV half of "a fortnightly series splits into two fortnightly
+    /// ones" (#181): the truncation rewrites the ending and keeps the
+    /// interval and the days where they were. The Google half is
+    /// `truncated_rule`'s; they are two implementations, so they get a test
+    /// each.
+    #[test]
+    fn truncating_a_fortnightly_series_keeps_its_interval_and_days() {
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:f1\r\n\
+                   DTSTART;TZID=Europe/Sofia:20260804T090000\r\n\
+                   RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=8\r\n\
+                   SUMMARY:Review\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let cut = WriteTime::Zoned {
+            dt: jiff::civil::date(2026, 9, 1).at(9, 0, 0, 0),
+            tzid: "Europe/Sofia".into(),
+        };
+        let out = truncate_series(raw, "f1", "20260901T055959Z", &cut).unwrap();
+        assert!(
+            out.contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;UNTIL=20260901T055959Z\r\n"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn a_new_todo_serializes_and_reparses() {
         let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();

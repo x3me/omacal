@@ -73,18 +73,24 @@ export type EventDetail = {
   /** Which Repeat option represents `recurrence` completely, or `'custom'` for a
    *  rule this app cannot express.
    *
-   *  Computed on the Rust side by `write::repeat_from_rrule`, which matches
-   *  base rules exactly and strictly parses only plain weekly BYDAY rules.
+   *  Computed on the Rust side by `write::recurrence_controls_from_rrule`,
+   *  which matches base rules exactly and strictly parses only the parts the
+   *  form can author: weekly BYDAY, INTERVAL, COUNT and UNTIL.
    *  Never re-derive it here: one authority decides what omacal can express,
    *  and a second copy in TypeScript drifts the moment either side gains an
    *  option. It fails
    *  silently when it does — an unrepresentable rule read as a representable
-   *  one means the next save rewrites "every 2nd Tuesday" as "weekly", and
-   *  mails the whole guest list about it. */
+   *  one means the next save rewrites "the last Friday of the month" as
+   *  "monthly", and mails the whole guest list about it. */
   repeat: string;
   /** Weekdays from an exactly representable weekly `BYDAY` rule. Empty for a
    *  plain weekly rule, whose day comes from DTSTART. */
   weekly_days: WeekdayCode[];
+  /** "Every N" (#181): `2` for a fortnightly rule, `1` for one with no
+   *  `INTERVAL` part — and for `never` and `custom`, which have no interval
+   *  the form could show. Like `repeat`, an answer from the Rust side, never
+   *  read off `recurrence` here. */
+  repeat_interval: number;
   repeat_end: RepeatEnd;
   color: string | null;
   organizer_email: string | null;
@@ -180,6 +186,11 @@ export type EventInput = {
   repeat?: string;
   /** Present with `repeat: 'weekly'` when the user chose the weekly pattern. */
   weeklyDays?: WeekdayCode[];
+  /** "Every N" — present only above one, with a cadence that takes it
+   *  (daily, weekly, monthly, yearly). Absent is every one, and writes no
+   *  `INTERVAL` part; the Rust side refuses one it cannot put in the rule
+   *  rather than dropping it. */
+  repeatInterval?: number;
   /** Present when the repeat controls were created or changed. */
   repeatEnd?: RepeatEnd;
   /**

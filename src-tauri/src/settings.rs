@@ -99,6 +99,7 @@ const APPEARANCE_KEY: &str = "appearance";
 /// ([`crate::theme::AutoPair`]); absent is Daylight and Daylight Dark.
 const AUTO_LIGHT_THEME_KEY: &str = "appearance_auto_light";
 const AUTO_DARK_THEME_KEY: &str = "appearance_auto_dark";
+const USE_OMARCHY_FONT_KEY: &str = "use_omarchy_font";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
 const DISPLAY_TZ_KEY: &str = "display_timezone";
@@ -121,6 +122,8 @@ pub(crate) const DATE_FORMAT_KEY: &str = "date_format";
 pub(crate) const VISIBLE_HOURS_KEY: &str = "visible_hours";
 const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
 pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events";
+/// Whether meetings the user declined are drawn (struck through) or left out.
+const SHOW_DECLINED_EVENTS_KEY: &str = "show_declined_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
 
@@ -546,6 +549,12 @@ pub struct AppSettings {
     /// value in a modal would be a second place for it to disagree.
     pub list_mode: bool,
     pub combine_identical_events: bool,
+    /// Whether a meeting the user declined is drawn, struck through, or left
+    /// out of the views. Off until turned on: on Google a guest cannot take
+    /// somebody else's meeting off their calendar, only decline it, so
+    /// "Remove from my calendar" is a decline, and it removes nothing unless
+    /// declined meetings stay out of sight (2026-11-23).
+    pub show_declined_events: bool,
     /// Whether the surfaces that can show today's date do (2026-09-04):
     /// the tray icon, which *becomes* the date because a tray host draws
     /// icons and nothing else, and the Omarchy bar widget, which reads it
@@ -649,6 +658,13 @@ pub struct AppSettings {
     /// choice the app is not wearing.
     pub auto_light_theme: crate::theme::Appearance,
     pub auto_dark_theme: crate::theme::Appearance,
+    /// Whether the interface is drawn in the Omarchy font, the monospace
+    /// family `omarchy font set` chose (#179), which `crate::font` reads.
+    /// **Off by default**: Omarchy's fonts are monospace, and those are
+    /// wider, so an event title in a narrow block cuts off sooner, which not
+    /// everyone will want. The form offers it on Omarchy only, and anywhere
+    /// else it changes nothing.
+    pub use_omarchy_font: bool,
     /// Whether the window draws a title bar, or `None` where the choice is
     /// not omacal's to make — macOS, whose `titleBarStyle: "Overlay"` puts
     /// the traffic lights over the content, and where hiding them would
@@ -978,6 +994,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // turning the calendar into a list.
         list_mode: read(pool, LIST_MODE_KEY).await.map(|v| v == "1").unwrap_or(false),
         combine_identical_events: combine_identical_events(pool).await,
+        show_declined_events: show_declined_events(pool).await,
         calendar_groups: calendar_groups(pool).await,
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
@@ -1127,6 +1144,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         appearance: appearance(pool).await,
         auto_light_theme: auto.light(),
         auto_dark_theme: auto.dark(),
+        use_omarchy_font: use_omarchy_font(pool).await,
         // `None` is an absence, not a default: on macOS the frame is the
         // system's, and a row that does nothing is worse than no row.
         // `cfg!` rather than `#[cfg]` so both arms compile on the
@@ -1355,6 +1373,14 @@ pub(crate) async fn auto_pair(pool: &SqlitePool) -> crate::theme::AutoPair {
     )
 }
 
+/// "Use the Omarchy font", named for [`weather_enabled`]'s reason:
+/// `font::current` asks it before anything else, and `read_settings` reports
+/// it to the form. Off unless this version wrote `"1"` — `list_mode`'s
+/// polarity, so a stray row keeps the stack the app has always drawn.
+pub(crate) async fn use_omarchy_font(pool: &SqlitePool) -> bool {
+    read(pool, USE_OMARCHY_FONT_KEY).await.as_deref() == Some("1")
+}
+
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s
 /// reason: `setup` reads it at launch to decorate the window before it is
 /// shown, and `read_settings` reports it to the form.
@@ -1550,6 +1576,21 @@ pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
     read(pool, COMBINE_IDENTICAL_EVENTS_KEY).await.as_deref() == Some("1")
 }
 
+/// Whether declined meetings are drawn. Off unless the row says `1`.
+pub(crate) async fn show_declined_events(pool: &SqlitePool) -> bool {
+    read(pool, SHOW_DECLINED_EVENTS_KEY).await.as_deref() == Some("1")
+}
+
+/// `events` as the views draw them: without the meetings the user declined,
+/// unless "Show meetings I've declined" is on. See
+/// [`crate::commands::without_declined`].
+pub(crate) async fn shown_events(
+    pool: &SqlitePool,
+    events: Vec<omacal_store::StoredEvent>,
+) -> Vec<omacal_store::StoredEvent> {
+    if show_declined_events(pool).await { events } else { crate::commands::without_declined(events) }
+}
+
 /// One stored choice, as the settings form sends it: `{ key, value }`, with
 /// the key spelled as the [`AppSettings`] field it lands in wherever there is
 /// one. The four that store several fields as one decision carry an object.
@@ -1604,6 +1645,10 @@ pub enum Setting {
     /// the side the app is wearing.
     AutoLightTheme(crate::theme::Appearance),
     AutoDarkTheme(crate::theme::Appearance),
+    /// Nothing for [`apply`] to do: the font is the webview's to draw, so the
+    /// UI asks `get_omarchy_font` again once this is stored, and that answer
+    /// is what changes the screen.
+    UseOmarchyFont(bool),
     /// Applied live; the frame is the compositor's or GTK's to draw.
     WindowFrame(WindowFrame),
     /// Also stored in [`AppState::quit_on_close`], a mirror of the row:
@@ -1675,6 +1720,7 @@ pub enum Setting {
     VisibleHoursFit(bool),
     HideWeekends(bool),
     CombineIdenticalEvents(bool),
+    ShowDeclinedEvents(bool),
     /// The whole list, replaced in one write: the UI edits it as a list
     /// (add, rename, reorder, delete, "update to current"), and one value is
     /// one decision, never a half-applied edit.
@@ -1708,6 +1754,7 @@ impl Setting {
                 | Setting::WeekViewDays(_)
                 | Setting::VisibleHours { .. }
                 | Setting::CombineIdenticalEvents(_)
+                | Setting::ShowDeclinedEvents(_)
         )
     }
 }
@@ -1807,6 +1854,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             }
             write(pool, AUTO_DARK_THEME_KEY, a.as_str()).await?;
         }
+        S::UseOmarchyFont(on) => write(pool, USE_OMARCHY_FONT_KEY, flag(*on)).await?,
         S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
         S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
         // The answer and the fact of having answered, in one write: whatever
@@ -1958,6 +2006,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
         S::VisibleHoursFit(on) => write(pool, VISIBLE_HOURS_FIT_KEY, flag(*on)).await?,
         S::HideWeekends(on) => write(pool, HIDE_WEEKENDS_KEY, flag(*on)).await?,
         S::CombineIdenticalEvents(on) => write(pool, COMBINE_IDENTICAL_EVENTS_KEY, flag(*on)).await?,
+        S::ShowDeclinedEvents(on) => write(pool, SHOW_DECLINED_EVENTS_KEY, flag(*on)).await?,
         S::CalendarGroups(groups) => {
             let groups = validate_calendar_groups(groups).map_err(SetError::Refused)?;
             let json = serde_json::to_string(&groups).map_err(|e| SetError::Failed(e.into()))?;
@@ -2040,6 +2089,7 @@ mod tests {
             serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{v}: {e}"))
         };
         assert!(matches!(read(json!({"key": "syncIntervalMs", "value": 120000})), Setting::SyncIntervalMs(120_000)));
+        assert!(matches!(read(json!({"key": "showDeclinedEvents", "value": true})), Setting::ShowDeclinedEvents(true)));
         assert!(matches!(read(json!({"key": "secondTimezone", "value": null})), Setting::SecondTimezone(None)));
         assert!(matches!(read(json!({"key": "defaultCalendarId", "value": 4})), Setting::DefaultCalendarId(Some(4))));
         assert!(matches!(read(json!({"key": "fallbackReminderMinutes", "value": [10]})), Setting::FallbackReminderMinutes(ref m) if m == &[10]));
@@ -2073,6 +2123,7 @@ mod tests {
         ));
         assert!(matches!(read(json!({"key": "autoLightTheme", "value": "rose-pine-dawn"})), Setting::AutoLightTheme(crate::theme::Appearance::RosePineDawn)));
         assert!(matches!(read(json!({"key": "autoDarkTheme", "value": "tokyo-night"})), Setting::AutoDarkTheme(crate::theme::Appearance::TokyoNight)));
+        assert!(matches!(read(json!({"key": "useOmarchyFont", "value": true})), Setting::UseOmarchyFont(true)));
         // A key this build does not know is an error, not a silent no-op.
         assert!(serde_json::from_value::<Setting>(json!({"key": "noSuchSetting", "value": 1})).is_err());
     }
@@ -2184,11 +2235,42 @@ mod tests {
         assert_eq!(read_settings(&p).await.menubar_label_hours, 24);
     }
 
+    /// "Show meetings I've declined" decides what the views get: off, a
+    /// declined meeting is left out ([`crate::commands::without_declined`]);
+    /// on, it comes back to be drawn struck through.
+    #[tokio::test]
+    async fn the_views_leave_out_declined_meetings_until_asked_for_them() {
+        let p = pool().await;
+        let mut declined = omacal_store::StoredEvent {
+            id: 1, calendar_id: 1, google_id: "lunch".into(), summary: None, location: None,
+            start_utc: 0, end_utc: 3_600_000, start_tz: "UTC".into(), end_tz: "UTC".into(),
+            is_all_day: false, recurrence: None, recurring_event_id: None, original_start_utc: None,
+            status: "confirmed".into(), self_response: Some("declined".into()), conference_uri: None,
+            color_hex: None, calendar_timezone: "UTC".into(), description: None, etag: None,
+            sequence: 0, organizer_email: None, guests_can_modify: false,
+            transparency: "opaque".into(), visibility: "default".into(), attendees: Vec::new(),
+            reminders: Default::default(), calendar_default_reminders: Vec::new(),
+        };
+        let mut accepted = declined.clone();
+        accepted.google_id = "standup".into();
+        accepted.self_response = Some("accepted".into());
+        declined.id = 2;
+        let ids = |v: Vec<omacal_store::StoredEvent>| v.into_iter().map(|e| e.google_id).collect::<Vec<_>>();
+
+        assert_eq!(ids(shown_events(&p, vec![declined.clone(), accepted.clone()]).await), ["standup"]);
+        let s = set(&p, Setting::ShowDeclinedEvents(true)).await.unwrap();
+        assert!(s.show_declined_events);
+        assert_eq!(ids(shown_events(&p, vec![declined.clone(), accepted.clone()]).await), ["lunch", "standup"]);
+        set(&p, Setting::ShowDeclinedEvents(false)).await.unwrap();
+        assert_eq!(ids(shown_events(&p, vec![declined, accepted]).await), ["standup"]);
+    }
+
     /// A fresh install has written none of these, and that is the ordinary
     /// case rather than an error.
     #[tokio::test]
     async fn absent_settings_read_as_their_defaults() {
         let s = read_settings(&pool().await).await;
+        assert!(!s.show_declined_events, "declined meetings stay out of sight until asked for");
         assert_eq!(s.sync_interval_ms, crate::sync_loop::DEFAULT_INTERVAL_MS);
         assert!(s.notifications_enabled, "reminders must be on until turned off");
         assert!(s.task_notifications_enabled, "and so must a task's own announcement (#137)");
@@ -3230,6 +3312,26 @@ mod tests {
         assert!(!set(&p, Setting::ShowWeekNumbers(false)).await.unwrap().show_week_numbers);
         write(&p, SHOW_WEEK_NUMBERS_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.show_week_numbers);
+    }
+
+    /// #179: off on a fresh install, as promised on the issue — Omarchy's
+    /// fonts are monospace and cut narrow titles short — on through
+    /// `Setting`, and a stray value keeps the stack the app has always drawn.
+    /// `use_omarchy_font` is asked too, because it is what `font::current`
+    /// reads, and it must not disagree with the form.
+    #[tokio::test]
+    async fn the_omarchy_font_is_opt_in() {
+        let p = pool().await;
+        assert!(!read_settings(&p).await.use_omarchy_font, "off until asked for");
+        assert!(!use_omarchy_font(&p).await);
+        let s = set(&p, Setting::UseOmarchyFont(true)).await.unwrap();
+        assert!(s.use_omarchy_font);
+        assert!(use_omarchy_font(&p).await);
+        assert_eq!(read(&p, USE_OMARCHY_FONT_KEY).await.as_deref(), Some("1"));
+        let s = set(&p, Setting::UseOmarchyFont(false)).await.unwrap();
+        assert!(!s.use_omarchy_font);
+        write(&p, USE_OMARCHY_FONT_KEY, "yes").await.unwrap();
+        assert!(!use_omarchy_font(&p).await, "a stray value changes nothing");
     }
 
     /// The fit switch round-trips through `Setting`, and a fresh install

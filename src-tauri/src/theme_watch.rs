@@ -1,5 +1,6 @@
 //! Live theme reload (spec §10): watches the Omarchy theme directory and
-//! repaints the UI when `omarchy-theme-set` runs.
+//! repaints the UI when `omarchy-theme-set` runs, and tells it the Omarchy
+//! font may have changed (#179) so it can ask again.
 
 use notify::{RecursiveMode, Watcher};
 use std::path::PathBuf;
@@ -38,6 +39,18 @@ pub fn spawn(app: AppHandle) {
             tracing::warn!(%e, ?target, "could not watch theme directory");
             return;
         }
+        // `omarchy font set` writes fontconfig and touches nothing under the
+        // theme, so this is what lets the font follow it (#179) rather than
+        // wait for the next theme switch. Best-effort, unlike the theme's own
+        // watch: without it the font still follows every theme switch. And
+        // only a directory that exists now can be watched; when the first
+        // `omarchy font set` is what makes it, that change waits for a theme
+        // switch or a restart.
+        if let Some(fonts) = crate::font::fontconfig_dir() {
+            if let Err(e) = watcher.watch(&fonts, RecursiveMode::NonRecursive) {
+                tracing::debug!(%e, ?fonts, "could not watch fontconfig; the font follows theme switches only");
+            }
+        }
 
         // The user's own choice, re-read on each change rather than captured:
         // someone can pin Light while the watcher is already running, and a
@@ -68,6 +81,13 @@ pub fn spawn(app: AppHandle) {
             // Debounce: a theme switch touches several paths in quick succession.
             std::thread::sleep(std::time::Duration::from_millis(150));
             while rx.try_recv().is_ok() {}
+
+            // The font may have moved, and whatever the palette did: a
+            // refresh to the same theme, or one under a pinned palette, is
+            // just when it has, and both stop below without a word. So it is
+            // said on every change, and the UI asks `get_omarchy_font`, which
+            // with the setting off answers at once and spawns nothing.
+            let _ = app.emit("font-changed", ());
 
             let chosen = appearance(&app);
             // A pinned palette is not following anything, so a theme file

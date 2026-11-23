@@ -191,6 +191,9 @@
   /** The connect form Accounts opens with, when the empty state's chooser
    *  sent the user there for one. */
   let settingsForm = $state<'icloud' | 'caldav' | 'webcal' | null>(null);
+  /** The CalDAV account Accounts opens the Reconnect form for: the banner's
+   *  one account. With two, the rows themselves say which need it. */
+  let settingsReconnect = $state<string | null>(null);
   /** Whether the empty state's "Connect calendar…" menu is open. */
   let connectOpen = $state(false);
 
@@ -199,6 +202,7 @@
     menuOpen = false;
     settingsTab = 'Accounts';
     settingsForm = kind;
+    settingsReconnect = null;
     settingsOpen = true;
   }
   /** The newer release, if the backend's daily check found one. */
@@ -274,6 +278,7 @@
     menuOpen = false;
     settingsTab = 'General';
     settingsForm = null;
+    settingsReconnect = null;
     settingsOpen = true;
   }
 
@@ -543,6 +548,7 @@
     {onsettingschange}
     initialTab={settingsTab}
     initialAccountForm={settingsForm}
+    initialReconnect={settingsReconnect}
     onSignIn={() => {
       settingsOpen = false;
       onSignIn();
@@ -588,7 +594,7 @@
 {#if caldavReauth.length > 0 && !status?.demo}
   <p class="err reauth" data-testid="caldav-reauth-banner">
     <span>{caldavReauthMessage(caldavReauth)}</span>
-    <button class="primary" onclick={() => { settingsTab = 'Accounts'; settingsForm = null; menuOpen = false; settingsOpen = true; }}>
+    <button class="primary" onclick={() => { settingsTab = 'Accounts'; settingsForm = null; settingsReconnect = caldavReauth.length === 1 ? caldavReauth[0] : null; menuOpen = false; settingsOpen = true; }}>
       Reconnect
     </button>
   </p>

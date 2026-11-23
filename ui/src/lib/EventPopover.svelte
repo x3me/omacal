@@ -252,7 +252,12 @@
   const cadence = $derived.by(() => {
     if (!detail.is_recurring) return null;
     const word = REPEAT_WORDS[detail.repeat];
-    if (word) return `Repeats ${word}`;
+    // The preset's word is only the whole truth for every one. A fortnightly
+    // rule is `weekly` with an interval of 2 (#181), and "Repeats weekly"
+    // over it would be the popover doubling the meeting; the rule in words
+    // says "Every 2 weeks on Tuesday and Thursday", as it did when that
+    // rule was still custom.
+    if (word && detail.repeat_interval <= 1) return `Repeats ${word}`;
     // A custom rule in its own words; an exception row (recurring by
     // parentage, carrying no rule of its own) still says what it is.
     if (detail.recurrence) return ruleInWords(detail.recurrence) ?? 'Repeats on a custom schedule';
