@@ -55,7 +55,7 @@ pub async fn set_span(pool: &sqlx::SqlitePool, months: i64, now_ms: i64) -> sqlx
     } else if months != previous {
         // Let the next wider fetch restore newly requested history. An install
         // that has never pruned has no cutoff to move.
-        sqlx::query("UPDATE settings SET value = ?2 WHERE key = ?1")
+        sqlx::query("UPDATE settings SET value = min(CAST(value AS INTEGER), ?2) WHERE key = ?1")
             .bind(HISTORY_CUTOFF_KEY).bind(start.to_string()).execute(&mut *tx).await?;
     }
     tx.commit().await
@@ -137,15 +137,17 @@ pub async fn retain_current_history(
     tx: &mut Transaction<'_, Sqlite>,
     calendar_id: i64,
     fetched_start: i64,
+    wrote_events: bool,
 ) -> Result<i64, sqlx::Error> {
     // This is the cutoff the settings transaction actually used, including
     // for calendars whose first sync had no sync_state row at shrink time.
     let cutoff: Option<i64> = sqlx::query_scalar(
         "SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1",
     ).bind(HISTORY_CUTOFF_KEY).fetch_optional(&mut **tx).await?;
-    let start = cutoff.unwrap_or(fetched_start).max(fetched_start);
-    if start > fetched_start {
-        forget_events_ending_before(tx, Some(calendar_id), start).await?;
+    if let Some(cutoff) = cutoff.filter(|_| wrote_events) {
+        // A narrow REPORT may still contain an entire recurring resource.
+        // Reapply only the explicit shrink cutoff, never today's sliding start.
+        forget_events_ending_before(tx, Some(calendar_id), cutoff).await?;
     }
-    Ok(start)
+    Ok(cutoff.unwrap_or(fetched_start).max(fetched_start))
 }

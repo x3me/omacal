@@ -335,7 +335,7 @@ pub async fn sync_caldav_calendar(
         outcome.deleted += deleted as usize;
 
         let window_start_ms = omacal_store::history::retain_current_history(
-            &mut tx, calendar_id, window_start_ms,
+            &mut tx, calendar_id, window_start_ms, outcome.upserted > 0 || outcome.deleted > 0,
         ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(

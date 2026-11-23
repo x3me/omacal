@@ -244,6 +244,9 @@
   }
   let signingIn = $state(false);
   let error = $state<string | null>(null);
+  // A partial sync can commit fresh rows and still fail on another account.
+  // Reloading those rows must leave the sync error visible.
+  let syncError = $state<string | null>(null);
   /** A write the server refused, or took but could not be recorded: news
    *  about something the user did. Apart from `error` because a load clears
    *  `error` (a stale "could not load" has no business outliving the next
@@ -1324,7 +1327,9 @@
 
   $effect(() => {
     const un = listen<{ message?: string }>('sync-failed', (e) => {
-      error = e.payload?.message ?? 'Sync failed.';
+      syncError = e.payload?.message ?? 'Sync failed.';
+      if (document.hidden) staleWhileHidden = true;
+      else void reload();
       // The same cycle may also have marked an account as needing re-consent,
       // and that state rides on `status` (`needs_reauth`), not on the event —
       // without this refetch the reconnect prompt waits for the next
@@ -1355,7 +1360,8 @@
     const shown = () => {
       if (document.hidden || !staleWhileHidden) return;
       staleWhileHidden = false;
-      void afterSync();
+      if (syncError) void reload();
+      else void afterSync();
     };
     document.addEventListener('visibilitychange', shown);
     return () => document.removeEventListener('visibilitychange', shown);
@@ -1363,6 +1369,7 @@
 
   $effect(() => {
     const un = listen('sync-finished', async () => {
+      syncError = null;
       if (document.hidden) { staleWhileHidden = true; return; }
       await afterSync();
     });
@@ -1425,13 +1432,12 @@
 
   async function handleSync() {
     if (busy || syncing) return;
-    busy = true; error = null;
+    busy = true; error = null; syncError = null;
     try {
-      await syncCalendar();
+      await syncCalendar().catch((e) => { syncError = String(e); });
       await refreshStatus();
       await reload();
-    } catch (e) { error = String(e); }
-    finally { busy = false; }
+    } finally { busy = false; }
   }
 
   function goToday() {
@@ -2728,9 +2734,9 @@
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
-    {busy} error={writeError ?? error} {calendars} {view} {listMode}
+    {busy} error={writeError ?? error ?? syncError} {calendars} {view} {listMode}
     errorAction={retry && retry.forError === (writeError ?? error) ? retry : null}
-    onDismissError={() => { writeError = null; error = null; retry = null; }}
+    onDismissError={() => { writeError = null; error = null; syncError = null; retry = null; }}
     onToggleList={toggleList}
     groups={calendarGroups}
     onapplygroup={applyGroup}

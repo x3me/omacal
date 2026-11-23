@@ -240,7 +240,7 @@ let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = 
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
 let holdWriteOnce: 'update_event' | 'delete_event_cmd' | 'create_event' | null = null;
 let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
-type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
+type ResponseData = {year?: YearPayload; week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
   /** The calendar list as the store holds it after a sync — set it, then emit
    *  `sync-finished`, to stand in for collections made or deleted elsewhere. */
   calendars?: Calendar[]};
@@ -1173,7 +1173,7 @@ export function installTauriStub(scenario: string): Harness {
       case 'get_month':
         return getMonth();
       case 'get_year':
-        return getYearStub(args.year);
+        return structuredClone(responseData.year ?? getYearStub(args.year));
       case 'get_big_year':
         return getBigYearStub(args.year);
       // App's own effect fetches calendars alongside status on mount. None of

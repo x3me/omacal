@@ -801,3 +801,39 @@ async fn the_calendar_list_follows_collections_made_and_deleted_after_connecting
     assert_eq!(out.removed, 1);
     assert_eq!(names(pool.clone()).await, vec![("bernard".into(), 0, 1), ("work".into(), 1, 0)]);
 }
+
+#[tokio::test]
+#[ignore = "needs a live Radicale"]
+async fn an_unrelated_edit_does_not_restore_a_pruned_occurrence() {
+    let base = base_url();
+    let user = format!("omacal-retention-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    let client = CalDavClient::new(&base, &user, "pw").unwrap();
+    let url = format!("{base}/{user}/work/");
+    let series = SERIES.replace("202608", "202508").replace(";COUNT=10", "");
+    client.put(&format!("{url}series.ics"), &series, None).await.unwrap();
+
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query("INSERT INTO accounts (google_sub,email,created_at,provider)
+                 VALUES ('caldav:work','work@example.test',0,'caldav')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                 VALUES (1,?,'Work','Europe/Sofia','owner')")
+        .bind(&url).execute(&pool).await.unwrap();
+    let now = 1_786_341_600_000;
+    let (wide, end) = omacal_store::history::history_window(now, 24);
+    let (short, _) = omacal_store::history::history_window(now, 6);
+    let sync = |start, end, tick| omacal_sync::caldav::sync_caldav_calendar(
+        &pool, &client, 1, &url, true, false, start, end, tick,
+    );
+    let moved = || omacal_store::search_events(&pool, "Standup (moved)");
+    sync(wide, end, now).await.unwrap();
+    assert_eq!(moved().await.unwrap().len(), 1);
+    omacal_store::history::set_span(&pool, 6, now).await.unwrap();
+    assert!(moved().await.unwrap().is_empty());
+    client.put(&format!("{url}unrelated.ics"), EVENT, None).await.unwrap();
+    sync(short + 1000, end + 1000, now + 1000).await.unwrap();
+    assert!(moved().await.unwrap().is_empty());
+    assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1, "the master stays");
+    assert_eq!(omacal_store::search_events(&pool, "Board sync").await.unwrap().len(), 1);
+}

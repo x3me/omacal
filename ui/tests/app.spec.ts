@@ -377,6 +377,28 @@ test.describe('App', () => {
     await expect(page.locator('.err')).toContainText('could not reach Google');
   });
 
+  test('partial sync refreshes Year while keeping the failed-account message visible', async ({ page }) => {
+    await page.goto(app());
+    const year = new Date(APP_NOW).getUTCFullYear();
+    const months = Array.from({ length: 12 }, (_, index) => ({
+      month: index + 1, lead_blanks: 0,
+      days: [{ start_ms: Date.UTC(year, index, 1), day: 1, has_all_day: false, unsynced: true }],
+    }));
+    await page.evaluate((year) => window.__harness.setResponseData({ year }), { year, months });
+    await page.getByRole('button', { name: 'Year', exact: true }).click();
+    await expect(page.locator('.yday.unsynced')).toHaveCount(12);
+    for (const month of months) month.days[0].unsynced = false;
+    await page.evaluate(async (year) => {
+      window.__harness.setResponseData({ year });
+      await window.__harness.emit('sync-failed', { message: 'Other calendar failed' });
+    }, { year, months });
+    await expect(page.locator('.yday.unsynced')).toHaveCount(0);
+    await expect(page.locator('.yday')).toHaveCount(12);
+    await expect(page.locator('.err')).toContainText('Other calendar failed');
+    await page.evaluate(() => window.__harness.emit('sync-finished', {}));
+    await expect(page.locator('.err')).toHaveCount(0);
+  });
+
   // An account whose refresh token died gets its own surface: a standing
   // banner naming the account, with the one button that fixes it. The generic
   // "it will keep trying" toast would be a lie here — the backend has stopped

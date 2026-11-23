@@ -301,7 +301,7 @@ async fn apply(
     }
 
     let window_start_ms = omacal_store::history::retain_current_history(
-        &mut tx, calendar_id, window_start_ms,
+        &mut tx, calendar_id, window_start_ms, outcome.upserted > 0 || outcome.deleted > 0,
     ).await?;
 
     // COALESCE, not a plain assignment: a page can legitimately end without a
@@ -1239,6 +1239,23 @@ mod tests {
         let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
         assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+    #[tokio::test]
+    async fn a_changed_old_google_event_stays_out_of_search_after_shrinking() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200)
+            .set_body_json(one_event_body("token"))).mount(&server).await;
+        let client = CalendarClient::new(server.uri(), "access");
+        let pool = seeded_pool().await;
+        let now = "2027-08-10T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let (wide, end) = omacal_store::history::history_window(now, 24);
+        let (short, _) = omacal_store::history::history_window(now, 6);
+        sync_calendar(&pool, &client, 1, "primary", wide, end).await.unwrap();
+        assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1);
+        omacal_store::history::set_span(&pool, 6, now).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", short + 1000, end + 1000).await.unwrap();
+        assert!(omacal_store::search_events(&pool, "Standup").await.unwrap().is_empty());
+        assert!(server.received_requests().await.unwrap()[1].url.query().unwrap().contains("syncToken=token"));
     }
 
 }
