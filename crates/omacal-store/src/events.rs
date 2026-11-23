@@ -690,9 +690,10 @@ pub async fn events_in_window(
            AND (e.recurrence IS NOT NULL
                 OR (e.start_utc < ?2 AND e.end_utc > ?1)
                 OR (e.recurring_event_id IS NOT NULL
-                    AND e.original_start_utc >= ?1
-                    AND e.original_start_utc < ?2))
-         ORDER BY e.start_utc"
+                    AND e.original_start_utc < ?2
+                    AND (e.original_start_utc >= ?1 OR {original_end} > ?1)))
+         ORDER BY e.start_utc",
+        original_end = crate::history::ORIGINAL_SLOT_END,
     );
     let rows = sqlx::query(&sql).bind(from_ms).bind(to_ms).fetch_all(pool).await?;
     Ok(rows.iter().map(row_to_event).collect())

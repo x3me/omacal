@@ -160,13 +160,8 @@ fn rule_ended_before(recurrence: &[String], _dtstart_ms: i64, from_ms: i64, dura
     saw_rule
 }
 
-fn param<'a>(upper: &'a str, key: &str) -> Option<&'a str> {
-    let rest = upper.split(key).nth(1)?;
-    Some(rest.split([';', ':']).next()?.trim())
-}
-
 fn until_ms(upper: &str) -> Option<i64> {
-    let token = param(upper, "UNTIL=")?;
+    let token = upper.split([';', ':']).find_map(|part| part.strip_prefix("UNTIL="))?.trim();
     if token.len() < 8 {
         return None;
     }
@@ -828,6 +823,13 @@ mod tests {
                 duration_ms: HOUR, is_all_day: false, recurrence: &recurrence };
             let _ = expand(&series, MON_0900_SOFIA, MON_0900_SOFIA + DAY, 32);
         }
+    }
+
+    #[test]
+    fn until_must_be_its_own_rule_part() {
+        assert_eq!(until_ms("RRULE:FREQ=DAILY;X-UNTIL=20010101"), None);
+        assert_eq!(until_ms("RRULE:FREQ=DAILY;X-UNTIL=20010101;UNTIL=20261123"),
+                   until_ms("RRULE:UNTIL=20261123;FREQ=DAILY"));
     }
 
     #[test]

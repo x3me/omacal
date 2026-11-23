@@ -2116,7 +2116,7 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
             // download the history again — the shorter one already dropped
             // what fell outside it.
             if history_window(now, *months).0 < history_window(now, previous).0 {
-                crate::sync_loop::request_now(app);
+                crate::sync_loop::SyncRequest::WiderHistory.request(app);
             }
         }
         _ => {}
@@ -2565,6 +2565,63 @@ mod tests {
         assert_ne!(history_window(now, 0).1, history_window(now + 2 * DAY, 0).1, "the end still does");
         assert_eq!(history_window(now, 999), history_window(now, 24), "a stray span is two years");
         assert!(history_window(now, 6).0 < now && now < history_window(now, 6).1);
+    }
+
+    async fn shrink_calendar_and_feed() -> (SqlitePool, i64) {
+        const DAY: i64 = 86_400_000;
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider)
+                     VALUES ('s','a',0,'google'), ('feed','b',0,'webcal')")
+            .execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                     VALUES (1,'primary','Work','UTC','owner'), (2,'feed','Feed','UTC','reader')")
+            .execute(&p).await.unwrap();
+        let edge = history_window(crate::now_ms(), 6).0.div_euclid(DAY) * DAY;
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc,
+                                         recurrence, recurring_event_id, original_start_utc,
+                                         status, start_tz, end_tz, updated_at) VALUES
+            (1,'old',?1,?1,NULL,NULL,NULL,'confirmed','UTC','UTC',0),
+            (2,'old',?1,?1,NULL,NULL,NULL,'confirmed','UTC','UTC',0),
+            (1,'series',?1,?2,'RRULE:FREQ=WEEKLY',NULL,NULL,'confirmed','UTC','UTC',0),
+            (1,'cancelled',?3,?3,NULL,'series',?3,'cancelled','UTC','UTC',0),
+            (1,'expired',?1,?1,NULL,'series',?1,'cancelled','UTC','UTC',0)")
+            .bind(edge - 8 * DAY).bind(edge - 5 * DAY).bind(edge - DAY)
+            .execute(&p).await.unwrap();
+
+        set(&p, Setting::HistorySpan(6)).await.unwrap();
+        (p, edge)
+    }
+
+    #[tokio::test]
+    async fn history_shrink_preserves_webcal_history() {
+        let (p, _) = shrink_calendar_and_feed().await;
+        set(&p, Setting::HistorySpan(24)).await.unwrap();
+        let calendars: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM events WHERE google_id = 'old'")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(calendars, [2], "only the windowed calendar should lose its old event");
+    }
+
+    #[tokio::test]
+    async fn history_shrink_does_not_report_local_removals_as_meeting_changes() {
+        let (p, _) = shrink_calendar_and_feed().await;
+        let changes: Vec<String> = sqlx::query_scalar("SELECT gid FROM event_changes")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(changes, ["cancelled"], "only the real, retained cancellation is news");
+    }
+
+    #[tokio::test]
+    async fn history_shrink_keeps_a_cancelled_multiday_slot_off_the_grid() {
+        const DAY: i64 = 86_400_000;
+        let (p, edge) = shrink_calendar_and_feed().await;
+        let cancellations: Vec<String> = sqlx::query_scalar("SELECT google_id FROM events WHERE status = 'cancelled'")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(cancellations, ["cancelled"], "only the overlapping slot still matters");
+        let rows = omacal_store::events_in_window(&p, edge, edge + DAY).await.unwrap();
+        let day = |events: &[omacal_store::StoredEvent]| crate::commands::assemble_days(events, edge, 1, "UTC");
+        assert!(day(&rows).days[0].events.is_empty(), "the cancelled occurrence stays off the grid");
+        let master = rows.iter().find(|row| row.google_id == "series").unwrap();
+        assert_eq!(day(std::slice::from_ref(master)).days[0].events.len(), 1, "the slot would otherwise appear");
+
     }
 
     /// Shortening the span drops one-off rows that end before the new window,

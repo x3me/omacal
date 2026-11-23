@@ -335,7 +335,7 @@ pub async fn sync_caldav_calendar(
         outcome.deleted += deleted as usize;
 
         let window_start_ms = omacal_store::history::retain_current_history(
-            &mut tx, calendar_id, window_start_ms, jiff::Timestamp::now().as_millisecond(),
+            &mut tx, calendar_id, window_start_ms, now_ms,
         ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(
@@ -1106,6 +1106,34 @@ mod tests {
         let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
             .fetch_one(&pool).await.unwrap();
         assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_caldav_report_keeps_history_outside_the_saved_window() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        for verb in ["PROPFIND", "REPORT"] {
+            Mock::given(method(verb)).respond_with(ResponseTemplate::new(207)
+                .set_body_string(r#"<d:multistatus xmlns:d="DAV:"/>"#))
+                .expect(1).mount(&server).await;
+        }
+        let pool = super::super::tests::seeded_pool().await;
+        let now = 1_700_000_000_000;
+        let (start, end) = omacal_store::history::history_window(now, 6);
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months','6')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, updated_at)
+                     VALUES (1,'cached',?1,?2,'UTC','UTC',0)")
+            .bind(start - 2).bind(start - 1).execute(&pool).await.unwrap();
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        sync_caldav_calendar(&pool, &client, 1, &format!("{}/cal/", server.uri()), true, false, start, end, now)
+            .await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = 'cached'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(cached, 1);
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(recorded, start);
     }
 
     /// A ctag describes server edits, not how much history was requested.

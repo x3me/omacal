@@ -894,6 +894,7 @@ async fn sync_accounts<F, Fut>(
     api_base: &str,
     window_start_ms: i64,
     window_end_ms: i64,
+    now_ms: i64,
     token_for: F,
 ) -> (u64, Vec<String>, Vec<String>)
 where
@@ -940,7 +941,7 @@ where
 
         for (cal_id, google_id) in cals {
             match omacal_sync::sync_calendar(
-                pool, &client, cal_id, &google_id, window_start_ms, window_end_ms,
+                pool, &client, cal_id, &google_id, window_start_ms, window_end_ms, now_ms,
             )
             .await
             {
@@ -1089,13 +1090,14 @@ pub(crate) async fn sync_one_calendar(state: &AppState, calendar_id: i64) -> any
     .fetch_optional(&state.pool)
     .await?;
     let Some((provider, email, google_id)) = row else { return Ok(()) };
-    let (window_start, window_end) = synced_window(state, now_ms());
+    let now = now_ms();
+    let (window_start, window_end) = synced_window(state, now);
     match provider.as_str() {
         "google" => {
             let cfg = load_config()?;
             let token = access_token_for(state, &cfg, &email).await?;
             let client = omacal_google::CalendarClient::new(GOOGLE_CALENDAR_API, &token);
-            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end)
+            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end, now)
                 .await?;
         }
         "caldav" => caldav_write::resync(state, calendar_id).await?,
@@ -1166,6 +1168,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
             GOOGLE_CALENDAR_API,
             window_start,
             window_end,
+            now,
             move |email| async move { access_token_for(state, cfg, &email).await },
         )
         .await;
@@ -1196,7 +1199,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
                     continue;
                 }
             };
-        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end)
+        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end, now)
             .await
         {
             Ok(n) => total += n,
@@ -2627,7 +2630,7 @@ mod tests {
         assert_eq!(accounts[0].1, "revoked@x", "the broken account must go first");
 
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
             |email| async move {
                 if email == "revoked@x" {
                     anyhow::bail!("invalid_grant: token has been expired or revoked");
@@ -2670,7 +2673,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, dead) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
             |email| async move {
                 if email == "dead@x" {
                     return Err(omacal_google::auth::TokenRejected::new(
@@ -2768,7 +2771,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
             |_| async { Ok("at".to_string()) },
         )
         .await;
@@ -2801,7 +2804,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
             |_| async { Ok("at".to_string()) },
         )
         .await;
@@ -2879,7 +2882,7 @@ mod tests {
                 {"id":"owner@x", "summary":"owner@x", "summaryOverride":"Studio"},
                 {"id":"unknown", "summary":"Do not import"}
             ]}))).mount(&server).await;
-        sync_accounts(&pool, &[(account, "owner@x".into())], &server.uri(), 0, 1,
+        sync_accounts(&pool, &[(account, "owner@x".into())], &server.uri(), 0, 1, 0,
             |_| async { Ok("test-token".into()) }).await;
         let cals = omacal_store::list_calendars(&pool).await.unwrap();
         assert_eq!(cals.len(), 2);

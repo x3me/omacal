@@ -142,6 +142,7 @@ pub async fn sync_calendar(
     google_id: &str,
     window_start_ms: i64,
     window_end_ms: i64,
+    now_ms: i64,
 ) -> anyhow::Result<SyncOutcome> {
     let cal_tz: String =
         sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
@@ -178,7 +179,7 @@ pub async fn sync_calendar(
         {
             Ok((next, changes)) => {
                 return apply(pool, calendar_id, changes, next.as_deref(),
-                             window_start_ms, window_end_ms, did_full_resync).await;
+                             window_start_ms, window_end_ms, now_ms, did_full_resync).await;
             }
             Err(ApiError::SyncTokenInvalid) if token.is_some() => {
                 tracing::warn!(calendar_id, "sync token rejected, falling back to full resync");
@@ -217,6 +218,7 @@ async fn apply(
     next_token: Option<&str>,
     window_start_ms: i64,
     window_end_ms: i64,
+    now_ms: i64,
     did_full_resync: bool,
 ) -> anyhow::Result<SyncOutcome> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -300,7 +302,7 @@ async fn apply(
     }
 
     let window_start_ms = omacal_store::history::retain_current_history(
-        &mut tx, calendar_id, window_start_ms, jiff::Timestamp::now().as_millisecond(),
+        &mut tx, calendar_id, window_start_ms, now_ms,
     ).await?;
 
     // COALESCE, not a plain assignment: a page can legitimately end without a
@@ -446,7 +448,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert_eq!(out.upserted, 1);
         assert!(!out.did_full_resync);
@@ -492,12 +494,12 @@ mod tests {
                 .fetch_one(&pool).await.unwrap()
         };
 
-        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events").fetch_one(&pool).await.unwrap();
         assert_eq!(rows, 1, "the fixture's premise: the moved occurrence was stored");
         assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
 
-        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
         assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
     }
 
@@ -515,7 +517,7 @@ mod tests {
         omacal_store::upsert_event(&pool, &stored("e1", 1000, 2000)).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
         assert_eq!(out.deleted, 1);
         assert!(omacal_store::events_in_window(&pool, 0, 5000).await.unwrap().is_empty());
     }
@@ -590,7 +592,7 @@ mod tests {
             .execute(&pool).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert!(out.did_full_resync);
         assert_eq!(out.upserted, 1);
@@ -640,7 +642,7 @@ mod tests {
         omacal_store::upsert_event(&pool, &dead).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", window_start, 9_999_999_999_999)
+        let out = sync_calendar(&pool, &client, 1, "primary", window_start, 9_999_999_999_999, 0)
             .await.unwrap();
         assert!(out.did_full_resync);
         assert_eq!(out.deleted, 2, "the ghost and the dead series");
@@ -690,7 +692,7 @@ mod tests {
         omacal_store::upsert_event(&pool, &far_series).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", window_start, window_end)
+        let out = sync_calendar(&pool, &client, 1, "primary", window_start, window_end, 0)
             .await.unwrap();
         assert!(out.did_full_resync);
         assert_eq!(out.deleted, 1, "the ghost alone");
@@ -724,7 +726,7 @@ mod tests {
             .await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999)
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0)
             .await.unwrap();
         assert_eq!(out.deleted, 0);
         let n: i64 = sqlx::query_scalar(
@@ -777,7 +779,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert_eq!(out.upserted, 2);
         let stored = omacal_store::events_in_window(&pool, 0, 9_999_999_999_999).await.unwrap();
@@ -811,7 +813,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let client = CalendarClient::new(server.uri(), "at-1");
-        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         let tok: Option<String> = sqlx::query_scalar(
             "SELECT sync_token FROM sync_state WHERE calendar_id = 1")
@@ -844,7 +846,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert_eq!(out.deleted, 0, "an exception tombstone is not a deletion");
         assert_eq!(out.upserted, 1);
@@ -872,7 +874,7 @@ mod tests {
         omacal_store::upsert_event(&pool, &stored("e1", 1000, 2000)).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert_eq!(out.deleted, 1);
         assert_eq!(out.upserted, 0);
@@ -904,7 +906,7 @@ mod tests {
             .execute(&pool).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         let tok: Option<String> = sqlx::query_scalar(
             "SELECT sync_token FROM sync_state WHERE calendar_id = 1")
@@ -944,7 +946,7 @@ mod tests {
             .execute(&pool).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let syncing = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999);
+        let syncing = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0);
         let removing = async {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             omacal_store::set_sync_enabled(&pool, 1, false).await.unwrap()
@@ -988,7 +990,7 @@ mod tests {
             .execute(&pool).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+        let out = sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999, 0).await.unwrap();
 
         assert_eq!(out.upserted, 1, "hiding a calendar must not stop its events being stored");
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE calendar_id = 1")
@@ -1024,7 +1026,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let client = CalendarClient::new(server.uri(), "at-1");
-        sync_calendar(&pool, &client, 1, "primary", 1786300000000, 1786400000000)
+        sync_calendar(&pool, &client, 1, "primary", 1786300000000, 1786400000000, 0)
             .await.unwrap();
 
         let stored = omacal_store::events_in_window(&pool, 1786300000000, 1786400000000)
@@ -1086,7 +1088,7 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         let client = CalendarClient::new(server.uri(), "at-1");
-        sync_calendar(&pool, &client, 1, "primary", 1786300000000, 1786400000000).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 1786300000000, 1786400000000, 0).await.unwrap();
 
         let stored = omacal_store::events_in_window(&pool, 1786300000000, 1786400000000)
             .await.unwrap();
@@ -1142,8 +1144,8 @@ mod tests {
 
         // The first call has no stored token, so it is the windowed full sync;
         // it stores `tok-1`, which the second call then sends.
-        sync_calendar(&pool, &client, 1, "primary", 0, 1_000_000_000_000).await.unwrap();
-        sync_calendar(&pool, &client, 1, "primary", 0, 1_000_000_000_000).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 1_000_000_000_000, 0).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", 0, 1_000_000_000_000, 0).await.unwrap();
 
         let requests = server.received_requests().await.expect("recording is on by default");
         let queries: Vec<&str> =
@@ -1161,6 +1163,28 @@ mod tests {
             "singleEvents=false&showDeleted=true&maxResults=2500&syncToken=tok-1",
             "the incremental query string changed — every stored sync token is now stale"
         );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_google_sync_keeps_cached_history_on_a_migrated_install() {
+        let pool = seeded_pool().await;
+        let now = 1_700_000_000_000;
+        let (start, end) = omacal_store::history::history_window(now, 6);
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months','6')")
+            .execute(&pool).await.unwrap();
+        omacal_store::upsert_event(&pool, &stored("cached", start - 2, start - 1)).await.unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/calendars/primary/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(one_event_body("token")))
+            .mount(&server).await;
+        let client = CalendarClient::new(server.uri(), "access");
+        sync_calendar(&pool, &client, 1, "primary", start, end, now).await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = 'cached'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(cached, 1);
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(recorded, start);
     }
 
     /// A history change can commit after the HTTP fetch and before apply.
@@ -1188,7 +1212,7 @@ mod tests {
             .bind(floor).bind(now + 365 * DAY).execute(&pool).await.unwrap();
         apply(&pool, 1, vec![old, recent, master, exception].into_iter()
             .map(|r| Change::Upsert(Box::new(r))).collect(), Some("after"),
-            -2_208_988_800_000, now + 365 * DAY, true).await.unwrap();
+            -2_208_988_800_000, now + 365 * DAY, now, true).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT google_id FROM events ORDER BY google_id")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["exception", "master", "recent"]);
