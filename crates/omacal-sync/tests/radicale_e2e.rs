@@ -423,12 +423,19 @@ const CARD_OFFICE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:e2e-office\r\nFN:Fr
 /// row per address — with the card that names nobody to invite left out.
 /// A server task with a long, folded note and an alarm of its own —
 /// Apple's shape — as an audit reproduced the corruption with (2026-09-17).
-const FOLDED_TODO: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//e2e//EN\r\nBEGIN:VTODO\r\nDTSTAMP:20260901T000000Z\r\nDESCRIPTION:Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusm\r\n od tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim ve\r\n niam, quis nostrud\r\nUID:e2e-folded\r\nSUMMARY:Pay rent\r\nDUE;VALUE=DATE:20260918\r\nX-KEEP-ME:vendor line\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+const FOLDED_TODO: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//e2e//EN\r\nBEGIN:VTODO\r\nDTSTAMP:20260901T000000Z\r\nDESCRIPTION:Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusm\r\n od tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim ve\r\n niam, quis nostrud\r\nUID:e2e-folded\r\nSUMMARY:Pay rent\r\nDUE;VALUE=DATE:20260918\r\nX-KEEP-ME:vendor line\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER;VALUE=DATE-TIME:20260918T060000Z\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
 
 /// A task's life on a real server, the way the commands write it: an edit,
 /// a completion and a reopening in a row, each guarded by the etag the one
 /// before it left — with no sync in between, which is where an etag the
 /// store did not keep turned the second write into a 412.
+///
+/// The alarm has an absolute trigger, an instant of its own, so it is the
+/// user's and survives an edit to a date-only due. A relative one (`-PT15M`)
+/// is dropped by that edit on purpose (`AlarmEdit::DropRelative`, b472503):
+/// with no hour left, it would point at nothing. This test predated that rule
+/// and asserted the relative one survived; it failed against main from then on,
+/// unseen because it needs a live Radicale (found 2026-11-23).
 #[tokio::test]
 #[ignore = "needs a live Radicale on 127.0.0.1:5232"]
 async fn a_folded_task_is_edited_completed_and_reopened_in_a_row() {
