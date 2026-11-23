@@ -951,6 +951,20 @@
     }
   }
 
+  /** `toggleTrayIcon`'s shape, with `onsettingschange`: the font is App's
+   *  to wear, and App asks for it again when this switch moves. */
+  async function toggleOmarchyFont(on: boolean) {
+    note = null;
+    try {
+      settings = await setSetting('useOmarchyFont', on);
+      onsettingschange?.(settings);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      // Same checkbox repair as `toggleNotifications`.
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function saveWindowFrame(frame: WindowFrame) {
     note = null;
     try {
@@ -1349,6 +1363,22 @@
         {:else}Following the desktop wears your light or dark theme as the system is set, and switches when that changes.{/if}
         Any other choice replaces the whole palette, including the accent, without a restart.
       </p>
+
+      <!-- Omarchy only (#179): it is Omarchy's font, chosen with `omarchy
+           font set`, and nowhere else is there one to follow. Off unless
+           turned on, as promised on the issue. -->
+      {#if settings?.desktop === 'omarchy'}
+        <label class="check">
+          <input type="checkbox" checked={settings.useOmarchyFont}
+            onchange={(e) => toggleOmarchyFont(e.currentTarget.checked)} />
+          Use the Omarchy font
+        </label>
+        <p class="hint">
+          Draws OmaCal in the font you chose for Omarchy. Omarchy's fonts are
+          monospace, which is wider, so titles in narrow event blocks cut off
+          sooner.
+        </p>
+      {/if}
 
       <!-- Only where there is a choice: on macOS the backend reports none,
            because the overlay title bar *is* the frame. While settings are

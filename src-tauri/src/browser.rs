@@ -68,7 +68,7 @@ fn path_without_appdir(path: &str, appdir: &str) -> String {
 /// tests can exercise it without mutating process-global state — env vars
 /// are shared across a parallel test run, and a test that sets `APPDIR`
 /// poisons its neighbours exactly the way this module exists to stop.
-fn sanitize(cmd: &mut Command, appdir: &OsStr) {
+pub(crate) fn sanitize(cmd: &mut Command, appdir: &OsStr) {
     for var in APPIMAGE_ONLY_VARS {
         cmd.env_remove(var);
     }
