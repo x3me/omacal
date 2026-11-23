@@ -74,6 +74,11 @@
           />
           <span><b>This event</b> — removes this one occurrence. The rest of the series stays.</span>
         </label>
+        <!-- Not for a guest: it changes the organizer's rule, which Google
+             ignores on a guest's copy (the series came back on the next sync,
+             2026-11-23) and applies to everyone where guests may modify it. The
+             backend refuses it too (`GUEST_CANNOT_END_SERIES`). -->
+        {#if !ownCopy}
         <label>
           <input
             type="radio"
@@ -88,6 +93,7 @@
             this occurrence.</span
           >
         </label>
+        {/if}
         <label>
           <input
             type="radio"
@@ -116,9 +122,14 @@
         </p>
       {/if}
     {:else if ownCopy}
+      <!-- What Google does with it, said as it is: a guest cannot take somebody
+           else's meeting off their calendar, only decline it, and the meeting
+           stays there as declined. OmaCal hides declined meetings unless
+           "Show meetings I've declined" is on, which is what makes it go. -->
       <p class="notice" data-testid="delete-own-copy-notice">
-        You are a guest on this event. Removing it takes it off your calendar only — {organizer}
-        and the other guests keep theirs, and Google tells {organizer} you declined.
+        You are a guest on this event, so removing it declines it: Google tells {organizer}, and
+        {organizer} and the other guests keep it. OmaCal then hides it, unless "Show meetings I've
+        declined" is on in Settings → Appearance.
       </p>
     {:else if guests > 0}
       <!-- `sendUpdates=all` is unconditional on every one of the three paths — the

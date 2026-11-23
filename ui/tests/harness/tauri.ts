@@ -729,6 +729,7 @@ type StubSettings = {
   minSyncIntervalMs: number;
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  showDeclinedEvents: boolean;
   calendarGroups: { name: string; calendarIds: number[] }[];
   showDate: boolean;
   menubarDayView?: boolean;
@@ -826,6 +827,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   transparentWindow: true,
   listMode: false,
   combineIdenticalEvents: false,
+  showDeclinedEvents: false,
   calendarGroups: [],
   // The mark, which is what the tray has always worn.
   showDate: false,

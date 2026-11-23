@@ -470,8 +470,11 @@ pub(crate) const AGENDA_LOOKAHEAD_DAYS: usize = 7;
 pub(crate) const PER_DAY_CAP: u32 = 6;
 
 pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Feed> {
-    let stored =
-        omacal_store::events_in_window(pool, now_ms, now_ms.saturating_add(HORIZON_MS)).await?;
+    let stored = crate::settings::shown_events(
+        pool,
+        omacal_store::events_in_window(pool, now_ms, now_ms.saturating_add(HORIZON_MS)).await?,
+    )
+    .await;
     let names: HashMap<i64, String> = omacal_store::list_calendars(pool)
         .await?
         .into_iter()
@@ -489,7 +492,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     let today = jiff::Timestamp::from_millisecond(now_ms)?.to_zoned(tz.clone()).date();
     let start = today.to_zoned(tz.clone())?.timestamp().as_millisecond();
     let end = today.tomorrow()?.to_zoned(tz.clone())?.timestamp().as_millisecond();
-    let day_stored = omacal_store::events_in_window(pool, start, end).await?;
+    let day_stored = crate::settings::shown_events(pool, omacal_store::events_in_window(pool, start, end).await?).await;
     // A day view needs completed events too, and a larger bound than the
     // glance-sized upcoming slice. Report truncation instead of hiding it.
     let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine);
@@ -508,7 +511,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         let from = agenda_date.to_zoned(tz.clone())?.timestamp().as_millisecond();
         let next = agenda_date.tomorrow()?;
         let to = next.to_zoned(tz.clone())?.timestamp().as_millisecond();
-        let stored = omacal_store::events_in_window(pool, from, to).await?;
+        let stored = crate::settings::shown_events(pool, omacal_store::events_in_window(pool, from, to).await?).await;
         let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine);
         agenda_truncated |= slice.events.len() > remaining;
         slice.events.truncate(remaining);

@@ -51,6 +51,10 @@
     catch (e) { note = { text: String(e), kind: "error" }; }
     finally { scalePreview = null; }
   }
+  async function changeShowDeclinedEvents(on: boolean) {
+    try { settings = await setSetting('showDeclinedEvents', on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; settings = settings ? { ...settings } : null; }
+  }
   async function changeCombineIdenticalEvents(on: boolean) {
     try { settings = await setSetting('combineIdenticalEvents', on); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
@@ -1508,6 +1512,12 @@
           Combine identical events
         </label>
         <p class="hint">Show matching events once, with a bottom color segment for each calendar. Hover to choose a copy, or select it in the event details.</p>
+        <label class="check">
+          <input type="checkbox" checked={settings?.showDeclinedEvents ?? false} disabled={!settings}
+            onchange={(e) => changeShowDeclinedEvents(e.currentTarget.checked)} />
+          Show meetings I've declined
+        </label>
+        <p class="hint">Struck through, rather than hidden. Removing somebody else's meeting from your calendar declines it, so with this off it disappears.</p>
         <!-- Offered only where the window can be seen through, like the
              canvas slider above (2026-09-12, reported from macOS as "not
              doing anything"). The fade goes toward `transparent`, and on

@@ -5859,6 +5859,25 @@ test.describe('EventForm', () => {
 test.describe('DeleteConfirm', () => {
   const show = (f: string) => `/tests/harness/index.html?c=DeleteConfirm&f=${f}`;
 
+  /** A guest's repeating meeting offers This event and All events only:
+   *  "This and following" would change the organizer's rule, which Google
+   *  ignores on a guest's copy, so the series came back (2026-11-23). The
+   *  notice says that removing declines, and that OmaCal then hides it. */
+  test('a guest\'s repeating meeting cannot be ended from here, only removed', async ({ page }) => {
+    await page.goto(show('recurring-guest'));
+    await expect(page.getByRole('radio')).toHaveCount(2);
+    await expect(page.getByRole('radio', { name: 'This event' })).toBeChecked();
+    await expect(page.getByRole('radio', { name: 'All events' })).toHaveCount(1);
+    await expect(page.getByRole('radio', { name: 'This and following' })).toHaveCount(0);
+    const notice = page.getByTestId('delete-own-copy-notice');
+    await expect(notice).toContainText('removing it declines it');
+    await expect(notice).toContainText('OmaCal then hides it');
+    await expect(page.getByRole('button', { name: 'Remove from my calendar' })).toBeVisible();
+
+    await page.goto(show('recurring'));
+    await expect(page.getByRole('radio', { name: 'This and following' })).toHaveCount(1);
+  });
+
   const open = async (page: import('@playwright/test').Page, fixture: string) => {
     await page.goto(show(fixture));
     await expect(page.locator('.pop')).toBeVisible();
