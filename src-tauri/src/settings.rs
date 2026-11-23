@@ -98,6 +98,7 @@ const APPEARANCE_KEY: &str = "appearance";
 /// ([`crate::theme::AutoPair`]); absent is Daylight and Daylight Dark.
 const AUTO_LIGHT_THEME_KEY: &str = "appearance_auto_light";
 const AUTO_DARK_THEME_KEY: &str = "appearance_auto_dark";
+const USE_OMARCHY_FONT_KEY: &str = "use_omarchy_font";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
 const DISPLAY_TZ_KEY: &str = "display_timezone";
@@ -648,6 +649,13 @@ pub struct AppSettings {
     /// choice the app is not wearing.
     pub auto_light_theme: crate::theme::Appearance,
     pub auto_dark_theme: crate::theme::Appearance,
+    /// Whether the interface is drawn in the Omarchy font, the monospace
+    /// family `omarchy font set` chose (#179), which `crate::font` reads.
+    /// **Off by default**: Omarchy's fonts are monospace, and those are
+    /// wider, so an event title in a narrow block cuts off sooner, which not
+    /// everyone will want. The form offers it on Omarchy only, and anywhere
+    /// else it changes nothing.
+    pub use_omarchy_font: bool,
     /// Whether the window draws a title bar, or `None` where the choice is
     /// not omacal's to make — macOS, whose `titleBarStyle: "Overlay"` puts
     /// the traffic lights over the content, and where hiding them would
@@ -1123,6 +1131,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         appearance: appearance(pool).await,
         auto_light_theme: auto.light(),
         auto_dark_theme: auto.dark(),
+        use_omarchy_font: use_omarchy_font(pool).await,
         // `None` is an absence, not a default: on macOS the frame is the
         // system's, and a row that does nothing is worse than no row.
         // `cfg!` rather than `#[cfg]` so both arms compile on the
@@ -1349,6 +1358,14 @@ pub(crate) async fn auto_pair(pool: &SqlitePool) -> crate::theme::AutoPair {
         read(pool, AUTO_LIGHT_THEME_KEY).await.as_deref(),
         read(pool, AUTO_DARK_THEME_KEY).await.as_deref(),
     )
+}
+
+/// "Use the Omarchy font", named for [`weather_enabled`]'s reason:
+/// `font::current` asks it before anything else, and `read_settings` reports
+/// it to the form. Off unless this version wrote `"1"` — `list_mode`'s
+/// polarity, so a stray row keeps the stack the app has always drawn.
+pub(crate) async fn use_omarchy_font(pool: &SqlitePool) -> bool {
+    read(pool, USE_OMARCHY_FONT_KEY).await.as_deref() == Some("1")
 }
 
 /// The window-frame choice (issue #36), named for [`weather_enabled`]'s
@@ -1600,6 +1617,10 @@ pub enum Setting {
     /// the side the app is wearing.
     AutoLightTheme(crate::theme::Appearance),
     AutoDarkTheme(crate::theme::Appearance),
+    /// Nothing for [`apply`] to do: the font is the webview's to draw, so the
+    /// UI asks `get_omarchy_font` again once this is stored, and that answer
+    /// is what changes the screen.
+    UseOmarchyFont(bool),
     /// Applied live; the frame is the compositor's or GTK's to draw.
     WindowFrame(WindowFrame),
     /// Also stored in [`AppState::quit_on_close`], a mirror of the row:
@@ -1802,6 +1823,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             }
             write(pool, AUTO_DARK_THEME_KEY, a.as_str()).await?;
         }
+        S::UseOmarchyFont(on) => write(pool, USE_OMARCHY_FONT_KEY, flag(*on)).await?,
         S::WindowFrame(frame) => write(pool, WINDOW_FRAME_KEY, frame.as_str()).await?,
         S::QuitOnClose(on) => write(pool, QUIT_ON_CLOSE_KEY, flag(*on)).await?,
         // The answer and the fact of having answered, in one write: whatever
@@ -2066,6 +2088,7 @@ mod tests {
         ));
         assert!(matches!(read(json!({"key": "autoLightTheme", "value": "rose-pine-dawn"})), Setting::AutoLightTheme(crate::theme::Appearance::RosePineDawn)));
         assert!(matches!(read(json!({"key": "autoDarkTheme", "value": "tokyo-night"})), Setting::AutoDarkTheme(crate::theme::Appearance::TokyoNight)));
+        assert!(matches!(read(json!({"key": "useOmarchyFont", "value": true})), Setting::UseOmarchyFont(true)));
         // A key this build does not know is an error, not a silent no-op.
         assert!(serde_json::from_value::<Setting>(json!({"key": "noSuchSetting", "value": 1})).is_err());
     }
@@ -3212,6 +3235,26 @@ mod tests {
         assert!(!s.hide_weekends);
         write(&p, HIDE_WEEKENDS_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.hide_weekends, "a stray value must not change the app's face");
+    }
+
+    /// #179: off on a fresh install, as promised on the issue — Omarchy's
+    /// fonts are monospace and cut narrow titles short — on through
+    /// `Setting`, and a stray value keeps the stack the app has always drawn.
+    /// `use_omarchy_font` is asked too, because it is what `font::current`
+    /// reads, and it must not disagree with the form.
+    #[tokio::test]
+    async fn the_omarchy_font_is_opt_in() {
+        let p = pool().await;
+        assert!(!read_settings(&p).await.use_omarchy_font, "off until asked for");
+        assert!(!use_omarchy_font(&p).await);
+        let s = set(&p, Setting::UseOmarchyFont(true)).await.unwrap();
+        assert!(s.use_omarchy_font);
+        assert!(use_omarchy_font(&p).await);
+        assert_eq!(read(&p, USE_OMARCHY_FONT_KEY).await.as_deref(), Some("1"));
+        let s = set(&p, Setting::UseOmarchyFont(false)).await.unwrap();
+        assert!(!s.use_omarchy_font);
+        write(&p, USE_OMARCHY_FONT_KEY, "yes").await.unwrap();
+        assert!(!use_omarchy_font(&p).await, "a stray value changes nothing");
     }
 
     /// The fit switch round-trips through `Setting`, and a fresh install

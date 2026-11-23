@@ -17,6 +17,7 @@ mod errors;
 mod events;
 mod export;
 mod fixtures;
+mod font;
 mod geocode;
 /// Test-only: the golden-file mechanism the UI fixtures read. Gated so nothing
 /// that reads or writes `ui/tests/` is compiled into the shipped app.
@@ -1921,6 +1922,7 @@ pub fn run() {
             settings::get_settings,
             settings::set_setting,
             appearance_previews,
+            font::get_omarchy_font,
             settings::set_display_timezone,
             settings::list_timezones,
             settings::restart_app,

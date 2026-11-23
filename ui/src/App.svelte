@@ -18,6 +18,7 @@
   import { tick, untrack } from 'svelte';
   import { applyPalette, setPalette, type Palette } from './lib/theme';
   import { applyAppearance, observeAppearanceFocus } from './lib/appearance';
+  import { applyOmarchyFont } from './lib/font';
   import {
     getWeek, getDay, getRange, getMonth, getYear, getBigYear, weekStart,
     type WeekPayload, type MonthPayload, type YearPayload, type BigYearPayload, type UiEvent,
@@ -291,6 +292,15 @@
   // the watcher itself never emits there.
   $effect(() => {
     const un = listen<Palette>('theme-changed', (e) => setPalette(e.payload));
+    return () => { un.then((f) => f()); };
+  });
+
+  // The same watcher, for the font (#179): said on every change to the theme
+  // or to fontconfig, whatever the palette did, since `omarchy font set`
+  // moves no theme file. Asked rather than carried, so the backend's one
+  // answer decides, and with the setting off it answers at once.
+  $effect(() => {
+    const un = listen('font-changed', () => { void applyOmarchyFont(); });
     return () => { un.then((f) => f()); };
   });
 
@@ -927,6 +937,17 @@
    *  settings arrive, so the card never flashes for someone who answered. */
   let loginAsked = $state(true);
   let desktop = $state<AppSettings['desktop']>('linux');
+  /** Whether "Use the Omarchy font" was on at the last settings read, so a
+   *  settings change asks for the font only when that switch moved: asking
+   *  runs `fc-match`, and most changes are to something else. Off at
+   *  startup asks nothing at all. What is worn is still the backend's
+   *  answer (`applyOmarchyFont`), whatever this says. */
+  let omarchyFontOn = false;
+  function followOmarchyFont(on: boolean) {
+    if (on === omarchyFontOn) return;
+    omarchyFontOn = on;
+    void applyOmarchyFont();
+  }
 
   /** Whether the keyboard-shortcut sheet is up. A session flag and not a
    *  setting: it is a thing you look at, not a thing you configure. */
@@ -960,6 +981,7 @@
       .then((s) => {
         loginAsked = s.startOnLoginAsked;
         desktop = s.desktop;
+        followOmarchyFont(s.useOmarchyFont);
         combineIdenticalEvents = s.combineIdenticalEvents;
         calendarGroups = s.calendarGroups;
         defaultCalendarId = s.defaultCalendarId;
@@ -2733,6 +2755,7 @@
       setTaskSort(s.taskSort);
       setZoneName(s.effectiveTimezone);
       setTemperatureUnit(s.temperatureUnit);
+      followOmarchyFont(s.useOmarchyFont);
       weekViewChoices += 1;
       applyWeekSettings(s, true);
       // The weather toggle lives in the same modal; refetching on every
@@ -2986,8 +3009,13 @@
      takes what it needs, and the view takes the rest — see each view's own
      `flex: 1` for the other half of it. */
   :global(html), :global(body), :global(#app) { height: 100%; }
+  /* `--omarchy-font` is the Omarchy font and its comma when "Use the Omarchy
+     font" is on (`font.ts`), and unset otherwise. Its fallback is empty, so
+     unset this is exactly the stack it always was; only the family is ever
+     prepended, and the rest stays behind it for any glyph it lacks. Text
+     and the controls that set `font: inherit` follow it from here. */
   :global(body) { background: var(--calendar-canvas, var(--bg)); color: var(--text); margin: 0;
-                  font-family: -apple-system, 'SF Pro Text', Inter, system-ui, sans-serif; }
+                  font-family: var(--omarchy-font,) -apple-system, 'SF Pro Text', Inter, system-ui, sans-serif; }
 
   /* `border-box` is load-bearing: without it the 28px of vertical padding
      lands *outside* the 100%, and the window scrolls by exactly that much.

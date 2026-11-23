@@ -177,6 +177,11 @@ export type Harness = {
   /** What the next `pick_ics_file` answers: a path, or `null` for a chooser
    *  the user dismissed (#180). */
   pickAnswers(path: string | null): void;
+  /** What the stub's fontconfig names as the Omarchy font from now on —
+   *  `omarchy font set`, played. `get_omarchy_font` answers it only while
+   *  the setting is on and the desktop is Omarchy, as the backend does; the
+   *  app hears of it on the next `font-changed`. */
+  setOmarchyFont(name: string | null): void;
   /** Every command the app has invoked, in order. */
   calls: { cmd: string; args: unknown }[];
   /** The values `set_setting` was sent for one key, oldest first — what a
@@ -189,6 +194,10 @@ export type Harness = {
 let exportAnswer: string | null = '/home/u/Documents/Board prep.ics';
 /** What the `pick_ics_file` stub answers; `pickAnswers(...)` sets it. */
 let pickAnswer: string | null = '/home/u/Downloads/webinars.ics';
+/** The stub's `fc-match monospace`; `setOmarchyFont(...)` changes it. A name
+ *  no machine has, so a spec that finds it in a computed `font-family` knows
+ *  it came from here and not from the stack the app already had. */
+let omarchyFont: string | null = 'Fake Mono';
 
 /** What `set_calendar_sync(id, false)` reports removing, absent a forced failure. */
 export const CALENDAR_SYNC_REMOVED = 143;
@@ -280,6 +289,9 @@ const harness: Harness = {
   },
   pickAnswers(path) {
     pickAnswer = path;
+  },
+  setOmarchyFont(name) {
+    omarchyFont = name;
   },
   async emit(event, payload) {
     if (event === 'preferences-requested') preferencesPending = true;
@@ -784,6 +796,7 @@ type StubSettings = {
   appearance: Appearance;
   autoLightTheme: Appearance;
   autoDarkTheme: Appearance;
+  useOmarchyFont: boolean;
   // `WindowFrame | null` on the wire; the stub is Linux-shaped, so a spec
   // that wants the macOS answer seeds `null` explicitly.
   windowFrame: WindowFrame | null;
@@ -893,6 +906,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   // The backend's defaults: Auto wears Daylight and Daylight Dark.
   autoLightTheme: 'daylight',
   autoDarkTheme: 'daylight-dark',
+  // The backend's default (#179): off, so every spec and golden keeps the
+  // stack the app has always drawn.
+  useOmarchyFont: false,
   // The backend's default, Linux-shaped: the row exists (macOS reports none)
   // and follows the desktop.
   windowFrame: 'auto',
@@ -1044,6 +1060,10 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'get_palette':
         return PALETTE;
+      // `font::current`, played: the font only while the setting is on and
+      // the desktop is Omarchy, and nothing otherwise.
+      case 'get_omarchy_font':
+        return settings.useOmarchyFont && settings.desktop === 'omarchy' ? omarchyFont : null;
       // The theme picker's cards (`STUB_PREVIEWS`).
       case 'appearance_previews':
         return STUB_PREVIEWS.map(([appearance, palette]) => ({ appearance, palette }));
