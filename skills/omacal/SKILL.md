@@ -123,8 +123,12 @@ omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
    alone and nobody can be notified; and **`mailsGuests` = false (anything but Google)**,
    where OmaCal emails nobody at all. Neither needs `--notify`.
  - `delete` takes no `--notify`. On Google it tells the guests, or for an
-   own-copy event it removes the event from the user's calendar only and
-   Google tells the organizer they declined. Off Google OmaCal emails nobody.
+   event the user is a guest on it declines it: Google keeps the meeting on
+   their calendar as declined and tells the organizer, and the app hides
+   declined meetings unless the user turned "Show meetings I've declined" on.
+   **`--scope following` on a meeting the user is a guest on is refused**:
+   only the organizer can end a series; use `--scope this` or `all`. Off
+   Google OmaCal emails nobody.
  - **A No on the user's own meeting (`organizer: true`) is refused (exit 2)
    until you say which they meant.** Google emails a guest's No to the
    organizer, so when the organizer says No nobody is told and the meeting

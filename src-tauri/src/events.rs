@@ -2665,6 +2665,14 @@ pub(crate) async fn delete_event_body(
 /// would delete one occurrence of a series the user asked to do something else
 /// with. Then the row, then writability, so a reader calendar is refused before
 /// `load_config`, the Keychain or Google ever see the request.
+/// Refused before anything is sent: a guest's "this and following" would be a
+/// change to the organizer's rule. On their own copy Google ignores it, so the
+/// series came back on the next sync (2026-11-23, a weekly meeting that would
+/// not go away), and where the organizer lets guests modify it would end the
+/// series for everyone, which no delete of a guest's should do. Fixed literal.
+pub(crate) const GUEST_CANNOT_END_SERIES: &str =
+    "Only the organizer can end this series. Remove this event, or all events, from your calendar instead.";
+
 async fn delete_impl(
     state: &AppState,
     id: i64,
@@ -2705,6 +2713,12 @@ async fn delete_impl(
     // shows a Delete control cannot silently refuse the delete it implies.
     // `demo: false` because that half is already handled above, with its own
     // message and before any database access.
+    // Before writability, so the test of it never reaches the credentials
+    // below (see `seeded_pool_on_read_only_cal`), and because it is the more
+    // useful of the two answers to a guest.
+    if scope == "following" && !owns_event(ev.organizer_email.as_deref(), &account_email, &cal_google_id) {
+        anyhow::bail!(GUEST_CANNOT_END_SERIES);
+    }
     if !can_edit(false, &access_role) {
         anyhow::bail!("this calendar is not writable from OmaCal");
     }
@@ -5205,6 +5219,32 @@ mod tests {
     /// A weekly series master as this store holds it: one row whose
     /// `start_utc` is the series DTSTART, shared by every occurrence the grid
     /// expands out of it.
+    /// A guest's "this and following" is refused before anything is sent: it
+    /// would change the organizer's rule, which Google ignores on a guest's
+    /// copy (the series came back on the next sync) and applies to everyone
+    /// where guests may modify it. The organizer's own, and a guest's "all",
+    /// pass this gate (and stop at the read-only calendar's writability check,
+    /// which keeps every arm away from the real credentials).
+    #[tokio::test]
+    async fn a_guest_cannot_end_a_series_with_this_and_following() {
+        for (organizer, scope, refused) in [
+            ("ashish@corp.com", "following", true),
+            ("ashish@corp.com", "all", false),
+            ("ashish@corp.com", "this", false),
+            ("cal@x.com", "following", false),
+        ] {
+            let mut ev = weekly_master("RRULE:FREQ=WEEKLY;BYDAY=MO");
+            ev.organizer_email = Some(organizer.into());
+            let (pool, id) = seeded_pool_on_read_only_cal(&mut ev).await;
+            let err = delete_impl(&state_with(pool, false), id, scope, OCCURRENCE).await.unwrap_err().to_string();
+            if refused {
+                assert_eq!(err, GUEST_CANNOT_END_SERIES, "{organizer} {scope}");
+            } else {
+                assert_eq!(err, "this calendar is not writable from OmaCal", "{organizer} {scope}");
+            }
+        }
+    }
+
     fn weekly_master(rule: &str) -> omacal_store::StoredEvent {
         let mut ev = stored(vec![]);
         ev.google_id = "master1".into();

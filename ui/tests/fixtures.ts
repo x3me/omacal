@@ -3405,6 +3405,21 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       }),
       anchor: ANCHOR, onconfirm: noop, oncancel: noop,
     },
+    // Somebody else's weekly meeting, on Google: a guest's delete is a
+    // decline, and "This and following" would change the organizer's rule
+    // (2026-11-23, a weekly review that kept coming back).
+    'recurring-guest': {
+      detail: detail({
+        id: 24, title: 'Weekly review', can_edit: true, is_recurring: true,
+        recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly',
+        is_organizer: false, organizer_email: 'ashish@corp.com',
+        attendees: [
+          attendee({ email: 'ashish@corp.com', display_name: 'Ashish' }),
+          attendee({ email: 'me@x.com', is_self: true }),
+        ],
+      }),
+      anchor: ANCHOR, onconfirm: noop, oncancel: noop,
+    },
     // Nobody to tell. The guest notice must be absent rather than read
     // "0 guests are told by email", which is both untrue and alarming.
     'no-guests': {

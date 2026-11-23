@@ -923,6 +923,9 @@
    *  same SettingsModal as the menu item. */
   let settingsOpen = $state(false);
   let combineIdenticalEvents = false;
+  /** Whether declined meetings are drawn; the backend leaves them out of the
+   *  payloads otherwise, so a change is a reload. */
+  let showDeclinedEvents = false;
   /** Whether the start-on-login question has been answered. `true` until the
    *  settings arrive, so the card never flashes for someone who answered. */
   let loginAsked = $state(true);
@@ -961,6 +964,7 @@
         loginAsked = s.startOnLoginAsked;
         desktop = s.desktop;
         combineIdenticalEvents = s.combineIdenticalEvents;
+        showDeclinedEvents = s.showDeclinedEvents;
         calendarGroups = s.calendarGroups;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
@@ -2716,8 +2720,9 @@
       applyAppearance(s);
     }}
     onsettingschange={(s) => {
-      if (combineIdenticalEvents !== s.combineIdenticalEvents) {
+      if (combineIdenticalEvents !== s.combineIdenticalEvents || showDeclinedEvents !== s.showDeclinedEvents) {
         combineIdenticalEvents = s.combineIdenticalEvents;
+        showDeclinedEvents = s.showDeclinedEvents;
         void reload();
       }
       calendarGroups = s.calendarGroups;

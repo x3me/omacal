@@ -125,6 +125,9 @@ export type AppSettings = {
    *  which is what makes it survive a restart. */
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  /** Whether a meeting the user declined is drawn, struck through, or left
+   *  out of the views (the default). */
+  showDeclinedEvents: boolean;
   /** The saved calendar groups, in switcher order. Which is active is derived
    *  from what is shown, never stored — see `calendargroups.ts`. */
   calendarGroups: CalendarGroup[];
@@ -366,6 +369,7 @@ export type SettingValues = {
   visibleHoursFit: boolean;
   hideWeekends: boolean;
   combineIdenticalEvents: boolean;
+  showDeclinedEvents: boolean;
   /** The whole list, replaced in one write; refused with a sentence for a
    *  blank, over-long or duplicate name. */
   calendarGroups: CalendarGroup[];
