@@ -121,22 +121,25 @@ export const createTask = (
 
 export const deleteTask = (id: number) => invoke<Task[]>('delete_task_cmd', { id });
 
-/** Edits a task whole: title, due date and note in one write.
+/** Edits a task whole: title, due date, note and priority in one write.
  *
  *  Every field is the complete answer rather than a change to apply, so a
  *  `null` due date clears it. `dueAllDay` is the difference between "by
  *  Thursday" and "by Thursday at 18:00", which is the user's distinction
  *  and not a storage detail — the backend spells the two differently on the
  *  wire. `calendarId` moves the task to that list in the same save; `null`
- *  leaves it where it is. */
+ *  leaves it where it is. `priority` is the raw stored integer, and 0
+ *  clears it, so it has no default: a caller that changes only the due
+ *  date (a drag) passes the task's own value back, and one that forgets
+ *  does not compile rather than clearing the level. */
 export const updateTask = (
   id: number,
   summary: string,
   dueMs: number | null,
   dueAllDay: boolean,
   notes: string | null,
-  calendarId: number | null = null,
-  priority = 0,
+  calendarId: number | null,
+  priority: number,
 ) => invoke<Task[]>('update_task', { id, summary, dueMs, dueAllDay, notes, calendarId, priority });
 
 /** Connects an iCloud or generic CalDAV account. Resolves to the account's

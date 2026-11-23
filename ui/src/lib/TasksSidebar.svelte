@@ -542,11 +542,13 @@
   });
 
   /** The drop: the task is due where it landed, a date on the TASKS row and
-   *  an hour in the grid. It stays on its list, with its title and note. */
+   *  an hour in the grid. It stays on its list, with its title, note and priority. */
   async function dropTask(task: Task, at: TaskLanding) {
     note = null;
     try {
-      setTaskRows(await updateTask(task.id, task.summary, at.dueMs, at.allDay, task.notes));
+      setTaskRows(await updateTask(
+        task.id, task.summary, at.dueMs, at.allDay, task.notes, null, task.priority,
+      ));
       nowMs = Date.now();
     } catch (e) {
       note = String(e);

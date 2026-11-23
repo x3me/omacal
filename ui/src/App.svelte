@@ -469,7 +469,7 @@
       dueMs = at.getTime();
     }
     try {
-      setTaskRows(await updateTask(id, task.summary, dueMs, task.dueAllDay, task.notes));
+      setTaskRows(await updateTask(id, task.summary, dueMs, task.dueAllDay, task.notes, null, task.priority));
     } catch (e) {
       error = String(e);
     }
@@ -481,7 +481,7 @@
     const task = taskRows()?.find((t) => t.id === id);
     if (!task) return;
     try {
-      setTaskRows(await updateTask(id, task.summary, dueMs, false, task.notes));
+      setTaskRows(await updateTask(id, task.summary, dueMs, false, task.notes, null, task.priority));
     } catch (e) {
       error = String(e);
     }
