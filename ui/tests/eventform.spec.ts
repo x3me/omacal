@@ -4,7 +4,8 @@ import type { EventDetail } from '../src/lib/eventdetail';
 import {
   addGuest, blankValue, blankValueAt, duplicatedValue, endAfterStart, isAddress, mailableGuests, pastedValue,
   locationForVideoCall, onlyShowAsChanged, previewSpan, removableGuest, removeGuest, ruleInWords, sameGuests,
-  repeatEndProblem, sameRepeatEnd, sameVideoCall, sameWeeklyDays, shiftedEndDate,
+  repeatEndProblem, repeatIntervalProblem, sameRepeatEnd, sameVideoCall, sameWeeklyDays, shiftedEndDate,
+  takesInterval,
   toEventInput, toggledGuestOptional,
   toggledWeeklyDay, valueFromDetail, videoCallProblem, weekdayCodeForDate, whenOf,
   type EventFormValue,
@@ -181,6 +182,85 @@ test.describe('repeat endings', () => {
     })).toBeNull();
     expect(sameRepeatEnd({ kind: 'after', count: 4 }, { kind: 'after', count: 4 })).toBe(true);
     expect(sameRepeatEnd({ kind: 'after', count: 4 }, { kind: 'after', count: 5 })).toBe(false);
+  });
+});
+
+test.describe('repeat intervals (#181)', () => {
+  /** Every other Tuesday and Thursday, as an edit opens it: the backend's
+   *  four answers read through the real `valueFromDetail`. */
+  const fortnightly = (): EventFormValue => valueFromDetail({
+    ...timedDetail(Date.UTC(2026, 7, 4, 9), Date.UTC(2026, 7, 4, 10)),
+    is_recurring: true,
+    recurrence: 'RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=8',
+    repeat: 'weekly', weekly_days: ['TU', 'TH'], repeat_interval: 2,
+    repeat_end: { kind: 'after', count: 8 },
+  }, Date.UTC(2026, 7, 4, 9), Date.UTC(2026, 7, 4, 10));
+
+  test('an edit reads the interval off the detail', () => {
+    expect(fortnightly().repeatInterval).toBe(2);
+    expect(blankValueAt(Date.UTC(2026, 7, 4, 9), 1).repeatInterval).toBe(1);
+  });
+
+  test('an ending-only or days-only edit of a fortnightly series re-sends the interval', () => {
+    const initial = fortnightly();
+    const ending = { ...initial, repeatEnd: { kind: 'after' as const, count: 10 } };
+    expect(toEventInput(ending, initial, TZ)).toMatchObject({
+      repeat: 'weekly', repeatInterval: 2, weeklyDays: ['TU', 'TH'],
+      repeatEnd: { kind: 'after', count: 10 },
+    });
+    const days: EventFormValue = { ...initial, weeklyDays: ['TU', 'TH', 'FR'] };
+    expect(toEventInput(days, initial, TZ)).toMatchObject({ repeat: 'weekly', repeatInterval: 2 });
+  });
+
+  test('an interval-only edit is a repeat change; an untouched one sends nothing', () => {
+    const initial = fortnightly();
+    expect(toEventInput(initial, initial, TZ).repeat).toBeUndefined();
+    expect(toEventInput(initial, initial, TZ).repeatInterval).toBeUndefined();
+    const every3 = { ...initial, repeatInterval: 3 };
+    expect(toEventInput(every3, initial, TZ)).toMatchObject({
+      repeat: 'weekly', repeatInterval: 3, weeklyDays: ['TU', 'TH'],
+      repeatEnd: { kind: 'after', count: 8 },
+    });
+    // Back to every week: the rule is re-sent, and one is said by absence.
+    const weekly = toEventInput({ ...initial, repeatInterval: 1 }, initial, TZ);
+    expect(weekly.repeat).toBe('weekly');
+    expect('repeatInterval' in weekly).toBe(false);
+  });
+
+  test('a hidden interval never travels beside a cadence that takes none', () => {
+    const initial = fortnightly();
+    for (const repeat of ['weekdays', 'never']) {
+      const sent = toEventInput({ ...initial, repeat }, initial, TZ);
+      expect(sent.repeat, repeat).toBe(repeat);
+      expect('repeatInterval' in sent, repeat).toBe(false);
+    }
+    // And a changed number under one of them is not a change at all.
+    const weekdays = { ...initial, repeat: 'weekdays' };
+    expect(toEventInput({ ...weekdays, repeatInterval: 5 }, weekdays, TZ).repeat).toBeUndefined();
+  });
+
+  test('a create sends the interval above one, and nothing for one', () => {
+    const blank = blankValueAt(Date.UTC(2026, 7, 4, 9), 1);
+    expect(toEventInput({ ...blank, repeat: 'daily', repeatInterval: 3 }, blank, TZ))
+      .toMatchObject({ repeat: 'daily', repeatInterval: 3 });
+    expect('repeatInterval' in toEventInput({ ...blank, repeat: 'monthly' }, blank, TZ)).toBe(false);
+  });
+
+  test('an interval the backend would refuse is named first', () => {
+    const value = (repeatInterval: number, repeat = 'weekly') => ({ ...fortnightly(), repeat, repeatInterval });
+    for (const bad of [0, -1, 1.5, 1000, Number.NaN, null as unknown as number]) {
+      expect(repeatIntervalProblem(value(bad)), String(bad))
+        .toBe('Repeat every must be a whole number from 1 to 999.');
+    }
+    for (const fine of [1, 2, 999]) expect(repeatIntervalProblem(value(fine)), String(fine)).toBeNull();
+    // Hidden under a cadence that takes none, it is nothing to refuse.
+    expect(repeatIntervalProblem(value(0, 'weekdays'))).toBeNull();
+    expect(repeatIntervalProblem(value(0, 'never'))).toBeNull();
+  });
+
+  test('the four cadences take an interval and nothing else does', () => {
+    expect(['daily', 'weekly', 'monthly', 'yearly'].every(takesInterval)).toBe(true);
+    expect(['never', 'weekdays', 'custom', 'constructor', 'toString'].some(takesInterval)).toBe(false);
   });
 });
 
@@ -627,6 +707,7 @@ const timedDetail = (startMs: number, endMs: number): EventDetail => ({
   conference_uri: null, start_ms: startMs, end_ms: endMs,
   start_date: null, end_date: null, is_all_day: false,
   is_recurring: false, is_series_exception: false, recurrence: null, repeat: 'never', weekly_days: [],
+  repeat_interval: 1,
   repeat_end: { kind: 'never' }, color: null,
   organizer_email: null, self_response: null, can_respond: true, can_edit: true, is_organizer: true, guests_can_modify: false,
   transparency: 'opaque', visibility: 'default', mails_guests: true,

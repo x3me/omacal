@@ -13,12 +13,12 @@
 //!
 //! - A **repeat rule the app cannot express** is not downgraded to a single
 //!   event. `write::EventInput` carries the form's vocabulary — daily,
-//!   weekdays, weekly on chosen days, monthly, yearly, ending never, on a
-//!   date or after N times — rather than an RRULE, deliberately (see its doc
-//!   comment), so a rule outside that set (an INTERVAL, a monthly BYDAY, an
-//!   EXDATE) has no honest representation here. Importing the first
-//!   occurrence and calling it the series would be a lie about the user's
-//!   data.
+//!   weekdays, weekly on chosen days, monthly, yearly, every N of those,
+//!   ending never, on a date or after N times — rather than an RRULE,
+//!   deliberately (see its doc comment), so a rule outside that set (a
+//!   monthly BYDAY, a WKST, an EXDATE) has no honest representation here.
+//!   Importing the first occurrence and calling it the series would be a lie
+//!   about the user's data.
 //! - **Guests are never imported.** A create carries its guest list to the
 //!   server, and a server invites the people on it. Importing a colleague's
 //!   exported year would email everyone they ever met, about meetings that
@@ -49,8 +49,8 @@ pub enum Planned {
         /// For an all-day event, its date (`yyyy-mm-dd`) as the file states
         /// it, which the preview names. `None` when timed.
         date: Option<String>,
-        /// The repeat as the preview words it ("weekly on Mon, Wed, 10
-        /// times"), when the file carried one at all: the whole rule, end
+        /// The repeat as the preview words it ("every 2 weeks on Tue, Thu,
+        /// 10 times"), when the file carried one at all: the whole rule, end
         /// included, so the preview shows what will be stored.
         repeat: Option<String>,
         /// How many guests the file listed and this import will not carry.
@@ -84,10 +84,11 @@ pub const SKIP_AN_OCCURRENCE: &str = "an exception to a series, which cannot be 
 /// occurrences, and `None` for anything else, which the plan skips.
 ///
 /// The grammar is the form's own reader's (`write::recurrence_controls_from_
-/// rrule`): one of its cadences, weekly days, and one COUNT or UNTIL, parts
-/// in any order. Until #181 this was a five-entry table of bare cadences, so
-/// a file with "ends after 10 times" or "Mondays and Wednesdays" was skipped
-/// although the form makes exactly those rules.
+/// rrule`): one of its cadences, an interval, weekly days, and one COUNT or
+/// UNTIL, parts in any order. Until #181 this was a five-entry table of bare
+/// cadences, so a file with "ends after 10 times" or "Mondays and Wednesdays"
+/// was skipped although the form makes exactly those rules; until the form
+/// took an interval, so was every fortnightly meeting.
 ///
 /// **An UNTIL is moved, never stretched.** The form writes "ends on D" as the
 /// end of day D in the calendar's zone, while a file's UNTIL can stop earlier
@@ -148,10 +149,20 @@ fn recurrence_for(
 }
 
 /// The preview's words for a rule [`recurrence_for`] accepted: the cadence,
-/// the days a weekly rule names, and how it ends.
+/// how far apart, the days a weekly rule names, and how it ends.
 fn repeat_words(c: &crate::write::RecurrenceControls) -> String {
     use crate::write::RepeatEnd;
-    let mut words = c.repeat.clone();
+    // "every 2 weeks", in the unit the cadence counts in. The reader answers
+    // an interval above one only for the four cadences that have a unit.
+    let unit = match c.repeat.as_str() {
+        "daily" => "days", "weekly" => "weeks", "monthly" => "months", "yearly" => "years",
+        _ => "",
+    };
+    let mut words = if c.interval > 1 && !unit.is_empty() {
+        format!("every {} {unit}", c.interval)
+    } else {
+        c.repeat.clone()
+    };
     if c.repeat == "weekly" && !c.weekly_days.is_empty() {
         let names: Vec<&str> = c
             .weekly_days
@@ -253,6 +264,11 @@ pub(crate) fn input_for(ev: &ics::CalEvent, cal_tz: &str) -> Option<crate::write
         when,
         tz: cal_tz.to_string(),
         repeat: controls.as_ref().map(|c| c.repeat.clone()),
+        // The file's own interval, or the series written is not the file's:
+        // FREQ=WEEKLY;INTERVAL=2 imported as "weekly" puts every fortnightly
+        // meeting in it on the calendar twice as often. One goes as absent,
+        // which is how the form says "every".
+        repeat_interval: controls.as_ref().map(|c| c.interval).filter(|n| *n > 1),
         // Only a weekly rule names its days; "weekdays" is a cadence of its own.
         weekly_days: controls
             .as_ref()
@@ -370,6 +386,12 @@ mod tests {
             ("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6", "weekly", vec!["MO", "WE"], RepeatEnd::After { count: 6 }, "weekly on Mon, Wed, 6 times"),
             ("freq=monthly;until=20261231T235959Z", "monthly", vec![],
              RepeatEnd::On { date: "2026-12-31".into() }, "monthly, until 2026-12-31"),
+            ("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH", "weekly", vec!["TU", "TH"], RepeatEnd::Never,
+             "every 2 weeks on Tue, Thu"),
+            ("FREQ=DAILY;INTERVAL=3", "daily", vec![], RepeatEnd::Never, "every 3 days"),
+            ("INTERVAL=6;FREQ=MONTHLY;COUNT=4", "monthly", vec![], RepeatEnd::After { count: 4 },
+             "every 6 months, 4 times"),
+            ("FREQ=YEARLY;INTERVAL=1", "yearly", vec![], RepeatEnd::Never, "yearly"),
         ] {
             let c = controls(rule, at, "UTC").unwrap_or_else(|| panic!("{rule} refused")).expect("a rule");
             assert_eq!(c.repeat, repeat, "{rule}");
@@ -378,7 +400,8 @@ mod tests {
             assert_eq!(repeat_words(&c), words, "{rule}");
         }
         for rule in [
-            "FREQ=WEEKLY;INTERVAL=2",
+            "FREQ=WEEKLY;INTERVAL=0",
+            "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;WKST=SU",
             "FREQ=MONTHLY;BYDAY=3TH",
             "FREQ=HOURLY",
             "FREQ=DAILY;COUNT=10;UNTIL=20261231T000000Z",
@@ -443,6 +466,30 @@ mod tests {
         let (end, rule) = written("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6", "20260907T090000Z", "UTC");
         assert_eq!(end, Some(RepeatEnd::After { count: 6 }));
         assert_eq!(rule, "RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6");
+    }
+
+    /// **The fortnightly meeting comes in as itself** (#181): planned for
+    /// import rather than skipped, described with its interval, and written
+    /// with it. The last half is the one that matters: a plan that said
+    /// "every 2 weeks" over a create that wrote `FREQ=WEEKLY` would put the
+    /// meeting on the calendar twice as often as the file did, under a
+    /// preview that promised otherwise. Checked through `fields_from_input`,
+    /// the rule the create will actually send, not the controls alone.
+    #[test]
+    fn a_fortnightly_meeting_is_imported_with_its_interval() {
+        let src = ics_with(
+            "BEGIN:VEVENT\r\nUID:fn@x\r\nSUMMARY:Sprint review\r\n\
+             DTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\n\
+             RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=6\r\nEND:VEVENT\r\n",
+        );
+        let plan = plan(&src, "UTC", &[]).unwrap();
+        let Planned::Import { repeat, .. } = &plan[0] else { panic!("skipped: {:?}", plan[0]) };
+        assert_eq!(repeat.as_deref(), Some("every 2 weeks on Tue, Thu, 6 times"));
+
+        let input = input_for(&only_event(&src), "UTC").expect("imported");
+        assert_eq!(input.repeat_interval, Some(2));
+        let rule = crate::write::fields_from_input(input).unwrap().recurrence.flatten();
+        assert_eq!(rule.as_deref(), Some("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=6"));
     }
 
     #[test]
