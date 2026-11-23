@@ -4228,14 +4228,39 @@ test.describe('App', () => {
 
     await expect(confirmPanel(page)).toBeVisible();
     await expect(confirmPanel(page).getByTestId('delete-own-copy-notice'))
-      .toContainText('off your calendar only');
+      .toContainText('removing it declines it');
     await expect(confirmPanel(page).getByTestId('delete-own-copy-notice'))
-      .toContainText('tells ana@x.com you declined');
+      .toContainText('Google tells ana@x.com');
     await expect(confirmPanel(page).getByTestId('delete-guest-notice')).toHaveCount(0);
     await expect(confirmPanel(page).getByRole('button', { name: 'Delete' })).toHaveCount(0);
     await confirmPanel(page).getByRole('button', { name: 'Remove from my calendar' }).click();
 
     await expect.poll(() => callsTo(page, 'delete_event_cmd')).toHaveLength(1);
+  });
+
+  /** Declined meetings are hidden until asked for, since a guest's "Remove
+   *  from my calendar" is a decline on Google (2026-11-23). The switch saves,
+   *  reloads the calendar (the backend leaves them out of the payloads), and
+   *  survives reopening Settings. */
+  test('"Show meetings I\'ve declined" is off until turned on, and reloads the calendar', async ({ page }) => {
+    await page.goto(app('writable'));
+    const openAppearance = async () => {
+      await page.getByRole('button', { name: 'Menu', exact: true }).click();
+      await page.getByRole('button', { name: 'Settings…', exact: true }).click();
+      await page.getByRole('tab', { name: 'Appearance', exact: true }).click();
+    };
+    await openAppearance();
+    const toggle = page.getByRole('checkbox', { name: "Show meetings I've declined", exact: true });
+    await expect(toggle).not.toBeChecked();
+    const reads = () => page.evaluate(() => window.__harness.calls.filter((c) => ['get_week', 'get_range', 'get_day'].includes(c.cmd)).length);
+    const before = await reads();
+    await toggle.check();
+    await expect.poll(reads).toBeGreaterThan(before);
+    await page.keyboard.press('Escape');
+    await openAppearance();
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect.poll(() => page.evaluate(() => window.__harness.settingValues('showDeclinedEvents'))).toEqual([true, false]);
   });
 
   test('a non-recurring event offers no scope choice', async ({ page }) => {

@@ -180,6 +180,34 @@ pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
 /// must stop expanding into that slot — otherwise a moved instance renders
 /// twice (once at its new time, once as a ghost at the old one) and a deleted
 /// one never disappears at all.
+/// The events a view draws when declined meetings are hidden (the default;
+/// see `settings::show_declined_events`).
+///
+/// A whole event the user declined is left out, and a series master they
+/// declined takes every occurrence with it. A declined *occurrence* is kept
+/// as a cancelled one instead of dropped: its row is what stops the master
+/// expanding that slot ([`suppressed_slots`]), so dropping it would bring the
+/// occurrence back, undeclined. An occurrence the user accepted on a series
+/// they declined is its own row, and stays.
+///
+/// On Google a guest cannot remove somebody else's meeting, only decline it
+/// ("Remove from my calendar" deletes the guest's copy, and Google keeps it as
+/// declined), so this is what makes that removal visible (2026-11-23).
+pub fn without_declined(events: Vec<StoredEvent>) -> Vec<StoredEvent> {
+    events
+        .into_iter()
+        .filter_map(|mut e| {
+            if e.self_response.as_deref() != Some("declined") {
+                return Some(e);
+            }
+            e.recurring_event_id.is_some().then(|| {
+                e.status = "cancelled".into();
+                e
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn suppressed_slots(events: &[StoredEvent]) -> HashSet<(i64, &str, i64)> {
     events
         .iter()
@@ -1272,6 +1300,44 @@ mod tests {
         // Every other day keeps its ordinary occurrence.
         let total: usize = w.days.iter().map(|d| d.events.len()).sum();
         assert_eq!(total, 7);
+    }
+
+    /// Meetings the user declined stay out of the views unless asked for
+    /// (`settings::show_declined_events`). On Google a guest's "Remove from my
+    /// calendar" is a decline, and the meeting came back struck through on the
+    /// next sync, looking undeleted (2026-11-23).
+    #[test]
+    fn a_declined_meeting_is_left_out_and_its_slot_stays_empty() {
+        const H: i64 = 3_600_000;
+        let declined = |mut e: omacal_store::StoredEvent| { e.self_response = Some("declined".into()); e };
+        let exception = |gid: &str, day: i64, resp: &str| {
+            let mut e = ev(gid, MON + day * DAY + 9 * H, MON + day * DAY + 10 * H, false);
+            e.recurring_event_id = Some("standup".into());
+            e.original_start_utc = Some(MON + day * DAY + 9 * H);
+            e.self_response = Some(resp.into());
+            e
+        };
+
+        // A declined occurrence of an accepted series: its day is empty, not
+        // given back to the master as if never declined.
+        let w = assemble_week(&without_declined(vec![daily_master(), exception("standup_wed", 2, "declined")]), MON, "UTC");
+        assert!(w.days[2].events.is_empty(), "Wednesday's declined occurrence is hidden, with no ghost");
+        assert_eq!(w.days.iter().map(|d| d.events.len()).sum::<usize>(), 6);
+
+        // A declined series takes every occurrence with it, except one the
+        // user accepted on its own.
+        let w = assemble_week(&without_declined(vec![declined(daily_master()), exception("standup_thu", 3, "accepted")]), MON, "UTC");
+        assert_eq!(w.days.iter().map(|d| d.events.len()).sum::<usize>(), 1, "only Thursday's accepted occurrence");
+        assert_eq!(w.days[3].events.len(), 1);
+
+        // A declined one-off is gone; tentative and unanswered ones stay.
+        let one_off = declined(ev("lunch", MON + 12 * H, MON + 13 * H, false));
+        let mut maybe = ev("review", MON + 15 * H, MON + 16 * H, false);
+        maybe.self_response = Some("tentative".into());
+        let mut unanswered = ev("sync", MON + 16 * H, MON + 17 * H, false);
+        unanswered.self_response = Some("needsAction".into());
+        let kept: Vec<_> = without_declined(vec![one_off, maybe, unanswered]).into_iter().map(|e| e.google_id).collect();
+        assert_eq!(kept, ["review", "sync"]);
     }
 
     /// A deleted instance: Google sends a cancelled exception. It is stored,

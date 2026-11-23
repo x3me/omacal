@@ -104,6 +104,9 @@ const SAFE_EXACT: &[&str] = &[
     // reads as "the create failed", and the natural response to that mails
     // every guest a second invitation.
     crate::events::CREATED_NOT_STORED,
+    // src-tauri/src/events.rs — `GUEST_CANNOT_END_SERIES`, a guest's "this and
+    // following" refused before anything is sent. Fixed literal.
+    crate::events::GUEST_CANNOT_END_SERIES,
     // src-tauri/src/events.rs — `SAVED_NOT_STORED`, the same rule for an edit,
     // move or delete: raised by `caldav_write` only after the server's write
     // succeeded. Fixed literal. Swallowed, it reads as a refusal and the UI
@@ -638,6 +641,7 @@ mod tests {
             crate::events::MOVE_ONE_OCCURRENCE,
             crate::events::MOVE_ACROSS_ACCOUNTS,
             crate::events::MOVED_NOT_REMOVED,
+            crate::events::GUEST_CANNOT_END_SERIES,
             // Checked against the same rule: a fixed literal `bail!`ed by
             // `create_impl` and `move_target` before any request is built.
             crate::events::NOT_AN_EVENT_CALENDAR,

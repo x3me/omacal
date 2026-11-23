@@ -177,6 +177,11 @@ export type Harness = {
   /** What the next `pick_ics_file` answers: a path, or `null` for a chooser
    *  the user dismissed (#180). */
   pickAnswers(path: string | null): void;
+  /** What the stub's fontconfig names as the Omarchy font from now on —
+   *  `omarchy font set`, played. `get_omarchy_font` answers it only while
+   *  the setting is on and the desktop is Omarchy, as the backend does; the
+   *  app hears of it on the next `font-changed`. */
+  setOmarchyFont(name: string | null): void;
   /** Every command the app has invoked, in order. */
   calls: { cmd: string; args: unknown }[];
   /** The values `set_setting` was sent for one key, oldest first — what a
@@ -189,6 +194,10 @@ export type Harness = {
 let exportAnswer: string | null = '/home/u/Documents/Board prep.ics';
 /** What the `pick_ics_file` stub answers; `pickAnswers(...)` sets it. */
 let pickAnswer: string | null = '/home/u/Downloads/webinars.ics';
+/** The stub's `fc-match monospace`; `setOmarchyFont(...)` changes it. A name
+ *  no machine has, so a spec that finds it in a computed `font-family` knows
+ *  it came from here and not from the stack the app already had. */
+let omarchyFont: string | null = 'Fake Mono';
 
 /** What `set_calendar_sync(id, false)` reports removing, absent a forced failure. */
 export const CALENDAR_SYNC_REMOVED = 143;
@@ -199,7 +208,7 @@ export const CALENDAR_SYNC_REMOVED = 143;
 const RESPOND_STUB_DETAIL = {
   id: 0, title: null, description: null, location: null, conference_uri: null,
   start_ms: 0, end_ms: 0, is_all_day: false, is_recurring: false, color: null,
-  recurrence: null, repeat: 'never', weekly_days: [], repeat_end: { kind: 'never' },
+  recurrence: null, repeat: 'never', weekly_days: [], repeat_interval: 1, repeat_end: { kind: 'never' },
   organizer_email: null, self_response: null, can_respond: true, can_edit: false,
   attendees: [],
 };
@@ -280,6 +289,9 @@ const harness: Harness = {
   },
   pickAnswers(path) {
     pickAnswer = path;
+  },
+  setOmarchyFont(name) {
+    omarchyFont = name;
   },
   async emit(event, payload) {
     if (event === 'preferences-requested') preferencesPending = true;
@@ -498,6 +510,20 @@ function statusFor(scenario: string): AppStatus {
         update: { version: '0.2.0', url: 'https://github.com/x3me/omacal/releases/tag/v0.2.0' },
         last_sync_ms: APP_FIVE_MIN_AGO, demo: false, overlay_titlebar: false, self_update: false,
       };
+    // A CalDAV install whose iCloud password the server rejected, beside a
+    // generic CalDAV account: what the Header's `caldavreauth` props show,
+    // and the rows `list_accounts` answers with (`account_rows`), carrying
+    // what the Reconnect form fills in.
+    case 'caldavreauth':
+      return {
+        accounts: ['me@icloud.com', 'ana'], caldav_reauth: ['me@icloud.com'], needs_reauth: [], update: null,
+        system_tz_change: null, version: '9.9.9', last_sync_ms: APP_FIVE_MIN_AGO, demo: false,
+        overlay_titlebar: false, self_update: false,
+        account_rows: [
+          { id: 1, email: 'me@icloud.com', provider: 'caldav', serverUrl: 'https://caldav.icloud.com/', username: null, needsReconnect: true },
+          { id: 2, email: 'ana', provider: 'caldav', serverUrl: 'https://dav.example.com/', username: 'ana-login', needsReconnect: false },
+        ],
+      } as AppStatus;
     // A connected account the backend has stopped syncing: a dead refresh
     // token, discovered by a sync, waiting on a re-consent.
     case 'needs-reauth':
@@ -730,6 +756,7 @@ type StubSettings = {
   historySpan: HistorySpan;
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  showDeclinedEvents: boolean;
   calendarGroups: { name: string; calendarIds: number[] }[];
   showDate: boolean;
   menubarDayView?: boolean;
@@ -785,6 +812,7 @@ type StubSettings = {
   appearance: Appearance;
   autoLightTheme: Appearance;
   autoDarkTheme: Appearance;
+  useOmarchyFont: boolean;
   // `WindowFrame | null` on the wire; the stub is Linux-shaped, so a spec
   // that wants the macOS answer seeds `null` explicitly.
   windowFrame: WindowFrame | null;
@@ -830,6 +858,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   transparentWindow: true,
   listMode: false,
   combineIdenticalEvents: false,
+  showDeclinedEvents: false,
   calendarGroups: [],
   // The mark, which is what the tray has always worn.
   showDate: false,
@@ -897,6 +926,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   // The backend's defaults: Auto wears Daylight and Daylight Dark.
   autoLightTheme: 'daylight',
   autoDarkTheme: 'daylight-dark',
+  // The backend's default (#179): off, so every spec and golden keeps the
+  // stack the app has always drawn.
+  useOmarchyFont: false,
   // The backend's default, Linux-shaped: the row exists (macOS reports none)
   // and follows the desktop.
   windowFrame: 'auto',
@@ -1048,6 +1080,10 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'get_palette':
         return PALETTE;
+      // `font::current`, played: the font only while the setting is on and
+      // the desktop is Omarchy, and nothing otherwise.
+      case 'get_omarchy_font':
+        return settings.useOmarchyFont && settings.desktop === 'omarchy' ? omarchyFont : null;
       // The theme picker's cards (`STUB_PREVIEWS`).
       case 'appearance_previews':
         return STUB_PREVIEWS.map(([appearance, palette]) => ({ appearance, palette }));
@@ -1093,12 +1129,17 @@ export function installTauriStub(scenario: string): Harness {
         }
         return null;
       }
-      case 'list_accounts':
-        // The richer per-account shape the Accounts tab fetches: the same
-        // emails the scenario's status carries, as Google accounts.
+      case 'list_accounts': {
+        // The richer per-account shape the Accounts tab fetches: a scenario's
+        // own rows when it gives them (CalDAV accounts, with what Reconnect
+        // fills in), otherwise the same emails its status carries, as Google
+        // accounts.
+        const rows = (status as { account_rows?: unknown[] }).account_rows;
+        if (rows) return rows;
         return (status as { accounts: string[] }).accounts.map((email, i) => ({
           id: i + 1, email, provider: 'google',
         }));
+      }
       case 'sign_out':
         // Signing out the only fixture account leaves none.
         return [];

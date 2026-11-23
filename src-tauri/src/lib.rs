@@ -17,6 +17,7 @@ mod errors;
 mod events;
 mod export;
 mod fixtures;
+mod font;
 mod geocode;
 /// Test-only: the golden-file mechanism the UI fixtures read. Gated so nothing
 /// that reads or writes `ui/tests/` is compiled into the shipped app.
@@ -341,6 +342,7 @@ async fn get_days_impl(
     )
     .await
     .map_err(|e| e.to_string())?;
+    let events = settings::shown_events(pool, events).await;
     Ok(if settings::combine_identical_events(pool).await {
         commands::assemble_days_combining(&events, start_ms, n, &tz, true)
     } else if n == 7 {
@@ -374,6 +376,7 @@ async fn get_month(
     )
     .await
     .map_err(|e| e.to_string())?;
+    let events = settings::shown_events(&state.pool, events).await;
     Ok(if settings::combine_identical_events(&state.pool).await {
         commands::assemble_month_combining(&events, year, month, &tz, week_start, true)
     } else { commands::assemble_month(&events, year, month, &tz, week_start) })
@@ -399,6 +402,7 @@ async fn get_year(
     )
     .await
     .map_err(|e| e.to_string())?;
+    let events = settings::shown_events(&state.pool, events).await;
     let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
     Ok(commands::assemble_year_with(&events, year, now_ms(), &tz, week_start, months))
 }
@@ -436,6 +440,7 @@ async fn get_big_year_impl(
     )
     .await
     .map_err(|e| e.to_string())?;
+    let events = settings::shown_events(pool, events).await;
     Ok(if settings::combine_identical_events(pool).await {
         commands::assemble_big_year_combining(&events, year, now, tz, week_start, true, history_months)
     } else {
@@ -1936,6 +1941,7 @@ pub fn run() {
             settings::get_settings,
             settings::set_setting,
             appearance_previews,
+            font::get_omarchy_font,
             settings::set_display_timezone,
             settings::list_timezones,
             settings::restart_app,
@@ -2386,6 +2392,32 @@ mod tests {
         let entry = include_str!("../../packaging/linux/omacal.desktop");
         let categories: Vec<&str> = entry.lines().filter(|l| l.starts_with("Categories=")).collect();
         assert_eq!(categories, ["Categories=Office;Calendar;"]);
+    }
+
+    /// The week the grid asks for leaves out a meeting the user declined, and
+    /// brings it back once "Show meetings I've declined" is on: the views read
+    /// through `settings::shown_events`, not around it.
+    #[tokio::test]
+    async fn the_week_leaves_out_a_declined_meeting_until_asked_for() {
+        const DAY: i64 = 24 * 3_600_000;
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                     VALUES (1, 'cal@x.com', 'Cal', 'UTC', 'owner')")
+            .execute(&pool).await.unwrap();
+        let noon = 1_786_363_200_000; // Mon 10 Aug 2026 12:00Z
+        sqlx::query("INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc, start_tz, end_tz,
+                                         updated_at, status, self_response)
+                     VALUES (1, 'review', 'Weekly review', ?1, ?2, 'UTC', 'UTC', 0, 'confirmed', 'declined')")
+            .bind(noon).bind(noon + 3_600_000).execute(&pool).await.unwrap();
+        let count = |w: commands::WeekPayload| w.days.iter().map(|d| d.events.len()).sum::<usize>();
+
+        let week = get_days_impl(&pool, noon - 3 * DAY, 7, 0).await.unwrap();
+        assert_eq!(count(week), 0, "declined, so not drawn");
+        settings::store(&pool, &settings::Setting::ShowDeclinedEvents(true)).await.unwrap();
+        let week = get_days_impl(&pool, noon - 3 * DAY, 7, 0).await.unwrap();
+        assert_eq!(count(week), 1, "asked for, so drawn (struck through)");
     }
 
     #[tokio::test]

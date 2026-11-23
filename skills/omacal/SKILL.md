@@ -102,6 +102,8 @@ omacal events create --title "Gym" --date 2026-09-14 --start 20:00 --end 21:30 \
        --repeat weekly --days MO,TU,TH,FR --json    # one series, four days a week
 omacal events create --title "Standup" --date 2026-09-14 --start 09:00 --end 09:15 \
        --repeat weekdays --until 2026-12-19 --json
+omacal events create --title "Sprint review" --date 2026-09-15 --start 10:00 --end 11:00 \
+       --repeat weekly --every 2 --days TU,TH --json   # fortnightly (v6.8+)
 omacal events create --title "Coffee" --date 2026-09-01 --start 14:00 --end 14:45 \
        --guest a@b --notify all --meet --json    # with a Google Meet link
 omacal events update 41 --occurrence 1786352400000 --start 10:00 --end 10:30 --json
@@ -123,8 +125,12 @@ omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
    alone and nobody can be notified; and **`mailsGuests` = false (anything but Google)**,
    where OmaCal emails nobody at all. Neither needs `--notify`.
  - `delete` takes no `--notify`. On Google it tells the guests, or for an
-   own-copy event it removes the event from the user's calendar only and
-   Google tells the organizer they declined. Off Google OmaCal emails nobody.
+   event the user is a guest on it declines it: Google keeps the meeting on
+   their calendar as declined and tells the organizer, and the app hides
+   declined meetings unless the user turned "Show meetings I've declined" on.
+   **`--scope following` on a meeting the user is a guest on is refused**:
+   only the organizer can end a series; use `--scope this` or `all`. Off
+   Google OmaCal emails nobody.
  - **A No on the user's own meeting (`organizer: true`) is refused (exit 2)
    until you say which they meant.** Google emails a guest's No to the
    organizer, so when the organizer says No nobody is told and the meeting
@@ -144,6 +150,14 @@ omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
   `--until YYYY-MM-DD` and `--count N` are the two endings — pass one, or
   neither for an unbounded series. Without `--repeat` a create makes a
   single event, as before.
+- **`--every N` (v6.8+) spaces the repeats out** — "every other week",
+  "fortnightly", "every 3 days", "every 6 months" is `--repeat
+  weekly|daily|monthly --every N`, never a weekly series the user then
+  trims. It goes with `daily`, `weekly`, `monthly` and `yearly`, N from 1 to
+  999, and combines with `--days` and either ending: `--count 6` is six
+  occurrences, not six fortnights. It is refused (exit 2) on `weekdays`; for
+  every other week Monday to Friday pass `--repeat weekly --days
+  MO,TU,WE,TH,FR --every 2`.
 - **Changing an existing event's repeat is not in the CLI** — `events
   update` moves and retitles occurrences, it does not turn a single event
   into a series or edit a cadence. Send the user to the app's form.

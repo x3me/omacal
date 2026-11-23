@@ -142,6 +142,9 @@ export type AppSettings = {
    *  which is what makes it survive a restart. */
   listMode: boolean;
   combineIdenticalEvents: boolean;
+  /** Whether a meeting the user declined is drawn, struck through, or left
+   *  out of the views (the default). */
+  showDeclinedEvents: boolean;
   /** The saved calendar groups, in switcher order. Which is active is derived
    *  from what is shown, never stored — see `calendargroups.ts`. */
   calendarGroups: CalendarGroup[];
@@ -253,6 +256,13 @@ export type AppSettings = {
    *  their side that its picker offers. */
   autoLightTheme: Appearance;
   autoDarkTheme: Appearance;
+  /** Whether the interface is drawn in the Omarchy font, the monospace
+   *  family `omarchy font set` chose (#179). Off by default: monospace is
+   *  wider, so a title in a narrow event block cuts off sooner. Offered on
+   *  Omarchy only. The family itself is not here: it is asked for apart
+   *  (`font.ts`), because reading it runs `fc-match` and these settings are
+   *  read far more often than the font changes. */
+  useOmarchyFont: boolean;
   /** Whether the window draws a title bar, or `null` where the choice is not
    *  omacal's — macOS, whose overlay title bar *is* the frame. The modal
    *  shows the row only when there is an answer, so this is the one place
@@ -347,6 +357,8 @@ export type SettingValues = {
   appearance: Appearance;
   autoLightTheme: Appearance;
   autoDarkTheme: Appearance;
+  /** Stored only: the UI asks for the font again once this lands. */
+  useOmarchyFont: boolean;
   windowFrame: WindowFrame;
   quitOnClose: boolean;
   startOnLogin: StartOnLogin;
@@ -385,6 +397,7 @@ export type SettingValues = {
   visibleHoursFit: boolean;
   hideWeekends: boolean;
   combineIdenticalEvents: boolean;
+  showDeclinedEvents: boolean;
   /** The whole list, replaced in one write; refused with a sentence for a
    *  blank, over-long or duplicate name. */
   calendarGroups: CalendarGroup[];

@@ -358,6 +358,34 @@ mod tests {
         );
     }
 
+    /// The form writes "every 2 weeks on Tue, Thu" as
+    /// `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH` (#181), and this is what it has
+    /// to look like on the grid: both days of the first week, nothing the
+    /// week after, both days again the week after that. A timed series and
+    /// two days, because the all-day fortnightly test below (#44) has one
+    /// day a fortnight and cannot tell an interval that applies to the week
+    /// from one that applies to each day. Five weeks, so a skipped week has
+    /// to be skipped twice.
+    #[test]
+    fn a_fortnightly_two_day_pattern_skips_every_other_week() {
+        let tue = MON_0900_SOFIA + DAY;
+        let s = Series {
+            dtstart_ms: tue, dtstart_tz: "Europe/Sofia",
+            duration_ms: 60 * 60_000, is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH"]),
+        };
+        let starts: Vec<i64> = expand(&s, tue - HOUR, tue + 34 * DAY, 50)
+            .unwrap()
+            .intervals
+            .iter()
+            .map(|i| i.start_ms)
+            .collect();
+        assert_eq!(
+            starts,
+            [tue, tue + 2 * DAY, tue + 14 * DAY, tue + 16 * DAY, tue + 28 * DAY, tue + 30 * DAY],
+        );
+    }
+
     #[test]
     fn every_instance_keeps_the_series_duration() {
         let s = Series {

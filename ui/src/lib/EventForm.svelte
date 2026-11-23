@@ -21,11 +21,12 @@
   import { zoneName } from './zonename.svelte';
   import { openLink } from './api';
   import {
-    CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
+    CUSTOM_REPEAT, INTERVAL_UNITS, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
     isCalendarAddress, mailableGuests, normalizedWeeklyDays, onlyShowAsChanged, previewSpan, removableGuest,
-    removeGuest, renamedGuest, ruleInWords,
+    removeGuest, renamedGuest, ruleInWords, takesInterval,
     dateOf, timeOf,
-    repeatEndProblem, shiftedEndDate, toEventInput, toggledGuestOptional, toggledWeeklyDay, timeProblem,
+    repeatEndProblem, repeatIntervalProblem, shiftedEndDate, toEventInput, toggledGuestOptional,
+    toggledWeeklyDay, timeProblem,
     toggledAllDay, videoCallProblem, weekdayCodeForDate,
     type EventFormResult, type EventFormValue, type Scope,
   } from './eventform';
@@ -206,7 +207,9 @@
   let error = $state<string | null>(null);
   /** Which time input the current `error` is about, so it can be marked rather
    *  than only described. Cleared with `error` on any input. */
-  let invalidField = $state<'start' | 'end' | 'guest' | 'video' | 'repeatEnd' | null>(null);
+  let invalidField = $state<
+    'start' | 'end' | 'guest' | 'video' | 'repeatInterval' | 'repeatEnd' | null
+  >(null);
 
   /** What is in the add-a-guest box. Not part of `value`: an address nobody has
    *  pressed Add on is not on the guest list, and a save must not quietly
@@ -335,7 +338,7 @@
   /** When and where, as one comparable value: the fields a guest acts on. */
   const whenAndWhere = (v: EventFormValue) => JSON.stringify([
     v.date, v.endDate, v.start, v.end, v.isAllDay,
-    v.repeat, v.weeklyDays, v.repeatEnd, v.recurrence,
+    v.repeat, v.weeklyDays, v.repeatInterval, v.repeatEnd, v.recurrence,
     v.location.trim(), v.videoCall,
   ]);
   /** An edit that moved the event, changed how it repeats, or changed where it
@@ -566,6 +569,12 @@
       error = value.isAllDay
         ? 'The last day cannot be before the first day.'
         : 'The end time must be after the start time.';
+      return;
+    }
+    const intervalProblem = repeatIntervalProblem(value);
+    if (intervalProblem) {
+      error = intervalProblem;
+      invalidField = 'repeatInterval';
       return;
     }
     const repeatProblem = repeatEndProblem(value);
@@ -1021,6 +1030,25 @@
         {/each}
       </select>
     </label>
+    {#if takesInterval(value.repeat)}
+      <!-- "Every 2 weeks" (#181). Not for Every weekday, which is already a
+           cadence: every other week on weekdays is Weekly with five days. No
+           `min`/`max` on the input, as with the count below — the browser's
+           own bubble would refuse the save in its words instead of ours. -->
+      <div class="repeatendfield">
+        <span class="lab">Every</span>
+        <label class="aftercount">
+          <input
+            type="number"
+            step="1"
+            aria-label="Repeat every"
+            aria-invalid={invalidField === 'repeatInterval' ? 'true' : undefined}
+            bind:value={value.repeatInterval}
+          />
+          <span>{INTERVAL_UNITS[value.repeat][value.repeatInterval === 1 ? 0 : 1]}</span>
+        </label>
+      </div>
+    {/if}
     {#if value.repeat === 'weekly'}
       <div class="weekdayfield">
         <span class="lab">Repeat on</span>

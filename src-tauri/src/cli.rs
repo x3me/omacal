@@ -65,7 +65,7 @@ WRITES (the running app executes them, through its own guards)
          [--end-date D] [--all-day --last-day D] [--calendar ID]
          [--location L] [--description TEXT] [--guest a@b]…
          [--notify all|none] [--meet] [--json]
-         [--repeat daily|weekdays|weekly|monthly|yearly]
+         [--repeat daily|weekdays|weekly|monthly|yearly] [--every N]
          [--days MO,WE,FR] [--until YYYY-MM-DD | --count N]
   omacal events update ID --occurrence MS [--title T] [--date D]
          [--start HH:MM] [--end HH:MM] [--location L] [--description TEXT]
@@ -87,10 +87,12 @@ WRITES (the running app executes them, through its own guards)
   all; removing a link is the app's form.
 
   --repeat is the app form's own vocabulary, not an RRULE. Without it a
-  create makes one event, as it always has. --days refines a weekly cadence
-  and nothing else; start the event on one of the days it names. --until and
-  --count are two ways to end a series, so pass one. Changing the repeat of
-  an event that already exists is the app's form, not `events update`.
+  create makes one event, as it always has. --every N spaces the repeats out
+  — `--repeat weekly --every 2` is fortnightly — for daily, weekly, monthly
+  and yearly, N from 1 to 999. --days refines a weekly cadence and nothing
+  else; start the event on one of the days it names. --until and --count are
+  two ways to end a series, so pass one. Changing the repeat of an event that
+  already exists is the app's form, not `events update`.
 
 UPDATING
   The app updates itself: when a release exists its header grows an Update
@@ -177,7 +179,8 @@ pub(crate) fn command_catalog() -> Vec<CommandInfo> {
             description: "create through the running app's guards, repeating or not",
             flags: &["--title", "--date", "--start", "--end", "--end-date", "--all-day",
                      "--last-day", "--calendar", "--location", "--description", "--guest",
-                     "--notify", "--repeat", "--days", "--until", "--count", "--meet", "--json"] },
+                     "--notify", "--repeat", "--every", "--days", "--until", "--count", "--meet",
+                     "--json"] },
         CommandInfo { name: "events update", usage: "events update ID --occurrence MS …", writes: true,
             description: "reschedule or retitle; scope and notify never guessed",
             flags: &["--occurrence", "--scope", "--title", "--date", "--start", "--end",
