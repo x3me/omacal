@@ -4652,24 +4652,33 @@ test.describe('App', () => {
    *  calendars, the invitations and the tasks into a window nobody could
    *  see. Now a sync that finishes while hidden marks it stale, and the
    *  reload runs once, when the window is shown. */
-  test('a sync that finishes while the window is hidden reloads when it is shown', async ({ page }) => {
-    await writable(page);
-    const setHidden = (hidden: boolean) => page.evaluate((h) => {
-      Object.defineProperty(document, 'hidden', { value: h, configurable: true });
-      Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
-      document.dispatchEvent(new Event('visibilitychange'));
-    }, hidden);
-    const weeks = async () => (await callsTo(page, 'get_week')).length;
+  for (const thenFails of [false, true]) {
+    test(`a sync that finishes while the window is hidden reloads when it is shown${thenFails ? ' after a later failure' : ''}`, async ({ page }) => {
+      await writable(page);
+      const setHidden = (hidden: boolean) => page.evaluate((h) => {
+        Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+        Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      }, hidden);
+      const weeks = async () => (await callsTo(page, 'get_week')).length;
 
-    await setHidden(true);
-    const before = await weeks();
-    await page.evaluate(() => window.__harness.emit('sync-finished', null));
-    await page.waitForTimeout(300);
-    expect(await weeks(), 'no reload into a hidden window').toBe(before);
+      await setHidden(true);
+      const before = await weeks();
+      await page.evaluate(() => window.__harness.emit('sync-finished', null));
+      await page.waitForTimeout(300);
+      expect(await weeks(), 'no reload into a hidden window').toBe(before);
 
-    await setHidden(false);
-    await expect.poll(weeks).toBeGreaterThan(before);
-  });
+      const calendarReads = () => callsTo(page, 'get_calendars').then(calls => calls.length);
+      const beforeCalendars = await calendarReads();
+      if (thenFails) {
+        await page.evaluate(() => window.__harness.emit('sync-failed', { message: 'Other account failed' }));
+      }
+      await setHidden(false);
+      await expect.poll(calendarReads).toBeGreaterThan(beforeCalendars);
+      if (thenFails) await expect(page.locator('.err')).toContainText('Other account failed');
+      await expect.poll(weeks).toBeGreaterThan(before);
+    });
+  }
 
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);

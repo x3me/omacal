@@ -1328,7 +1328,7 @@
   $effect(() => {
     const un = listen<{ message?: string }>('sync-failed', (e) => {
       syncError = e.payload?.message ?? 'Sync failed.';
-      if (document.hidden) staleWhileHidden = true;
+      if (document.hidden) pendingSyncRefresh ??= 'grid';
       else void reload();
       // The same cycle may also have marked an account as needing re-consent,
       // and that state rides on `status` (`needs_reauth`), not on the event —
@@ -1355,13 +1355,14 @@
    *  when it is shown. Closing the window only hides it, so every background
    *  sync reloaded the week, the calendars, the invitations and the tasks
    *  into a window nobody could see. */
-  let staleWhileHidden = false;
+  let pendingSyncRefresh: 'grid' | 'all' | null = null;
   $effect(() => {
     const shown = () => {
-      if (document.hidden || !staleWhileHidden) return;
-      staleWhileHidden = false;
-      if (syncError) void reload();
-      else void afterSync();
+      if (document.hidden || !pendingSyncRefresh) return;
+      const refresh = pendingSyncRefresh;
+      pendingSyncRefresh = null;
+      if (refresh === 'all') void afterSync();
+      else void reload();
     };
     document.addEventListener('visibilitychange', shown);
     return () => document.removeEventListener('visibilitychange', shown);
@@ -1370,7 +1371,7 @@
   $effect(() => {
     const un = listen('sync-finished', async () => {
       syncError = null;
-      if (document.hidden) { staleWhileHidden = true; return; }
+      if (document.hidden) { pendingSyncRefresh = 'all'; return; }
       await afterSync();
     });
     return () => { un.then((f) => f()); };

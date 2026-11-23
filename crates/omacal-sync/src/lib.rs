@@ -1256,6 +1256,13 @@ mod tests {
         sync_calendar(&pool, &client, 1, "primary", short + 1000, end + 1000).await.unwrap();
         assert!(omacal_store::search_events(&pool, "Standup").await.unwrap().is_empty());
         assert!(server.received_requests().await.unwrap()[1].url.query().unwrap().contains("syncToken=token"));
+
+        omacal_store::history::set_span(&pool, 24, now).await.unwrap();
+        let fetch = || sync_calendar(&pool, &client, 1, "primary", wide, end);
+        assert!(fetch().await.unwrap().did_full_resync);
+        assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1);
+        assert_eq!(omacal_store::history::displayed_window(&pool, (wide, end)).await.unwrap(), (wide, end));
+        assert!(!fetch().await.unwrap().did_full_resync, "the restored range is now incremental");
     }
 
 }

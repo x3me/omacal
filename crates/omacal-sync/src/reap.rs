@@ -12,7 +12,7 @@ use sqlx::SqliteConnection;
 /// another**: each is exactly what its fetch asked about, and a row outside
 /// it was simply not examined.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Reach {
+pub(crate) enum Reach<'a> {
     /// The whole calendar. A WebCal feed arrives whole on every fetch, so
     /// anything it does not name is gone.
     Whole,
@@ -26,6 +26,9 @@ pub(crate) enum Reach {
     /// upper bound, and a meeting more than the window away vanished at
     /// every daily rollover.
     Overlapping { start_ms: i64, end_ms: i64 },
+    /// CalDAV returns complete resources for the matching UIDs, including
+    /// exceptions whose own dates are outside the queried interval.
+    CalDav { start_ms: i64, end_ms: i64, complete_resources: &'a [String] },
 }
 
 /// Deletes this calendar's events inside `reach` whose `google_id` is not in
@@ -43,7 +46,7 @@ pub(crate) async fn delete_unnamed<S: AsRef<str> + Sync>(
     conn: &mut SqliteConnection,
     calendar_id: i64,
     named: &[S],
-    reach: Reach,
+    reach: Reach<'_>,
 ) -> sqlx::Result<u64> {
     sqlx::query("CREATE TEMP TABLE IF NOT EXISTS sync_named (google_id TEXT PRIMARY KEY)")
         .execute(&mut *conn)
@@ -57,9 +60,33 @@ pub(crate) async fn delete_unnamed<S: AsRef<str> + Sync>(
     }
     const UNNAMED: &str = "DELETE FROM events WHERE calendar_id = ?1
         AND google_id NOT IN (SELECT google_id FROM sync_named)";
+    let mut exceptions_removed = 0;
+    if let Reach::CalDav { complete_resources, .. } = reach {
+        // An absent override of a returned series has reverted to its master.
+        // Its delete trigger can write a cancellation, which must go too.
+        let removed: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM events WHERE calendar_id = ?1
+             AND recurring_event_id IN (SELECT value FROM json_each(?2))
+             AND google_id NOT IN (SELECT google_id FROM sync_named)
+             RETURNING google_id",
+        )
+        .bind(calendar_id)
+        .bind(sqlx::types::Json(complete_resources))
+        .fetch_all(&mut *conn)
+        .await?;
+        if !removed.is_empty() {
+            exceptions_removed = removed.len() as u64;
+            sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1
+                         AND gid IN (SELECT value FROM json_each(?2))")
+                .bind(calendar_id)
+                .bind(sqlx::types::Json(removed))
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
     let deleted = match reach {
         Reach::Whole => sqlx::query(UNNAMED).bind(calendar_id).execute(&mut *conn).await?,
-        Reach::Overlapping { start_ms, end_ms } => {
+        Reach::Overlapping { start_ms, end_ms } | Reach::CalDav { start_ms, end_ms, .. } => {
             sqlx::query(&format!(
                 "{UNNAMED} AND start_utc < ?2 AND (end_utc > ?3 OR recurrence IS NOT NULL)"
             ))
@@ -72,7 +99,7 @@ pub(crate) async fn delete_unnamed<S: AsRef<str> + Sync>(
     }
     .rows_affected();
     sqlx::query("DELETE FROM sync_named").execute(&mut *conn).await?;
-    Ok(deleted)
+    Ok(deleted + exceptions_removed)
 }
 
 #[cfg(test)]

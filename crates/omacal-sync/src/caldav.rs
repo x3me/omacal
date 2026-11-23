@@ -267,12 +267,14 @@ pub async fn sync_caldav_calendar(
             .events_in_window(collection_url, window_start_ms, window_end_ms)
             .await?;
         let mut seen: Vec<String> = Vec::new();
+        let mut complete_resources = Vec::new();
         let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
         for res in &resources {
             let Some(root) = omacal_caldav::parse(&res.ics) else {
                 tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
                 continue;
             };
+            let first = rows.len();
             for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
                 let Some(stored) =
                     caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
@@ -285,6 +287,19 @@ pub async fn sync_caldav_calendar(
                 // resource pointer and raw bytes for the write path.
                 let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
                 rows.push((stored, src));
+            }
+            // A REPORT returns the whole resource. Trust its exception list
+            // only if we read every component and they belong to one master.
+            let resource = &rows[first..];
+            if let Some(((master, _), exceptions)) = resource.split_first() {
+                let uid = master.google_id.as_str();
+                if master.recurring_event_id.is_none()
+                    && exceptions.iter().all(|(e, _)| e.recurring_event_id.as_deref() == Some(uid))
+                    && root.components("VEVENT").count() == resource.len()
+                    && root.components("VEVENT").any(|c| c.prop("RECURRENCE-ID").is_none())
+                {
+                    complete_resources.push(master.google_id.clone());
+                }
             }
         }
 
@@ -317,18 +332,16 @@ pub async fn sync_caldav_calendar(
             outcome.upserted += 1;
         }
 
-        // Inferred deletions, bounded to what the query would have returned:
-        // anything alive in (or recurring into) the window that the server
-        // did not mention no longer exists.
-        //
-        // **Bounded at both ends, unlike the Google sweep** — see
-        // `reap::Reach` for why each provider reaches exactly as far as its
-        // own fetch asked, and no further.
+        // Reconcile the requested window and every complete resource it returned.
         let deleted = crate::reap::delete_unnamed(
             &mut tx,
             calendar_id,
             &seen,
-            crate::reap::Reach::Overlapping { start_ms: window_start_ms, end_ms: window_end_ms },
+            crate::reap::Reach::CalDav {
+                start_ms: window_start_ms,
+                end_ms: window_end_ms,
+                complete_resources: &complete_resources,
+            },
         )
         .await
         .map_err(anyhow::Error::from)?;

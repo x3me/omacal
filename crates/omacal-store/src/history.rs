@@ -56,7 +56,7 @@ pub async fn set_span(pool: &sqlx::SqlitePool, months: i64, now_ms: i64) -> sqlx
         // Let the next wider fetch restore newly requested history. An install
         // that has never pruned has no cutoff to move.
         sqlx::query("UPDATE settings SET value = min(CAST(value AS INTEGER), ?2) WHERE key = ?1")
-            .bind(HISTORY_CUTOFF_KEY).bind(start.to_string()).execute(&mut *tx).await?;
+            .bind(HISTORY_CUTOFF_KEY).bind(start).execute(&mut *tx).await?;
     }
     tx.commit().await
 }
