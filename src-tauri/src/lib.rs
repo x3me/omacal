@@ -131,13 +131,10 @@ pub struct AppState {
     /// not a state, and a later reader replaying it would yank the calendar
     /// back to a day the user has already navigated away from.
     pub open_date: std::sync::Mutex<Option<String>>,
-    /// How far back sync reaches, in months — one of `settings::HISTORY_SPANS`,
-    /// `0` for everything. Mirrored here for `quit_on_close`'s reason: the
-    /// sync loop reads it where it cannot await the row. Seeded from the row
-    /// at startup and rewritten by `settings::Setting::HistorySpan`. A number
-    /// on the state, so a test that builds its own state does not share one
-    /// with the rest of the process.
-    pub history_months: std::sync::atomic::AtomicI64,
+    /// Requested history span, seeded from settings at startup. A settings
+    /// writer holds this mutex through the database commit and cache update.
+    /// Fetches copy the span before making any network requests.
+    pub history_months: tokio::sync::Mutex<i64>,
 }
 
 /// The notification transport, managed on its own rather than inside
@@ -389,22 +386,34 @@ async fn get_year(
 ) -> Result<commands::YearPayload, String> {
     let tz = display_tz(&state.pool);
     let week_start = settings::read_settings(&state.pool).await.week_start;
-    let year_start_ms = commands::year_start_ms(year, &tz);
-    let next_year_start_ms = commands::year_start_ms(year + 1, &tz);
+    get_year_impl(&state.pool, year, &tz, week_start, synced_window(&state, now_ms()).await, state.demo).await
+}
+
+async fn year_coverage(pool: &SqlitePool, requested: (i64, i64), demo: bool) -> Result<(i64, i64), String> {
+    if demo { return Ok(requested); }
+    omacal_store::history::displayed_window(pool, requested).await.map_err(|e| e.to_string())
+}
+
+async fn get_year_impl(
+    pool: &SqlitePool, year: i32, tz: &str, week_start: settings::WeekStart,
+    requested: (i64, i64), demo: bool,
+) -> Result<commands::YearPayload, String> {
+    let covered = year_coverage(pool, requested, demo).await?;
+    let year_start_ms = commands::year_start_ms(year, tz);
+    let next_year_start_ms = commands::year_start_ms(year + 1, tz);
     // Same widening as `get_week`/`get_day`/`get_month`, for the same reason:
     // an event that begins just before the year, or a DST-lengthened edge
     // day, must not be missed.
     const DAY: i64 = 24 * 3_600_000;
     let events = omacal_store::events_in_window(
-        &state.pool,
+        pool,
         year_start_ms - DAY,
         next_year_start_ms + DAY,
     )
     .await
     .map_err(|e| e.to_string())?;
-    let events = settings::shown_events(&state.pool, events).await;
-    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
-    Ok(commands::assemble_year_with(&events, year, now_ms(), &tz, week_start, months))
+    let events = settings::shown_events(pool, events).await;
+    Ok(commands::assemble_year_with(&events, year, tz, week_start, covered))
 }
 
 #[tauri::command]
@@ -414,8 +423,7 @@ async fn get_big_year(
 ) -> Result<commands::BigYearPayload, String> {
     let tz = display_tz(&state.pool);
     let week_start = settings::read_settings(&state.pool).await.week_start;
-    let months = state.history_months.load(std::sync::atomic::Ordering::Relaxed);
-    get_big_year_impl(&state.pool, year, &tz, now_ms(), week_start, months).await
+    get_big_year_impl(&state.pool, year, &tz, week_start, synced_window(&state, now_ms()).await, state.demo).await
 }
 
 /// The body of `get_big_year`, minus the Tauri `State` wrapper so it is
@@ -424,10 +432,11 @@ async fn get_big_year_impl(
     pool: &SqlitePool,
     year: i32,
     tz: &str,
-    now: i64,
     week_start: settings::WeekStart,
-    history_months: i64,
+    requested: (i64, i64),
+    demo: bool,
 ) -> Result<commands::BigYearPayload, String> {
+    let covered = year_coverage(pool, requested, demo).await?;
     let ribbon_start_ms = commands::big_year_start_ms(year, tz, week_start);
     // Same widening as `get_week`/`get_day`/`get_month`/`get_year`, for the
     // same reason: an event that begins just before the 392-day ribbon, or a
@@ -441,11 +450,8 @@ async fn get_big_year_impl(
     .await
     .map_err(|e| e.to_string())?;
     let events = settings::shown_events(pool, events).await;
-    Ok(if settings::combine_identical_events(pool).await {
-        commands::assemble_big_year_combining(&events, year, now, tz, week_start, true, history_months)
-    } else {
-        commands::assemble_big_year_combining(&events, year, now, tz, week_start, false, history_months)
-    })
+    let combine = settings::combine_identical_events(pool).await;
+    Ok(commands::assemble_big_year_combining(&events, year, tz, week_start, combine, covered))
 }
 
 pub(crate) const KEYRING_SERVICE: &str = "omacal";
@@ -894,7 +900,6 @@ async fn sync_accounts<F, Fut>(
     api_base: &str,
     window_start_ms: i64,
     window_end_ms: i64,
-    now_ms: i64,
     token_for: F,
 ) -> (u64, Vec<String>, Vec<String>)
 where
@@ -941,7 +946,7 @@ where
 
         for (cal_id, google_id) in cals {
             match omacal_sync::sync_calendar(
-                pool, &client, cal_id, &google_id, window_start_ms, window_end_ms, now_ms,
+                pool, &client, cal_id, &google_id, window_start_ms, window_end_ms,
             )
             .await
             {
@@ -1060,11 +1065,9 @@ mod today_of_month_tests {
     }
 }
 
-/// The window sync fetches and the year views hatch outside of. One
-/// definition, read off this state's span, so a test with its own state
-/// does not share a process-wide flag.
-pub(crate) fn synced_window(state: &AppState, now_ms: i64) -> (i64, i64) {
-    settings::history_window(now_ms, state.history_months.load(std::sync::atomic::Ordering::Relaxed))
+/// The requested fetch window. Year views intersect it with recorded coverage.
+pub(crate) async fn synced_window(state: &AppState, now_ms: i64) -> (i64, i64) {
+    settings::history_window(now_ms, *state.history_months.lock().await)
 }
 
 /// Syncs the one calendar a write just changed, and nothing else.
@@ -1090,14 +1093,13 @@ pub(crate) async fn sync_one_calendar(state: &AppState, calendar_id: i64) -> any
     .fetch_optional(&state.pool)
     .await?;
     let Some((provider, email, google_id)) = row else { return Ok(()) };
-    let now = now_ms();
-    let (window_start, window_end) = synced_window(state, now);
+    let (window_start, window_end) = synced_window(state, now_ms()).await;
     match provider.as_str() {
         "google" => {
             let cfg = load_config()?;
             let token = access_token_for(state, &cfg, &email).await?;
             let client = omacal_google::CalendarClient::new(GOOGLE_CALENDAR_API, &token);
-            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end, now)
+            omacal_sync::sync_calendar(&state.pool, &client, calendar_id, &google_id, window_start, window_end)
                 .await?;
         }
         "caldav" => caldav_write::resync(state, calendar_id).await?,
@@ -1151,7 +1153,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
     let google = accounts_to_attempt(google, &marked);
 
     let now = now_ms();
-    let (window_start, window_end) = synced_window(state, now);
+    let (window_start, window_end) = synced_window(state, now).await;
 
     let mut total = 0u64;
     let mut failed: Vec<String> = Vec::new();
@@ -1168,7 +1170,6 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
             GOOGLE_CALENDAR_API,
             window_start,
             window_end,
-            now,
             move |email| async move { access_token_for(state, cfg, &email).await },
         )
         .await;
@@ -1199,7 +1200,7 @@ pub(crate) async fn sync_all(state: &AppState) -> anyhow::Result<u64> {
                     continue;
                 }
             };
-        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end, now)
+        match caldav_account::sync_account(pool, *account_id, &client, window_start, window_end)
             .await
         {
             Ok(n) => total += n,
@@ -1713,7 +1714,7 @@ pub fn run() {
                 system_tz_change: Default::default(),
                 quit_on_close: std::sync::atomic::AtomicBool::new(quit_on_close),
                 open_date: std::sync::Mutex::new(open_date),
-                history_months: std::sync::atomic::AtomicI64::new(history_months),
+                history_months: tokio::sync::Mutex::new(history_months),
             });
             sync_loop::spawn(app.handle().clone());
             // Before anything reads the choice: off Omarchy a stored Light or
@@ -2036,7 +2037,7 @@ mod tests {
             pool, demo: false, tokens: Default::default(), reauth: Default::default(),
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
-            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+            history_months: tokio::sync::Mutex::new(settings::DEFAULT_HISTORY_MONTHS),
         });
 
         let running = sync_turn().lock().await;
@@ -2100,7 +2101,7 @@ mod tests {
             pool, demo: false, tokens: Default::default(), reauth: Default::default(),
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
-            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+            history_months: tokio::sync::Mutex::new(settings::DEFAULT_HISTORY_MONTHS),
         };
         assert!(sync_all(&state).await.is_err(), "the fixture's premise: a full sync fails");
         let written: i64 = sqlx::query_scalar("SELECT c.id FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE a.email = 'healthy@x.test'")
@@ -2134,13 +2135,60 @@ mod tests {
             pool, demo: false, tokens: Default::default(), reauth: Default::default(),
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
-            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+            history_months: tokio::sync::Mutex::new(settings::DEFAULT_HISTORY_MONTHS),
         };
 
         let _ = sync_all(&state).await;
 
         let marked = state.reauth.lock().unwrap().clone();
         assert_eq!(marked, std::collections::BTreeSet::from(["caldav:both@x.test".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn both_year_views_show_only_history_fetched_by_every_visible_event_calendar() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','user',0);
+                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                     VALUES (1,'one','One','UTC','owner'), (1,'two','Two','UTC','owner')")
+            .execute(&pool).await.unwrap();
+        let now = 1_786_341_600_000; // August 2026
+        let (recent, end) = settings::history_window(now, 6);
+        let (wide, _) = settings::history_window(now, 24);
+        let update = |id: i64, start: i64| {
+            sqlx::query("INSERT OR REPLACE INTO sync_state(calendar_id,window_start,window_end)
+                         VALUES (?1,?2,?3)").bind(id).bind(start).bind(end).execute(&pool)
+        };
+        let january = commands::year_start_ms(2026, "UTC");
+        let flags = || async {
+            let week = settings::WeekStart::Monday;
+            let grid = get_year_impl(&pool, 2026, "UTC", week, (wide, end), false).await.unwrap();
+            let ribbon = get_big_year_impl(&pool, 2026, "UTC", week, (wide, end), false).await.unwrap();
+            (grid.months[0].days[0].unsynced, ribbon.rows.iter().flat_map(|r| &r.days)
+                .find(|d| d.start_ms == january).unwrap().unsynced)
+        };
+        update(1, wide).await.unwrap();
+        assert_eq!(flags().await, (true, true), "one visible calendar has never fetched events");
+        update(2, recent).await.unwrap();
+        assert_eq!(flags().await, (true, true), "the wider fetch is pending");
+
+        use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let client = omacal_google::CalendarClient::new(server.uri(), "fixture");
+        Mock::given(path("/calendars/two/events")).respond_with(ResponseTemplate::new(403))
+            .expect(1).mount(&server).await;
+        assert!(omacal_sync::sync_calendar(&pool, &client, 2, "two", wide, end).await.is_err());
+        assert_eq!(flags().await, (true, true), "a failed fetch leaves January hatched");
+
+        server.verify().await;
+        server.reset().await;
+        Mock::given(path("/calendars/two/events")).respond_with(ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"items": [], "nextSyncToken": "wider"})))
+            .expect(1).mount(&server).await;
+        omacal_sync::sync_calendar(&pool, &client, 2, "two", wide, end).await.unwrap();
+        assert_eq!(flags().await, (false, false), "both calendars have fetched January");
+        update(2, recent).await.unwrap();
+        sqlx::query("UPDATE calendars SET selected = 0 WHERE id = 2").execute(&pool).await.unwrap();
+        assert_eq!(flags().await, (false, false), "a hidden calendar does not limit the view");
     }
 
     /// **Not a test: the website's screenshot source.** Seeds the demo data
@@ -2178,7 +2226,7 @@ mod tests {
         let events = omacal_store::events_in_window(&pool, grid_start - DAY, grid_start + 43 * DAY).await.unwrap();
         write("month", serde_json::to_value(commands::assemble_month(&events, year, month, &tz, week_start)).unwrap());
         let history_months = settings::history_months(&pool).await;
-        write("bigyear", serde_json::to_value(get_big_year_impl(&pool, year, &tz, now, week_start, history_months).await.unwrap()).unwrap());
+        write("bigyear", serde_json::to_value(get_big_year_impl(&pool, year, &tz, week_start, settings::history_window(now, history_months), true).await.unwrap()).unwrap());
 
         write("calendars", serde_json::to_value(omacal_store::list_calendars(&pool).await.unwrap()).unwrap());
         // Writable, as a signed-in user's lists are: demo mode greys the boxes.
@@ -2195,7 +2243,7 @@ mod tests {
             pool: pool.clone(), demo: false, tokens: Default::default(), reauth: Default::default(),
             update: Default::default(), update_checked_at: Default::default(),
             system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(),
-            history_months: std::sync::atomic::AtomicI64::new(settings::DEFAULT_HISTORY_MONTHS),
+            history_months: tokio::sync::Mutex::new(settings::DEFAULT_HISTORY_MONTHS),
         };
         write("event_detail", serde_json::to_value(events::event_detail_impl(&state, id).await.unwrap()).unwrap());
 
@@ -2441,12 +2489,12 @@ mod tests {
             system_tz_change: Default::default(),
             quit_on_close: Default::default(),
             open_date: Default::default(),
-            history_months: std::sync::atomic::AtomicI64::new(settings::SPAN_6_MONTHS),
+            history_months: tokio::sync::Mutex::new(settings::SPAN_6_MONTHS),
         };
-        assert_eq!(synced_window(&state, now), (now - 180 * DAY, now + 365 * DAY));
-        state.history_months.store(0, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(synced_window(&state, now).0, settings::history_window(now, 0).0);
-        assert_eq!(synced_window(&state, now).1, now + 365 * DAY);
+        assert_eq!(synced_window(&state, now).await, (now - 180 * DAY, now + 365 * DAY));
+        *state.history_months.lock().await = 0;
+        assert_eq!(synced_window(&state, now).await.0, settings::history_window(now, 0).0);
+        assert_eq!(synced_window(&state, now).await.1, now + 365 * DAY);
     }
 
     /// The message is shown for whichever button the user pressed, so it has
@@ -2630,7 +2678,7 @@ mod tests {
         assert_eq!(accounts[0].1, "revoked@x", "the broken account must go first");
 
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
             |email| async move {
                 if email == "revoked@x" {
                     anyhow::bail!("invalid_grant: token has been expired or revoked");
@@ -2673,7 +2721,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, dead) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
             |email| async move {
                 if email == "dead@x" {
                     return Err(omacal_google::auth::TokenRejected::new(
@@ -2771,7 +2819,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
             |_| async { Ok("at".to_string()) },
         )
         .await;
@@ -2804,7 +2852,7 @@ mod tests {
 
         let accounts = accounts_in_order(&pool).await;
         let (total, failed, _) = sync_accounts(
-            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999, 0,
+            &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
             |_| async { Ok("at".to_string()) },
         )
         .await;
@@ -2882,7 +2930,7 @@ mod tests {
                 {"id":"owner@x", "summary":"owner@x", "summaryOverride":"Studio"},
                 {"id":"unknown", "summary":"Do not import"}
             ]}))).mount(&server).await;
-        sync_accounts(&pool, &[(account, "owner@x".into())], &server.uri(), 0, 1, 0,
+        sync_accounts(&pool, &[(account, "owner@x".into())], &server.uri(), 0, 1,
             |_| async { Ok("test-token".into()) }).await;
         let cals = omacal_store::list_calendars(&pool).await.unwrap();
         assert_eq!(cals.len(), 2);

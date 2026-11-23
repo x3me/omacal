@@ -239,7 +239,7 @@ pub(crate) async fn resync(state: &AppState, calendar_id: i64) -> anyhow::Result
     .fetch_one(&state.pool)
     .await?;
     let now = crate::now_ms();
-    let (ws, we) = crate::synced_window(state, now);
+    let (ws, we) = crate::synced_window(state, now).await;
     omacal_sync::caldav::sync_caldav_calendar(
         &state.pool,
         &client,
@@ -1112,7 +1112,7 @@ mod tests {
                 system_tz_change: Default::default(),
                 quit_on_close: Default::default(),
                 open_date: Default::default(),
-                history_months: std::sync::atomic::AtomicI64::new(crate::settings::DEFAULT_HISTORY_MONTHS),
+                history_months: tokio::sync::Mutex::new(crate::settings::DEFAULT_HISTORY_MONTHS),
             };
             (state, ids)
         }

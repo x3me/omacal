@@ -109,14 +109,22 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
 /// How many civil days an all-day series' occurrences span, read off the
 /// master's own two dates in the series' zone, never off its length in
 /// milliseconds. At least one: an all-day event covers its day.
-fn all_day_span_days(series: &Series) -> u64 {
+fn all_day_span_days(start: i64, end: i64, tz: &str) -> u64 {
     let date = |ms: i64| {
-        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, series.dtstart_tz), "%Y-%m-%d").ok()
+        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, tz), "%Y-%m-%d").ok()
     };
-    match (date(series.dtstart_ms), date(series.dtstart_ms + series.duration_ms)) {
+    match (date(start), date(end)) {
         (Some(first), Some(end)) => (end - first).num_days().max(1) as u64,
         _ => 1,
     }
+}
+
+/// The end of this particular all-day slot in the series' own calendar zone.
+pub fn all_day_slot_end(master_start: i64, master_end: i64, tz: &str, slot: i64) -> Option<i64> {
+    let date: chrono::NaiveDate = date_in_zone(slot, tz).parse().ok()?;
+    let days = all_day_span_days(master_start, master_end, tz);
+    let end = date.checked_add_days(chrono::Days::new(days))?;
+    Some(midnight_in_zone(end, tz.parse().unwrap_or(chrono_tz::UTC)))
 }
 
 const DAY_MS: i64 = 24 * 3_600_000;
@@ -235,7 +243,7 @@ pub fn expand(
         .before(to_chrono(to_ms)?)
         .all(limit);
 
-    let span_days = all_day_span_days(series);
+    let span_days = all_day_span_days(series.dtstart_ms, series.dtstart_ms.saturating_add(series.duration_ms), series.dtstart_tz);
     let intervals = result
         .dates
         .into_iter()

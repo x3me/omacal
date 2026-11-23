@@ -335,7 +335,7 @@ pub async fn sync_caldav_calendar(
         outcome.deleted += deleted as usize;
 
         let window_start_ms = omacal_store::history::retain_current_history(
-            &mut tx, calendar_id, window_start_ms, now_ms,
+            &mut tx, calendar_id, window_start_ms,
         ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(
@@ -1080,8 +1080,11 @@ mod tests {
             }).mount(&server).await;
         let pool = super::super::tests::seeded_pool().await;
         const DAY: i64 = 86_400_000;
-        let now = jiff::Timestamp::now().as_millisecond();
-        let floor = now - 180 * DAY;
+        // The event ends one minute into the gap between fetch and shrink.
+        let event_end = "2000-01-01T10:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let now = event_end + 180 * DAY - 60_000;
+        let later = now + 120_000;
+        let floor = later - 180 * DAY;
         // Stop polling the sync after REPORT is observed, commit the shorter
         // span, then resume it: apply necessarily sees the committed change.
         let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
@@ -1093,11 +1096,7 @@ mod tests {
             _ = entered.notified() => {},
             result = &mut fetched => panic!("sync finished before shrink: {result:?}"),
         }
-        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months', '6')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
-                     VALUES (1, 'before', ?1, ?2)")
-            .bind(floor).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        omacal_store::history::set_span(&pool, 6, later).await.unwrap();
         let outcome = fetched.await.unwrap();
         assert_eq!(outcome.upserted, 1, "the old event really reached apply");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id = 'old'")

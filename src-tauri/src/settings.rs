@@ -127,7 +127,6 @@ const SHOW_DECLINED_EVENTS_KEY: &str = "show_declined_events";
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
 pub(crate) use omacal_store::history::{
     HISTORY_SPAN_KEY, HISTORY_SPANS, DEFAULT_HISTORY_MONTHS,
-    forget_events_ending_before,
 };
 pub(crate) use omacal_store::history::history_window;
 #[cfg(test)]
@@ -1855,35 +1854,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             if !HISTORY_SPANS.contains(months) {
                 return Err(refused(HISTORY_SPAN_UNOFFERED));
             }
-            let previous = history_months(pool).await;
-            let now = crate::now_ms();
-            let new_start = history_window(now, *months).0;
-            let old_start = history_window(now, previous).0;
-            let stored = months.to_string();
-            let mut tx = pool.begin().await?;
-            sqlx::query(
-                "INSERT INTO settings (key, value) VALUES (?1, ?2)
-                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            )
-            .bind(HISTORY_SPAN_KEY)
-            .bind(&stored)
-            .execute(&mut *tx)
-            .await?;
-            // Shorter, and only then: the rows that now end before the window
-            // will never be fetched again, so reap will not reach them either.
-            // The recorded start moves forward with them, so choosing a longer
-            // span later is seen as a window that still has to be fetched.
-            if new_start > old_start {
-                forget_events_ending_before(&mut tx, None, new_start).await?;
-                sqlx::query(
-                    "UPDATE sync_state SET window_start = ?1
-                      WHERE window_start IS NOT NULL AND window_start < ?1",
-                )
-                .bind(new_start)
-                .execute(&mut *tx)
-                .await?;
-            }
-            tx.commit().await?;
+            omacal_store::history::set_span(pool, *months, crate::now_ms()).await?;
         }
         S::SecondTimezone(tz) => {
             let tz = validate_second_timezone(tz.clone()).map_err(SetError::Refused)?;
@@ -2109,16 +2080,6 @@ async fn apply(app: &tauri::AppHandle, state: &AppState, setting: &Setting) {
         S::QuitOnClose(on) => state.quit_on_close.store(*on, std::sync::atomic::Ordering::Relaxed),
         S::StartOnLogin(mode) => crate::tray::apply_autostart(app, state.demo, mode.registers()),
         S::InterfaceScalePercent(percent) => apply_interface_scale(app, *percent),
-        S::HistorySpan(months) => {
-            let previous = state.history_months.swap(*months, std::sync::atomic::Ordering::Relaxed);
-            let now = crate::now_ms();
-            // Wider only. Saving the same span, or a shorter one, must not
-            // download the history again — the shorter one already dropped
-            // what fell outside it.
-            if history_window(now, *months).0 < history_window(now, previous).0 {
-                crate::sync_loop::SyncRequest::WiderHistory.request(app);
-            }
-        }
         _ => {}
     }
     if setting.shows_on_menu_surfaces() {
@@ -2133,8 +2094,21 @@ pub async fn set_setting(
     state: tauri::State<'_, AppState>,
     setting: Setting,
 ) -> Result<AppSettings, String> {
-    store(&state.pool, &setting).await.map_err(SetError::shown)?;
-    apply(&app, &state, &setting).await;
+    if let Setting::HistorySpan(months) = setting {
+        // Serialize the database commit and its runtime update. Two windows
+        // saving at once must leave both using the same span.
+        let mut current = state.history_months.lock().await;
+        store(&state.pool, &setting).await.map_err(SetError::shown)?;
+        let previous = std::mem::replace(&mut *current, months);
+        drop(current);
+        let now = crate::now_ms();
+        if history_window(now, months).0 < history_window(now, previous).0 {
+            crate::sync_loop::SyncRequest::WiderHistory.request(&app);
+        }
+    } else {
+        store(&state.pool, &setting).await.map_err(SetError::shown)?;
+        apply(&app, &state, &setting).await;
+    }
     Ok(read_settings(&state.pool).await)
 }
 
@@ -2622,6 +2596,44 @@ mod tests {
         let master = rows.iter().find(|row| row.google_id == "series").unwrap();
         assert_eq!(day(std::slice::from_ref(master)).days[0].events.len(), 1, "the slot would otherwise appear");
 
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_all_day_slot_survives_until_its_own_local_midnight() {
+        let p = pool().await;
+        let instant = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let master = instant("2026-03-28T23:00:00Z"); // Berlin spring-forward Sunday
+        let end = instant("2026-03-29T22:00:00Z");
+        let autumn = instant("2026-10-24T22:00:00Z");
+        let midnight = instant("2026-10-25T23:00:00Z");
+        let edge = midnight - 30 * 60_000;
+        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','e',0);
+                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                     VALUES (1,'p','P','Europe/Berlin','owner')").execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id,google_id,start_utc,end_utc,start_tz,end_tz,
+                     is_all_day,updated_at,recurrence,recurring_event_id,original_start_utc,status) VALUES
+                     (1,'master',?1,?2,'Europe/Berlin','Europe/Berlin',1,0,'RRULE:FREQ=WEEKLY',NULL,NULL,'confirmed'),
+                     (1,'cancel',?3,?3,'Europe/Berlin','Europe/Berlin',1,0,NULL,'master',?3,'cancelled')")
+            .bind(master).bind(end).bind(autumn).execute(&p).await.unwrap();
+        for (cutoff, expected) in [(edge, true), (midnight, false)] {
+            let mut tx = p.begin().await.unwrap();
+            omacal_store::history::forget_events_ending_before(&mut tx, None, cutoff).await.unwrap();
+            tx.commit().await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id='cancel'")
+                .fetch_one(&p).await.unwrap();
+            assert_eq!(count == 1, expected, "storage at {cutoff}");
+            let rows = omacal_store::events_in_window(&p, cutoff, midnight + 1).await.unwrap();
+            assert_eq!(crate::commands::suppressed_slots(&rows).contains(&(1, "master", autumn)), expected,
+                       "the view suppresses the occurrence through its whole civil day");
+            if expected {
+                let grid = |events: &[omacal_store::StoredEvent]| {
+                    crate::commands::assemble_days(events, autumn, 1, "Europe/Berlin")
+                };
+                let master = rows.iter().find(|row| row.google_id == "master").unwrap();
+                assert_eq!(grid(std::slice::from_ref(master)).all_day_events.len(), 1);
+                assert!(grid(&rows).all_day_events.is_empty(), "the cancelled Sunday stays off the grid");
+            }
+        }
     }
 
     /// Shortening the span drops one-off rows that end before the new window,

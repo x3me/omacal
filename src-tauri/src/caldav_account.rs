@@ -239,7 +239,6 @@ pub(crate) async fn sync_account(
     client: &CalDavClient,
     window_start_ms: i64,
     window_end_ms: i64,
-    now_ms: i64,
 ) -> Result<u64, CalDavError> {
     omacal_sync::caldav::refresh_collections(pool, account_id, client, &fallback_tz()).await?;
 
@@ -265,7 +264,7 @@ pub(crate) async fn sync_account(
             tasks != 0,
             window_start_ms,
             window_end_ms,
-            now_ms,
+            crate::now_ms(),
         )
         .await
         {
@@ -434,7 +433,7 @@ END:VCALENDAR&#13;
         .execute(&pool).await.unwrap();
         let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
 
-        sync_account(&pool, 1, &client, 0, 1, 0).await.unwrap();
+        sync_account(&pool, 1, &client, 0, 1).await.unwrap();
 
         let lists: Vec<(String, i64, i64)> =
             sqlx::query_as("SELECT summary, supports_events, supports_tasks FROM calendars")
@@ -507,7 +506,7 @@ END:VCALENDAR&#13;
         .execute(&pool).await.unwrap();
         let client = CalDavClient::new(&server.uri(), "e@x", "pw").unwrap();
 
-        let out = sync_account(&pool, 1, &client, 0, 1, 0).await;
+        let out = sync_account(&pool, 1, &client, 0, 1).await;
 
         assert!(out.is_ok(), "one refusing collection is not the account's failure: {out:?}");
         let tasks: Vec<String> = sqlx::query_scalar("SELECT summary FROM tasks")

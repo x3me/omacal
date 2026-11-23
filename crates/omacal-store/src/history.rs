@@ -1,5 +1,6 @@
 use sqlx::{Sqlite, Transaction};
 
+const HISTORY_CUTOFF_KEY: &str = "history_pruned_before_ms";
 pub const HISTORY_SPAN_KEY: &str = "history_span_months";
 /// How far back sync keeps events, in months. `0` is everything (back to
 /// 1900). Ahead is a year for every one of them. A fresh install reads an
@@ -32,12 +33,62 @@ pub fn history_window(now_ms: i64, months: i64) -> (i64, i64) {
     (now_ms - back_days * DAY_MS, ahead)
 }
 
+/// Store a span and prune its cached rows in the same write transaction.
+pub async fn set_span(pool: &sqlx::SqlitePool, months: i64, now_ms: i64) -> sqlx::Result<()> {
+    if !HISTORY_SPANS.contains(&months) {
+        return Err(sqlx::Error::InvalidArgument("unsupported history span".into()));
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let saved: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
+        .bind(HISTORY_SPAN_KEY).fetch_optional(&mut *tx).await?;
+    let previous = saved.and_then(|v| v.parse().ok()).filter(|v| HISTORY_SPANS.contains(v))
+        .unwrap_or(DEFAULT_HISTORY_MONTHS);
+    sqlx::query("INSERT OR REPLACE INTO settings (key,value) VALUES (?1,?2)")
+        .bind(HISTORY_SPAN_KEY).bind(months.to_string()).execute(&mut *tx).await?;
+    let start = history_window(now_ms, months).0;
+    if start > history_window(now_ms, previous).0 {
+        sqlx::query("INSERT OR REPLACE INTO settings (key,value) VALUES (?1,?2)")
+            .bind(HISTORY_CUTOFF_KEY).bind(start.to_string()).execute(&mut *tx).await?;
+        forget_events_ending_before(&mut tx, None, start).await?;
+        sqlx::query("UPDATE sync_state SET window_start = ?1 WHERE window_start < ?1")
+            .bind(start).execute(&mut *tx).await?;
+    } else if months != previous {
+        // Let the next wider fetch restore newly requested history. An install
+        // that has never pruned has no cutoff to move.
+        sqlx::query("UPDATE settings SET value = ?2 WHERE key = ?1")
+            .bind(HISTORY_CUTOFF_KEY).bind(start.to_string()).execute(&mut *tx).await?;
+    }
+    tx.commit().await
+}
+
+/// Common coverage of every visible event calendar. A feed is complete once
+/// fetched; a local calendar requires no fetch. A missing remote cursor
+/// means we cannot yet call any day empty across all the calendars.
+pub async fn displayed_window(pool: &sqlx::SqlitePool, requested: (i64, i64)) -> sqlx::Result<(i64, i64)> {
+    let rows: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT s.window_start, s.window_end
+           FROM calendars c JOIN accounts a ON a.id = c.account_id
+           LEFT JOIN sync_state s ON s.calendar_id = c.id
+          WHERE c.selected = 1 AND c.sync_enabled = 1 AND c.supports_events = 1
+            AND (a.provider IN ('google', 'caldav') OR (a.provider = 'webcal' AND s.calendar_id IS NULL))",
+    ).fetch_all(pool).await?;
+    let mut covered = (i64::MIN, i64::MAX);
+    for (start, end) in rows {
+        let (Some(start), Some(end)) = (start, end) else { return Ok((0, 0)); };
+        covered.0 = covered.0.max(start).max(requested.0);
+        covered.1 = covered.1.min(end).min(requested.1);
+    }
+    Ok(covered)
+}
+
 /// Used with an exception row aliased as `e`. Cancelled Google instances
 /// have zero duration, but still suppress the original multi-day occurrence.
-pub(crate) const ORIGINAL_SLOT_END: &str = "e.original_start_utc + COALESCE((
-    SELECT max(0, m.end_utc - m.start_utc) FROM events m
+pub(crate) const ORIGINAL_SLOT_END: &str = "COALESCE((
+    SELECT CASE WHEN m.is_all_day THEN all_day_slot_end(m.start_utc, m.end_utc, m.start_tz, e.original_start_utc)
+                ELSE e.original_start_utc + max(0, m.end_utc - m.start_utc) END
+      FROM events m
      WHERE m.calendar_id = e.calendar_id AND m.google_id = e.recurring_event_id
-), 0)";
+), e.original_start_utc)";
 
 /// One-off rows, and exceptions whose occurrence is also outside the window,
 /// that end at or before `window_start_ms`. Series masters stay: their own
@@ -86,17 +137,13 @@ pub async fn retain_current_history(
     tx: &mut Transaction<'_, Sqlite>,
     calendar_id: i64,
     fetched_start: i64,
-    now_ms: i64,
 ) -> Result<i64, sqlx::Error> {
-    let saved: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM settings WHERE key = ?1"
-    ).bind(HISTORY_SPAN_KEY).fetch_optional(&mut **tx).await?;
-    // No saved choice means no shrink has happened. In particular, callers
-    // asking for a specific event's dates keep their original window.
-    let Some(saved) = saved else { return Ok(fetched_start); };
-    let months = saved.parse().ok().filter(|m| HISTORY_SPANS.contains(m))
-        .unwrap_or(DEFAULT_HISTORY_MONTHS);
-    let start = history_window(now_ms, months).0.max(fetched_start);
+    // This is the cutoff the settings transaction actually used, including
+    // for calendars whose first sync had no sync_state row at shrink time.
+    let cutoff: Option<i64> = sqlx::query_scalar(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1",
+    ).bind(HISTORY_CUTOFF_KEY).fetch_optional(&mut **tx).await?;
+    let start = cutoff.unwrap_or(fetched_start).max(fetched_start);
     if start > fetched_start {
         forget_events_ending_before(tx, Some(calendar_id), start).await?;
     }
