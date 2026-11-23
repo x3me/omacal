@@ -195,6 +195,7 @@ export type AppSettings = {
   /** Whether Week view begins on the current day instead of the fixed
    *  `weekStart`. Month, Year and Big Year continue using the fixed day. */
   weekStartsToday: boolean;
+  showWeekNumbers: boolean;
   /** Number of columns in that rolling Week view, including today. */
   weekViewDays: WeekViewDays;
   visibleStartHour: number;
@@ -361,6 +362,7 @@ export type SettingValues = {
   /** Also leaves rolling mode. */
   weekStart: WeekStartDay;
   weekStartsToday: boolean;
+  showWeekNumbers: boolean;
   weekViewDays: WeekViewDays;
   visibleHours: { start: number; end: number };
   visibleHoursFit: boolean;

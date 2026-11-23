@@ -83,6 +83,7 @@ const DEFAULT_VIEW_FOLLOWS_LAST_KEY: &str = "default_view_follows_last";
 const LAST_VIEW_KEY: &str = "last_view";
 const WEEK_START_KEY: &str = "week_start";
 const WEEK_STARTS_TODAY_KEY: &str = "week_starts_today";
+const SHOW_WEEK_NUMBERS_KEY: &str = "show_week_numbers";
 const WEEK_VIEW_DAYS_KEY: &str = "week_view_days";
 const HIDE_WEEKENDS_KEY: &str = "hide_weekends";
 const TRAY_ICON_KEY: &str = "tray_icon";
@@ -756,6 +757,8 @@ pub struct AppSettings {
     /// change Month, Year or Big Year: "today" is not a stable weekday those
     /// grids can align rows to.
     pub week_starts_today: bool,
+    /// Show ISO week numbers in Week, Month and Year. Off until selected.
+    pub show_week_numbers: bool,
     /// Total columns in the rolling Week view, including today. Only 3, 5 and
     /// 7 are written; an absent or hand-edited value falls back to 7.
     pub week_view_days: u8,
@@ -1097,6 +1100,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
             Some("saturday") => WeekStart::Saturday,
             _ => WeekStart::Monday,
         },
+        show_week_numbers: read(pool, SHOW_WEEK_NUMBERS_KEY).await.map(|v| v == "1").unwrap_or(false),
         // Opt-in, like list mode: absent, garbage and a future spelling keep
         // the calendar-aligned week the app has always drawn.
         week_starts_today: read(pool, WEEK_STARTS_TODAY_KEY)
@@ -1662,6 +1666,7 @@ pub enum Setting {
     WeekStart(WeekStart),
     /// Turning it on sets `week_start` aside rather than discarding it.
     WeekStartsToday(bool),
+    ShowWeekNumbers(bool),
     /// 3, 5 or 7: the form offers only these, and this keeps a hand-written
     /// invoke from asking for an arbitrary number of day columns.
     WeekViewDays(u8),
@@ -1937,6 +1942,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             write_all(pool, &[(WEEK_START_KEY, start.as_str()), (WEEK_STARTS_TODAY_KEY, "0")]).await?;
         }
         S::WeekStartsToday(on) => write(pool, WEEK_STARTS_TODAY_KEY, flag(*on)).await?,
+        S::ShowWeekNumbers(on) => write(pool, SHOW_WEEK_NUMBERS_KEY, flag(*on)).await?,
         S::WeekViewDays(days) => {
             if !matches!(days, 3 | 5 | 7) {
                 return Err(refused("the rolling week can show 3, 5, or 7 days"));
@@ -2054,6 +2060,7 @@ mod tests {
         ));
         assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
         assert!(matches!(read(json!({"key": "visibleHoursFit", "value": true})), Setting::VisibleHoursFit(true)));
+        assert!(matches!(read(json!({"key": "showWeekNumbers", "value": true})), Setting::ShowWeekNumbers(true)));
         assert!(matches!(read(json!({"key": "keepRemindersOnScreen", "value": true})), Setting::KeepRemindersOnScreen(true)));
         assert!(matches!(read(json!({"key": "hideWeekends", "value": true})), Setting::HideWeekends(true)));
         assert!(matches!(
@@ -3212,6 +3219,17 @@ mod tests {
         assert!(!s.hide_weekends);
         write(&p, HIDE_WEEKENDS_KEY, "yes").await.unwrap();
         assert!(!read_settings(&p).await.hide_weekends, "a stray value must not change the app's face");
+    }
+
+    #[tokio::test]
+    async fn show_week_numbers_defaults_off_and_round_trips() {
+        let p = pool().await;
+        assert!(!read_settings(&p).await.show_week_numbers);
+        assert!(set(&p, Setting::ShowWeekNumbers(true)).await.unwrap().show_week_numbers);
+        assert_eq!(read(&p, SHOW_WEEK_NUMBERS_KEY).await.as_deref(), Some("1"));
+        assert!(!set(&p, Setting::ShowWeekNumbers(false)).await.unwrap().show_week_numbers);
+        write(&p, SHOW_WEEK_NUMBERS_KEY, "yes").await.unwrap();
+        assert!(!read_settings(&p).await.show_week_numbers);
     }
 
     /// The fit switch round-trips through `Setting`, and a fresh install

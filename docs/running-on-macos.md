@@ -158,6 +158,8 @@ one on any other desktop, where the frame is what you grab; pick Shown or
 Hidden to overrule that. On macOS the row is absent, because the overlay
 title bar with the traffic lights *is* the frame. **Week view**: a whole week
 from a chosen day, or a rolling 3, 5 or 7 days from today.
+**Show week numbers** adds ISO week numbers to the Week, Month and Year
+views; it is off until enabled.
 
 **Calendars** — the same rows as the header's picker: **show** and **sync** as
 two separate switches, plus a colour. **Accounts** — what is connected, and

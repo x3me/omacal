@@ -38,6 +38,10 @@
     try { settings = await setSetting('visibleHoursFit', on); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
   }
+  async function changeShowWeekNumbers(on: boolean) {
+    try { settings = await setSetting('showWeekNumbers', on); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: 'error' }; }
+  }
   async function changeHideWeekends(on: boolean) {
     try { settings = await setSetting('hideWeekends', on); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: 'error' }; }
@@ -1386,6 +1390,12 @@
           Week, Month, Year and Big Year all start their rows on this day.
         </p>
       {/if}
+
+      <label class="check">
+        <input type="checkbox" checked={settings?.showWeekNumbers ?? false} disabled={!settings}
+          onchange={(e) => changeShowWeekNumbers(e.currentTarget.checked)} />
+        Show week numbers
+      </label>
 
       <label class="check">
         <input type="checkbox" checked={settings?.hideWeekends ?? false} disabled={!settings}
