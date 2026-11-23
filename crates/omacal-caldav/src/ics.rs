@@ -372,6 +372,44 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
+impl CalEvent {
+    /// A missing override is reinstated only if the returned master still
+    /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
+    /// including floating times in the collection's zone.
+    pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
+        use omacal_core::recur::{Series, starts_at};
+
+        let Some((start, zone, all_day)) = resolve(&self.start, cal_tz) else { return false };
+        if self.status == "cancelled" {
+            return false;
+        }
+        let mut included = start == slot_ms;
+        let mut rules = Vec::new();
+        for line in &self.recurrence {
+            let Some(mut prop) = parse_line(line) else { return false };
+            if prop.name == "RRULE" {
+                rules.push(line.clone());
+                continue;
+            }
+            let dates = std::mem::take(&mut prop.value);
+            for date in dates.split(',') {
+                prop.value = date.to_owned();
+                let instant = parse_time(&prop).and_then(|time| resolve(&time, cal_tz));
+                match (prop.name.as_str(), instant) {
+                    ("EXDATE", None) => return false,
+                    ("EXDATE", Some((ms, ..))) if ms == slot_ms => return false,
+                    ("RDATE", Some((ms, ..))) if ms == slot_ms => included = true,
+                    _ => {}
+                }
+            }
+        }
+        included || (!rules.is_empty() && starts_at(&Series {
+            dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0, is_all_day: all_day,
+            recurrence: &rules,
+        }, slot_ms).unwrap_or(false))
+    }
+}
+
 /// One invitee off an `ATTENDEE` line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalAttendee {
@@ -2082,6 +2120,41 @@ mod tests {
     use super::*;
 
     const SIMPLE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:abc-1\r\nSUMMARY:Standup\\, daily\r\nDTSTART;TZID=Europe/Sofia:20260817T093000\r\nDTEND;TZID=Europe/Sofia:20260817T094500\r\nSTATUS:CONFIRMED\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn only_an_active_original_slot_is_reinstated() {
+        let timed = concat!(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:series\nDTSTART:20260817T091500\n",
+            "RRULE:FREQ=DAILY;COUNT=3\nRDATE:20260824T091500\n",
+            "EXDATE:20260817T091500,20260819T091500\nEND:VEVENT\nEND:VCALENDAR",
+        );
+        let mut event = events_in(&parse(timed).unwrap()).remove(0);
+        let zone = "Europe/Sofia";
+        let slot = |day| jiff::civil::date(2026, 8, day).at(9, 15, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        assert!(!event.includes_occurrence(slot(17), zone)); // excluded DTSTART
+        assert!(event.includes_occurrence(slot(18), zone));
+        assert!(!event.includes_occurrence(slot(19), zone)); // floating EXDATE
+        assert!(!event.includes_occurrence(slot(20), zone)); // COUNT elapsed
+        assert!(event.includes_occurrence(slot(24), zone)); // explicit addition
+        event.status = "cancelled".into();
+        assert!(!event.includes_occurrence(slot(18), zone));
+    }
+
+    #[test]
+    fn all_day_reinstatement_matches_the_calendar_date_across_dst() {
+        let raw = concat!(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:series\nDTSTART;VALUE=DATE:20261024\n",
+            "RRULE:FREQ=DAILY;COUNT=4\nEXDATE;VALUE=DATE:20261025\nEND:VEVENT\nEND:VCALENDAR",
+        );
+        let event = events_in(&parse(raw).unwrap()).remove(0);
+        let zone = "Europe/Berlin";
+        let midnight = |day| jiff::civil::date(2026, 10, day).at(0, 0, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        assert!(!event.includes_occurrence(midnight(25), zone));
+        assert!(event.includes_occurrence(midnight(26), zone));
+        assert!(!event.includes_occurrence(midnight(26) + 3_600_000, zone));
+    }
 
     #[test]
     fn a_simple_vevent_parses_completely() {

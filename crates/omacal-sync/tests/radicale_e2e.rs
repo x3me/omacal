@@ -899,3 +899,56 @@ async fn reinstating_an_overlapping_occurrence_removes_its_cancellation() {
     assert_eq!(events[0].google_id, "edge-series");
     assert_eq!(notices().await.unwrap(), 0, "the cancellation notice also disappears");
 }
+
+#[tokio::test]
+#[ignore = "needs a live Radicale"]
+async fn cancelling_a_moved_meeting_preserves_the_guests_notice() {
+    let base = base_url();
+    let user = format!("omacal-exdate-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    let reader = CalDavClient::new(&base, &user, "pw").unwrap();
+    let organizer = CalDavClient::new(&base, &user, "pw").unwrap();
+    let url = format!("{base}/{user}/work/");
+    let href = format!("{url}series.ics");
+    let series = SERIES.replace("DTSTAMP:", concat!(
+        "ORGANIZER:mailto:organizer@example.test\r\n",
+        "ATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.test\r\nDTSTAMP:",
+    ));
+    organizer.put(&href, &series, None).await.unwrap();
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query("INSERT INTO accounts(google_sub,email,created_at,provider)
+                 VALUES ('account','guest@example.test',0,'caldav')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO calendars(account_id,google_id,summary,timezone,access_role)
+                 VALUES (1,?,'Work','Europe/Sofia','owner')")
+        .bind(&url).execute(&pool).await.unwrap();
+    let now = "2026-08-16T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    let sync = || omacal_sync::caldav::sync_caldav_calendar(
+        &pool, &reader, 1, &url, true, false, WINDOW_START, WINDOW_END, now,
+    );
+    assert_eq!(sync().await.unwrap().upserted, 2);
+    assert!(omacal_store::changed_meetings(&pool, now).await.unwrap().is_empty());
+    let events = omacal_store::events_in_window(&pool, WINDOW_START, WINDOW_END).await.unwrap();
+    let moved = events.iter().find(|e| e.recurring_event_id.is_some()).unwrap();
+    let slot = omacal_caldav::WriteTime::Zoned {
+        dt: jiff::civil::date(2026, 8, 19).at(9, 15, 0, 0),
+        tzid: "Europe/Sofia".into(),
+    };
+    let cancelled = omacal_caldav::exclude_occurrence(&series, "e2e-series", &slot).unwrap();
+    organizer.put(&href, &cancelled, moved.etag.as_deref()).await.unwrap();
+    let result = sync().await.unwrap();
+    assert_eq!((result.upserted, result.deleted), (1, 1));
+    let changes = omacal_store::changed_meetings(&pool, now).await.unwrap();
+    assert_eq!(changes.len(), 1, "the guest sees the cancellation");
+    assert_eq!(changes[0].gid, moved.google_id);
+    assert_eq!(changes[0].kind, "cancelled");
+
+    // Removing the exclusion later reinstates the slot without a detached row.
+    let restored = cancelled.replace("EXDATE;TZID=Europe/Sofia:20260819T091500\r\n", "");
+    assert_ne!(restored, cancelled);
+    let etag: String = sqlx::query_scalar("SELECT etag FROM events WHERE google_id = 'e2e-series'")
+        .fetch_one(&pool).await.unwrap();
+    organizer.put(&href, &restored, Some(&etag)).await.unwrap();
+    sync().await.unwrap();
+    assert!(omacal_store::changed_meetings(&pool, now).await.unwrap().is_empty());
+}

@@ -186,6 +186,38 @@ fn until_ms(upper: &str) -> Option<i64> {
     date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
 }
 
+fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, RecurError> {
+    for line in recurrence {
+        source.push('\n');
+        source.push_str(&with_iana_tzid(line.trim()));
+    }
+
+    RRuleSet::from_str(&source)
+        .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
+}
+
+/// Does a rule generate this exact occurrence start? Duration and overlaps
+/// have no bearing on the identity of a detached recurrence.
+pub fn starts_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
+    let zone = series.dtstart_tz.parse()
+        .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
+    let set = rule_set(dtstart_line(series, zone)?, series.recurrence)?;
+    let target = to_chrono(slot_ms)?;
+    let target = if series.is_all_day {
+        // rrule represents a DATE as host-local midnight. Match its civil
+        // date only after verifying the requested instant is calendar midnight.
+        let date = target.with_timezone(&zone).date_naive();
+        if midnight_in_zone(date, zone) != slot_ms {
+            return Ok(false);
+        }
+        let midnight = date.and_time(chrono::NaiveTime::MIN);
+        Tz::LOCAL.from_local_datetime(&midnight).earliest().ok_or(RecurError::OutOfRange(slot_ms))?
+    } else {
+        target
+    };
+    Ok(!set.after(target).before(target).all(1).dates.is_empty())
+}
+
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
 ///
 /// `limit` bounds the number of occurrences generated, guarding against
@@ -225,15 +257,7 @@ pub fn expand(
         return Ok(Expansion { intervals: Vec::new(), truncated: false });
     }
 
-    let mut source = String::with_capacity(128);
-    source.push_str(&dtstart);
-    for line in series.recurrence {
-        source.push('\n');
-        source.push_str(&with_iana_tzid(line.trim()));
-    }
-
-    let set = RRuleSet::from_str(&source)
-        .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))?;
+    let set = rule_set(dtstart, series.recurrence)?;
 
     // Widen the query by the event duration so an occurrence that started
     // before the window but is still running is not dropped.

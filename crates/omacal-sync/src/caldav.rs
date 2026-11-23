@@ -20,6 +20,7 @@
 use omacal_caldav::{CalDavClient, CalDavError, CalEvent, DiscoveredCalendar, IcsTime};
 use omacal_store::StoredEvent;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 
 use crate::SyncOutcome;
 
@@ -204,6 +205,39 @@ pub fn caldav_todo_to_stored(
     }
 }
 
+/// A delete trigger records a cancellation even if removing an override
+/// merely reinstated the original slot. Recheck orphan notices on subsequent
+/// reports too: the organizer may later remove an EXDATE without sending
+/// another detached event.
+async fn clear_reinstated_notices(
+    conn: &mut sqlx::SqliteConnection,
+    calendar_id: i64,
+    masters: &HashMap<String, CalEvent>,
+    cal_tz: &str,
+) -> sqlx::Result<()> {
+    let notices: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ec.gid, ec.series_gid FROM event_changes ec
+         WHERE ec.calendar_id = ?1 AND ec.series_gid IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM events e
+                           WHERE e.calendar_id = ec.calendar_id AND e.google_id = ec.gid)",
+    )
+    .bind(calendar_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (gid, series) in notices {
+        let Some(master) = masters.get(&series) else { continue };
+        // CalDAV keys are uid#<original-start-ms>. The notice's old_start_utc
+        // can be the moved time, so it cannot identify the original slot.
+        let Some((uid, timestamp)) = gid.rsplit_once('#') else { continue };
+        let Ok(slot) = timestamp.parse::<i64>() else { continue };
+        if uid == series && master.includes_occurrence(slot, cal_tz) {
+            sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1 AND gid = ?2")
+                .bind(calendar_id).bind(gid).execute(&mut *conn).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Syncs one collection: events when it holds them, tasks when it holds
 /// them, both behind one ctag probe. `collection_url` is the calendar row's
 /// `google_id` — the column holds "the provider's identifier", and for
@@ -267,7 +301,7 @@ pub async fn sync_caldav_calendar(
             .events_in_window(collection_url, window_start_ms, window_end_ms)
             .await?;
         let mut seen: Vec<String> = Vec::new();
-        let mut complete_resources = Vec::new();
+        let mut masters = HashMap::new();
         let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
         for res in &resources {
             let Some(root) = omacal_caldav::parse(&res.ics) else {
@@ -275,9 +309,10 @@ pub async fn sync_caldav_calendar(
                 continue;
             };
             let first = rows.len();
-            for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
+            let events = omacal_caldav::events_in(&root);
+            for (i, ev) in events.iter().enumerate() {
                 let Some(stored) =
-                    caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
+                    caldav_to_stored(ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
                 else {
                     tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
                     continue;
@@ -291,14 +326,14 @@ pub async fn sync_caldav_calendar(
             // A REPORT returns the whole resource. Trust its exception list
             // only if we read every component and they belong to one master.
             let resource = &rows[first..];
-            if let Some(((master, _), exceptions)) = resource.split_first() {
+            if let (Some(((master, _), exceptions)), Some(event)) = (resource.split_first(), events.into_iter().next()) {
                 let uid = master.google_id.as_str();
                 if master.recurring_event_id.is_none()
                     && exceptions.iter().all(|(e, _)| e.recurring_event_id.as_deref() == Some(uid))
                     && root.components("VEVENT").count() == resource.len()
                     && root.components("VEVENT").any(|c| c.prop("RECURRENCE-ID").is_none())
                 {
-                    complete_resources.push(master.google_id.clone());
+                    masters.insert(master.google_id.clone(), event);
                 }
             }
         }
@@ -340,12 +375,15 @@ pub async fn sync_caldav_calendar(
             crate::reap::Reach::CalDav {
                 start_ms: window_start_ms,
                 end_ms: window_end_ms,
-                complete_resources: &complete_resources,
+                complete_resources: &masters.keys().map(String::as_str).collect::<Vec<_>>(),
             },
         )
         .await
         .map_err(anyhow::Error::from)?;
         outcome.deleted += deleted as usize;
+
+        clear_reinstated_notices(&mut tx, calendar_id, &masters, &cal_tz)
+            .await.map_err(anyhow::Error::from)?;
 
         let window_start_ms = omacal_store::history::retain_current_history(
             &mut tx, calendar_id, window_start_ms, outcome.upserted > 0 || outcome.deleted > 0,
