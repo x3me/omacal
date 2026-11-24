@@ -784,19 +784,20 @@ mod tests {
     async fn a_collections_first_sync_is_a_baseline_and_later_moves_are_news() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        fn ics(moved_to: &str) -> String {
+        fn ics(original: &str, moved_to: &str) -> String {
+            // Exercise the wire order used by servers that send exceptions first.
             format!(
-                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
-                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:{original}&#13;\n\
+                 DTSTART:{moved_to}&#13;\nDURATION:PT1H&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
                  ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\n\
-                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:20260810T060000Z&#13;\nDTSTART:{moved_to}&#13;\n\
-                 DTEND:20260811T090000Z&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
+                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
                  ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\nEND:VCALENDAR&#13;\n")
         }
         fn multistatus(body: String) -> String {
             format!(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">{body}</d:multistatus>"#)
         }
-        async fn serve(server: &MockServer, ctag: &str, moved_to: &str) {
+        async fn serve(server: &MockServer, ctag: &str, original: &str, moved_to: &str) {
             server.reset().await;
             Mock::given(method("PROPFIND"))
                 .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
@@ -807,7 +808,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
                     "<d:response><d:href>/cal/s1.ics</d:href><d:propstat><d:prop><d:getetag>\"{ctag}\"</d:getetag>\
                      <c:calendar-data>{}</c:calendar-data></d:prop>\
-                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(moved_to)))))
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(original, moved_to)))))
                 .mount(server).await;
         }
         let server = MockServer::start().await;
@@ -823,16 +824,29 @@ mod tests {
         };
         let far = 4_102_444_800_000; // 2100
 
-        serve(&server, "c1", "20260811T080000Z").await;
+        serve(&server, "c1", "20260810T060000Z", "20260811T080000Z").await;
         sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
         let exceptions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE recurring_event_id IS NOT NULL")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(exceptions, 1, "the fixture's premise: the moved occurrence was stored");
         assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
 
-        serve(&server, "c2", "20260811T083000Z").await;
+        serve(&server, "c2", "20260810T060000Z", "20260811T083000Z").await;
         sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
         assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
+
+        // The organizer restores August 10. A different override still comes
+        // first, and the omitted override lies entirely before the REPORT window.
+        let old_gid: String = sqlx::query_scalar("SELECT gid FROM event_changes").fetch_one(&pool).await.unwrap();
+        let start = "2026-08-15T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        serve(&server, "c3", "20260817T060000Z", "20260818T080000Z").await;
+        let outcome = sync_caldav_calendar(&pool, &client, 1, &url, true, false, start, far, 0).await.unwrap();
+        assert_eq!((outcome.upserted, outcome.deleted), (2, 1));
+        let old_row: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = ?1")
+            .bind(&old_gid).fetch_one(&pool).await.unwrap();
+        let old_notice: i64 = sqlx::query_scalar("SELECT count(*) FROM event_changes WHERE gid = ?1")
+            .bind(&old_gid).fetch_one(&pool).await.unwrap();
+        assert_eq!((old_row, old_notice), (0, 0), "the original slot is reinstated and its notice clears");
     }
 
     #[tokio::test]

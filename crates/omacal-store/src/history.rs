@@ -69,14 +69,14 @@ pub async fn displayed_window(pool: &sqlx::SqlitePool, requested: (i64, i64)) ->
         "SELECT s.window_start, s.window_end
            FROM calendars c JOIN accounts a ON a.id = c.account_id
            LEFT JOIN sync_state s ON s.calendar_id = c.id
-          WHERE c.selected = 1 AND c.sync_enabled = 1 AND c.supports_events = 1
+          WHERE c.selected = 1 AND c.supports_events = 1
             AND (a.provider IN ('google', 'caldav') OR (a.provider = 'webcal' AND s.calendar_id IS NULL))",
     ).fetch_all(pool).await?;
-    let mut covered = (i64::MIN, i64::MAX);
+    let mut covered = requested;
     for (start, end) in rows {
         let (Some(start), Some(end)) = (start, end) else { return Ok((0, 0)); };
-        covered.0 = covered.0.max(start).max(requested.0);
-        covered.1 = covered.1.min(end).min(requested.1);
+        covered.0 = covered.0.max(start);
+        covered.1 = covered.1.min(end);
     }
     Ok(covered)
 }
@@ -102,6 +102,7 @@ pub async fn forget_events_ending_before(
 ) -> Result<(), sqlx::Error> {
     // Keep the keys on this connection until both deletes finish. The event
     // delete trigger writes to event_changes, so its cleanup must run second.
+    sqlx::query("DROP TABLE IF EXISTS temp.history_forgotten").execute(&mut **tx).await?;
     sqlx::query(&format!(
         "CREATE TEMP TABLE history_forgotten AS
          SELECT calendar_id, google_id FROM events AS e
@@ -150,4 +151,32 @@ pub async fn retain_current_history(
         forget_events_ending_before(tx, Some(calendar_id), cutoff).await?;
     }
     Ok(cutoff.unwrap_or(fetched_start).max(fetched_start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retrying_a_failed_prune_recomputes_the_forgotten_keys() {
+        let pool = crate::connect_memory().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','e',0);
+                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                     VALUES (1,'c','C','UTC','owner');
+                     INSERT INTO events (calendar_id,google_id,start_utc,end_utc,start_tz,end_tz,updated_at)
+                     VALUES (1,'old',1,2,'UTC','UTC',0), (1,'keep',4,5,'UTC','UTC',0);
+                     CREATE TEMP TRIGGER interrupt_prune BEFORE DELETE ON events
+                     BEGIN SELECT RAISE(ABORT, 'interrupted prune'); END;")
+            .execute(&mut *tx).await.unwrap();
+
+        let error = forget_events_ending_before(&mut tx, Some(1), 6).await.unwrap_err();
+        assert!(error.to_string().contains("interrupted prune"));
+        sqlx::query("DROP TRIGGER temp.interrupt_prune").execute(&mut *tx).await.unwrap();
+        forget_events_ending_before(&mut tx, Some(1), 3).await.unwrap();
+        tx.commit().await.unwrap();
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT google_id FROM events")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(remaining, ["keep"]);
+    }
 }

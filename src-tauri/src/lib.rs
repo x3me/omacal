@@ -2159,17 +2159,17 @@ mod tests {
                          VALUES (?1,?2,?3)").bind(id).bind(start).bind(end).execute(&pool)
         };
         let january = commands::year_start_ms(2026, "UTC");
-        let flags = || async {
+        let flags = async |start| {
             let week = settings::WeekStart::Monday;
-            let grid = get_year_impl(&pool, 2026, "UTC", week, (wide, end), false).await.unwrap();
-            let ribbon = get_big_year_impl(&pool, 2026, "UTC", week, (wide, end), false).await.unwrap();
+            let grid = get_year_impl(&pool, 2026, "UTC", week, (start, end), false).await.unwrap();
+            let ribbon = get_big_year_impl(&pool, 2026, "UTC", week, (start, end), false).await.unwrap();
             (grid.months[0].days[0].unsynced, ribbon.rows.iter().flat_map(|r| &r.days)
                 .find(|d| d.start_ms == january).unwrap().unsynced)
         };
         update(1, wide).await.unwrap();
-        assert_eq!(flags().await, (true, true), "one visible calendar has never fetched events");
+        assert_eq!(flags(wide).await, (true, true), "one visible calendar has never fetched events");
         update(2, recent).await.unwrap();
-        assert_eq!(flags().await, (true, true), "the wider fetch is pending");
+        assert_eq!(flags(wide).await, (true, true), "the wider fetch is pending");
 
         use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
@@ -2177,7 +2177,7 @@ mod tests {
         Mock::given(path("/calendars/two/events")).respond_with(ResponseTemplate::new(403))
             .expect(1).mount(&server).await;
         assert!(omacal_sync::sync_calendar(&pool, &client, 2, "two", wide, end).await.is_err());
-        assert_eq!(flags().await, (true, true), "a failed fetch leaves January hatched");
+        assert_eq!(flags(wide).await, (true, true), "a failed fetch leaves January hatched");
 
         server.verify().await;
         server.reset().await;
@@ -2185,10 +2185,15 @@ mod tests {
             .set_body_json(serde_json::json!({"items": [], "nextSyncToken": "wider"})))
             .expect(1).mount(&server).await;
         omacal_sync::sync_calendar(&pool, &client, 2, "two", wide, end).await.unwrap();
-        assert_eq!(flags().await, (false, false), "both calendars have fetched January");
+        assert_eq!(flags(wide).await, (false, false), "both calendars have fetched January");
         update(2, recent).await.unwrap();
+        sqlx::query("UPDATE calendars SET sync_enabled = 0 WHERE id = 2").execute(&pool).await.unwrap();
+        assert_eq!(flags(wide).await, (true, true), "a visible paused calendar still limits coverage");
         sqlx::query("UPDATE calendars SET selected = 0 WHERE id = 2").execute(&pool).await.unwrap();
-        assert_eq!(flags().await, (false, false), "a hidden calendar does not limit the view");
+        assert_eq!(flags(wide).await, (false, false), "a hidden calendar does not limit the view");
+        sqlx::query("UPDATE calendars SET selected = 0").execute(&pool).await.unwrap();
+        assert_eq!(flags(recent).await, (true, true), "outside the requested span with no visible calendars");
+        assert_eq!(flags(wide).await, (false, false), "inside the requested span with no visible calendars");
     }
 
     /// **Not a test: the website's screenshot source.** Seeds the demo data

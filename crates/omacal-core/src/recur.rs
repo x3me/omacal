@@ -196,24 +196,46 @@ fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, Recur
         .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
 }
 
-/// Does a rule generate this exact occurrence start? Duration and overlaps
-/// have no bearing on the identity of a detached recurrence.
-pub fn starts_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
+/// Build RRULEs on civil dates. UTC midnight is just a coordinate for the
+/// rule iterator: a host clock can skip midnight or repeat it. A DATE UNTIL
+/// is inclusive on that same civil timeline. CalDAV resolves explicit RDATE
+/// and EXDATE values in the calendar's zone before asking about the rules.
+fn all_day_rules(start: chrono::NaiveDate, rules: &[String]) -> Result<RRuleSet, RecurError> {
+    let mut source = format!("DTSTART:{}T000000Z", start.format("%Y%m%d"));
+    for rule in rules {
+        let (name, parts) = rule.trim().split_once(':')
+            .ok_or_else(|| RecurError::InvalidRule(rule.clone()))?;
+        source.push('\n');
+        source.push_str(name);
+        source.push(':');
+        for (i, part) in parts.split(';').enumerate() {
+            if i != 0 { source.push(';'); }
+            source.push_str(part);
+            if part.split_once('=').is_some_and(|(key, value)| {
+                key.eq_ignore_ascii_case("UNTIL") && value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit())
+            }) {
+                source.push_str("T000000Z");
+            }
+        }
+    }
+    RRuleSet::from_str(&source).map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
+}
+
+/// Does an RRULE generate this exact occurrence start? The caller handles
+/// explicit dates separately. Duration and overlaps do not identify a slot.
+pub fn rules_start_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
     let zone = series.dtstart_tz.parse()
         .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
-    let set = rule_set(dtstart_line(series, zone)?, series.recurrence)?;
     let target = to_chrono(slot_ms)?;
-    let target = if series.is_all_day {
-        // rrule represents a DATE as host-local midnight. Match its civil
-        // date only after verifying the requested instant is calendar midnight.
+    let (set, target) = if series.is_all_day {
         let date = target.with_timezone(&zone).date_naive();
         if midnight_in_zone(date, zone) != slot_ms {
             return Ok(false);
         }
-        let midnight = date.and_time(chrono::NaiveTime::MIN);
-        Tz::LOCAL.from_local_datetime(&midnight).earliest().ok_or(RecurError::OutOfRange(slot_ms))?
+        let start = to_chrono(series.dtstart_ms)?.with_timezone(&zone).date_naive();
+        (all_day_rules(start, series.recurrence)?, to_chrono(midnight_in_zone(date, chrono_tz::UTC))?)
     } else {
-        target
+        (rule_set(dtstart_line(series, zone)?, series.recurrence)?, target)
     };
     Ok(!set.after(target).before(target).all(1).dates.is_empty())
 }
