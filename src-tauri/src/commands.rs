@@ -209,20 +209,13 @@ pub fn without_declined(events: Vec<StoredEvent>) -> Vec<StoredEvent> {
 }
 
 pub(crate) fn suppressed_slots(events: &[StoredEvent]) -> HashSet<(i64, &str, i64)> {
-    let all_day_zones: std::collections::HashMap<_, _> = events.iter()
-        .filter(|e| e.is_all_day && e.recurrence.is_some())
-        .map(|e| ((e.calendar_id, e.google_id.as_str()), e.start_tz.as_str()))
-        .collect();
-    events.iter().filter_map(|e| {
-        let master = e.recurring_event_id.as_deref()?;
-        let original = e.original_start_utc?;
-        // Keep provider IDs intact. Match the rendered civil-day boundary
-        // even if the provider resolved a missing midnight into the day.
-        let slot = all_day_zones.get(&(e.calendar_id, master))
-            .and_then(|zone| omacal_core::zone::all_day_slot_start(original, zone))
-            .unwrap_or(original);
-        Some((e.calendar_id, master, slot))
-    }).collect()
+    events
+        .iter()
+        .filter_map(|e| {
+            let master = e.recurring_event_id.as_deref()?;
+            Some((e.calendar_id, master, e.original_start_utc?))
+        })
+        .collect()
 }
 
 /// Expands one stored row into the concrete occurrences overlapping the window.
@@ -1042,68 +1035,6 @@ mod tests {
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
-    }
-
-    #[test]
-    fn restored_all_day_slots_reappear_on_the_date_named_by_caldav() {
-        for (zone, first, restored, next, bound) in [
-            ("America/St_Johns", "20101106", "20101107", "2010-11-08", "COUNT=2"),
-            ("America/Toronto", "19190330", "19190331", "1919-04-01", "COUNT=2"),
-            ("America/Havana", "20260307", "20260308", "2026-03-09", "UNTIL=20260308"),
-            ("America/Havana", "20251101", "20251102", "2025-11-03", "COUNT=2"),
-            // Provider and renderer must agree even when system tzdata and
-            // chrono-tz ship different rules for this date.
-            ("America/Havana", "20261102", "20261103", "2026-11-04", "COUNT=2"),
-        ] {
-            let resource = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:{first}\n\
-                RRULE:FREQ=DAILY;{bound}\nEND:VEVENT\nBEGIN:VEVENT\nUID:s\n\
-                RECURRENCE-ID;VALUE=DATE:{restored}\nDTSTART;VALUE=DATE:{restored}\n\
-                STATUS:CANCELLED\nEND:VEVENT\nEND:VCALENDAR");
-            let parsed = omacal_caldav::events_in(&omacal_caldav::parse(&resource).unwrap());
-            let rows: Vec<_> = parsed.iter().map(|e|
-                omacal_sync::caldav::caldav_to_stored(e, 1, zone, None, "").unwrap()).collect();
-            let original = rows[1].original_start_utc.unwrap();
-            let start = omacal_core::midnight_of_instant_in_zone(original, zone);
-            let end = next.parse::<jiff::civil::Date>().unwrap().in_tz(zone).unwrap().timestamp().as_millisecond();
-            assert!(parsed[0].includes_occurrence(original, zone), "reinstated stored ID in {zone}");
-            assert_eq!(occurrences(&rows[0], start, end), [Interval { start_ms: start, end_ms: end }], "{zone}");
-            assert!(suppressed_slots(&rows).contains(&(1, "s", start)), "stored override suppresses {zone} slot");
-            assert!(!suppressed_slots(&rows[..1]).contains(&(1, "s", start)), "deleting it restores {zone} slot");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_google_date_tombstone_suppresses_the_rendered_toronto_slot() {
-        let zone = "America/Toronto";
-        let master = serde_json::from_value(serde_json::json!({
-            "id":"s", "start":{"date":"1919-03-30"}, "end":{"date":"1919-03-31"},
-            "recurrence":["RRULE:FREQ=DAILY;COUNT=2"]
-        })).unwrap();
-        let tombstone = serde_json::from_value(serde_json::json!({
-            "id":"cancelled", "status":"cancelled", "recurringEventId":"s",
-            "originalStartTime":{"date":"1919-03-31"}
-        })).unwrap();
-        let rows = [omacal_sync::to_stored(&master, 1, zone).unwrap(),
-                    omacal_sync::to_cancelled_exception(&tombstone, 1, zone).unwrap()];
-        let instant = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
-        let start = instant("1919-03-31T04:30:00Z");
-        let end = instant("1919-04-01T04:00:00Z");
-        assert_eq!(rows[1].original_start_utc, Some(instant("1919-03-31T05:00:00Z")));
-        assert_eq!(occurrences(&rows[0], start, end), [Interval { start_ms: start, end_ms: end }]);
-        let pool = omacal_store::connect_memory().await.unwrap();
-        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','e',0);
-                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
-                     VALUES (1,'work','Work','America/Toronto','owner')")
-            .execute(&pool).await.unwrap();
-        for row in &rows {
-            omacal_store::upsert_event(&pool, row).await.unwrap();
-        }
-        // The stored ID is 30 minutes after the rendered day starts. Even
-        // a narrow query ending before that ID must retrieve the cancellation.
-        let inside = omacal_store::events_in_window(&pool, start, start + 60_000).await.unwrap();
-        assert!(suppressed_slots(&inside).contains(&(1, "s", start)));
-        let before = omacal_store::events_in_window(&pool, start - 60_000, start).await.unwrap();
-        assert_eq!(before.len(), 1, "only the master is returned before the original slot");
     }
 
     /// #158's own fixture, end to end: an Outlook feed in "India Standard

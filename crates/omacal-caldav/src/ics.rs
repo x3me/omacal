@@ -372,29 +372,44 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
+/// Check an all-day UNTIL against this particular slot before asking the
+/// rule iterator about its civil date. Other rules and RDATEs remain eligible.
+fn all_day_rule_at(mut rule: Property, slot_ms: i64, zone: &str) -> Option<String> {
+    let value = std::mem::take(&mut rule.value);
+    let mut fields = Vec::new();
+    for field in value.split(';') {
+        if let Some((_, until)) = field.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("UNTIL")) {
+            rule.value = until.to_owned();
+            let (end, ..) = resolve(&parse_time(&rule)?, zone)?;
+            if slot_ms > end { return None; }
+        } else {
+            fields.push(field);
+        }
+    }
+    Some(format!("RRULE:{}", fields.join(";")))
+}
+
 impl CalEvent {
     /// A missing override is reinstated only if the returned master still
     /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
     /// including floating times in the collection's zone.
     pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
-        use omacal_core::recur::{Series, starts_at};
+        use omacal_core::recur::{Series, rules_start_at};
 
         let Some((start, zone, all_day)) = resolve(&self.start, cal_tz) else { return false };
         if self.status == "cancelled" {
             return false;
-        }
-        if all_day {
-            return starts_at(&Series {
-                dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0,
-                is_all_day: true, recurrence: &self.recurrence,
-            }, slot_ms).unwrap_or(false);
         }
         let mut included = start == slot_ms;
         let mut rules = Vec::new();
         for line in &self.recurrence {
             let Some(mut prop) = parse_line(line) else { return false };
             if prop.name == "RRULE" {
-                rules.push(line.clone());
+                if all_day {
+                    rules.extend(all_day_rule_at(prop, slot_ms, &zone));
+                } else {
+                    rules.push(line.clone());
+                }
                 continue;
             }
             let dates = std::mem::take(&mut prop.value);
@@ -409,7 +424,7 @@ impl CalEvent {
                 }
             }
         }
-        included || (!rules.is_empty() && starts_at(&Series {
+        included || (!rules.is_empty() && rules_start_at(&Series {
             dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0, is_all_day: all_day,
             recurrence: &rules,
         }, slot_ms).unwrap_or(false))
@@ -2166,11 +2181,15 @@ mod tests {
     fn all_day_reinstatement_on_a_skipped_midnight() {
         // In Havana March 8 starts at 01:00, which is 05:00 UTC.
         let slot = "2026-03-08T05:00:00Z".parse::<Timestamp>().unwrap().as_millisecond();
-        for rule in ["COUNT=2", "UNTIL=20260308"] {
+        for (rule, included) in [
+            ("COUNT=2", true), ("UNTIL=20260308", true),
+            ("UNTIL=20260308T235959", true), ("UNTIL=20260308T050000Z", true),
+            ("UNTIL=20260308T045959Z", false),
+        ] {
             let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:20260307\n\
                                RRULE:FREQ=DAILY;{rule}\nEND:VEVENT\nEND:VCALENDAR");
             let event = events_in(&parse(&raw).unwrap()).remove(0);
-            assert!(event.includes_occurrence(slot, "America/Havana"), "{rule}");
+            assert_eq!(event.includes_occurrence(slot, "America/Havana"), included, "{rule}");
             assert!(!event.includes_occurrence(slot + 3_600_000, "America/Havana"), "{rule}");
             assert!(!event.includes_occurrence(slot + 23 * 3_600_000, "America/Havana"), "{rule}");
         }
