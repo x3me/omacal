@@ -2725,7 +2725,7 @@
   <Header
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
-    {showWeekNumbers} weekPanned={weekPanDays !== 0}
+    {showWeekNumbers} weekPanned={weekPanDays % 7 !== 0}
     weekNumberStartMs={hideWeekends() ? weekdayOnOrAfter(pannedWeekStartMs) : pannedWeekStartMs}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
     {busy} error={writeError ?? error} {calendars} {view} {listMode}

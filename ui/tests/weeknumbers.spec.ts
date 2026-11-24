@@ -91,6 +91,33 @@ test('panning a fixed week updates the range in the header', async ({ page }) =>
   await expect(page.locator('header [data-week-number]')).toHaveText('Weeks 5–6');
 });
 
+/** A strong swipe turns a whole week and leaves the window aligned, so it is
+ *  named like any other week: with a Sunday start, Sun 4 – Sat 10 Feb is
+ *  "Week 6", as › reaches it, not "Weeks 5–6" (the panned window's range). */
+test('a whole-week swipe on a Sunday week is still one week number', async ({ page }) => {
+  await page.clock.setFixedTime(APP_NOW);
+  await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({
+    showWeekNumbers: true, weekStart: 'sunday',
+  })));
+  await page.goto(app);
+  const first = page.locator('[data-testid="week-body"] .col').first();
+  await expect(first).toHaveAttribute('data-start-ms', String(Date.UTC(2024, 0, 28)));
+  await expect(page.locator('header [data-week-number]')).toHaveText('Week 5');
+  await page.evaluate(() => {
+    const body = document.querySelector('[data-testid="week-body"]')!;
+    const r = body.getBoundingClientRect();
+    for (let i = 0; i < 4; i++) {
+      body.dispatchEvent(new WheelEvent('wheel', {
+        deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100, bubbles: true, cancelable: true,
+      }));
+      const t = performance.now();
+      while (performance.now() - t < 8) { /* busy-wait: a strong flick's spacing */ }
+    }
+  });
+  await expect(first).toHaveAttribute('data-start-ms', String(Date.UTC(2024, 1, 4)));
+  await expect(page.locator('header [data-week-number]')).toHaveText('Week 6');
+});
+
 test('a rolling window starting on a hidden weekend uses the first displayed day', async ({ page }) => {
   await page.clock.setFixedTime(new Date('2024-01-28T12:00:00Z'));
   await page.addInitScript(() => sessionStorage.setItem('omacal-stub-settings', JSON.stringify({
