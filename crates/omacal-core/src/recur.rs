@@ -187,7 +187,7 @@ fn civil_rule_line(head: &str, values: &str, zone: chrono_tz::Tz) -> String {
 
 /// DATE identifies the civil-day boundary. For DATE-TIME additions and
 /// exclusions keep the actual instant until matching pairs are subtracted.
-fn explicit_slot(value: &str, params: &str, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<Option<i64>, RecurError> {
+fn explicit_slot(value: &str, params: &str, zone: chrono_tz::Tz) -> Result<Option<i64>, RecurError> {
     if value.len() == 8 {
         let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
             .map_err(|_| RecurError::InvalidRule(value.to_owned()))?;
@@ -195,14 +195,18 @@ fn explicit_slot(value: &str, params: &str, zone: chrono_tz::Tz, anchor: chrono:
         // A skipped calendar date has no instant to add or exclude.
         return Ok((to_chrono(start)?.with_timezone(&zone).date_naive() == date).then_some(start));
     }
-    let property = if params.split(';').any(|p| p.to_ascii_uppercase().starts_with("TZID=")) {
-        format!("RDATE{params}:{value}")
-    } else {
-        format!("RDATE{params};TZID={zone}:{value}")
+    let tzid = params.split(';').filter_map(|p| p.split_once('='))
+        .find(|(key, _)| key.eq_ignore_ascii_case("TZID")).map(|(_, id)| id.trim_matches('"'));
+    let (wall_time, time_zone) = match value.strip_suffix('Z') {
+        Some(utc) => (utc, "UTC"),
+        None => (value, tzid.unwrap_or(zone.name())),
     };
-    let parsed = RRuleSet::new(anchor).set_from_string(&property)
-        .map_err(|e| RecurError::InvalidRule(format!("{e}: {property}")))?;
-    let ms = parsed.get_rdate().first().ok_or_else(|| RecurError::InvalidRule(property))?.timestamp_millis();
+    // Use the same gap and fold disambiguation as stored CalDAV recurrence IDs.
+    let wall = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", wall_time)
+        .map_err(|e| RecurError::InvalidRule(format!("{value}: {e}")))?;
+    let resolved = wall.in_tz(time_zone).or_else(|_| wall.in_tz(zone.name()))
+        .map_err(|e| RecurError::InvalidRule(format!("{value}: {e}")))?;
+    let ms = resolved.timestamp().as_millisecond();
     Ok(Some(all_day_slot_start(ms, zone).unwrap_or(ms)))
 }
 
@@ -225,7 +229,7 @@ fn all_day_set(series: &Series, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz
             continue;
         };
         for value in values.split(',') {
-            target.extend(explicit_slot(value, &head[name.len()..], zone, anchor)?);
+            target.extend(explicit_slot(value, &head[name.len()..], zone)?);
         }
     }
     if set.get_rrule().is_empty() {
@@ -794,6 +798,8 @@ mod tests {
             (vec!["RRULE:FREQ=DAILY;COUNT=1", "RDATE:20260308T120000Z"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "RDATE:20260308T120000Z"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE;VALUE=DATE:20260308", "RDATE:20260308T120000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=3", "EXDATE:20260308T000000"], vec![after_gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=3", "EXDATE;TZID=America/Havana:20260308T000000"], vec![after_gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T050000Z"], vec![]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T051500Z"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20260307,20260308",
