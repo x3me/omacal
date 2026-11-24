@@ -372,27 +372,39 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
-/// Check an all-day UNTIL against this particular slot before asking the
-/// rule iterator about its civil date. Other rules and RDATEs remain eligible.
-fn all_day_rule_at(mut rule: Property, slot_ms: i64, zone: &str) -> Option<String> {
+/// Resolve UNTIL against the real occurrence. Apply COUNT only after
+/// discarding generated wall times that don't exist in the provider's zone.
+fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<(String, Option<u32>)> {
     let value = std::mem::take(&mut rule.value);
     let mut fields = Vec::new();
+    let mut count = None;
+    let mut bounded = false;
     for field in value.split(';') {
-        if let Some((_, until)) = field.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("UNTIL")) {
-            // The general ICS property parser tolerates trailing text. A rule
-            // can clear a notice only when its entire bound is understood.
-            let wall = until.strip_suffix('Z').unwrap_or(until);
-            if until.len() != 8 && (wall.len() != 15 || wall.as_bytes()[8] != b'T') {
+        let (key, value) = field.split_once('=')?;
+        if key.eq_ignore_ascii_case("COUNT") {
+            if count.is_some() || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
+            count = Some(value.parse().ok()?);
+        } else if key.eq_ignore_ascii_case("UNTIL") {
+            if bounded { return None; }
+            bounded = true;
+            let wall = value.strip_suffix('Z').unwrap_or(value);
+            if value.len() != 8 && (wall.len() != 15 || wall.as_bytes()[8] != b'T') {
                 return None;
             }
-            rule.value = until.to_owned();
-            let (end, ..) = resolve(&parse_time(&rule)?, zone)?;
-            if slot_ms > end { return None; }
+            rule.value = value.to_owned();
+            let until = parse_time(&rule)?;
+            match (&until, start) {
+                (_, IcsTime::Date(_)) | (IcsTime::Utc(_), _)
+                    | (IcsTime::Floating(_), IcsTime::Floating(_)) => {}
+                _ => return None,
+            }
+            if slot_ms > resolve(&until, zone)?.0 { return None; }
         } else {
             fields.push(field);
         }
     }
-    Some(format!("RRULE:{}", fields.join(";")))
+    if bounded && count.is_some() { return None; }
+    Some((format!("RRULE:{}", fields.join(";")), count))
 }
 
 /// Does this instant identify a DATE under the installed rules?
@@ -403,11 +415,6 @@ fn date_for_exact_id(slot_ms: i64, zone: &str) -> Option<Date> {
         return None;
     }
     Some(date)
-}
-
-fn all_day_rule_instants(first: Date, slot_ms: i64, zone: &str) -> Option<(i64, i64)> {
-    let date = date_for_exact_id(slot_ms, zone)?;
-    Some((resolve(&IcsTime::Date(first), "UTC")?.0, resolve(&IcsTime::Date(date), "UTC")?.0))
 }
 
 impl CalEvent {
@@ -437,9 +444,9 @@ impl CalEvent {
     /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
     /// including floating times in the collection's zone.
     pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
-        use omacal_core::recur::rules_start_at;
+        use jiff::tz::TimeZone;
 
-        let Some((start, zone, all_day)) = resolve(&self.start, cal_tz) else { return false };
+        let Some((start, zone, _)) = resolve(&self.start, cal_tz) else { return false };
         if self.status == "cancelled" {
             return false;
         }
@@ -448,11 +455,7 @@ impl CalEvent {
         for line in &self.recurrence {
             let Some(mut prop) = parse_line(line) else { return false };
             if prop.name == "RRULE" {
-                if all_day {
-                    rules.extend(all_day_rule_at(prop, slot_ms, &zone));
-                } else {
-                    rules.push(line.clone());
-                }
+                rules.extend(rule_at_slot(prop, &self.start, slot_ms, &zone));
                 continue;
             }
             let dates = std::mem::take(&mut prop.value);
@@ -470,12 +473,23 @@ impl CalEvent {
         if included || rules.is_empty() {
             return included;
         }
-        if let IcsTime::Date(first) = self.start {
-            let Some((anchor, slot)) = all_day_rule_instants(first, slot_ms, &zone) else { return false };
-            rules_start_at(anchor, "UTC", &rules, slot).unwrap_or(false)
-        } else {
-            rules_start_at(start, &zone, &rules, slot_ms).unwrap_or(false)
-        }
+        let Ok(slot) = Timestamp::from_millisecond(slot_ms) else { return false };
+        let (anchor, timezone, target) = match &self.start {
+            IcsTime::Date(first) => {
+                let Some(date) = date_for_exact_id(slot_ms, &zone) else { return false };
+                let utc = TimeZone::UTC;
+                let Ok(target) = utc.to_timestamp(date.at(0, 0, 0, 0)) else { return false };
+                (first.at(0, 0, 0, 0), utc, target)
+            }
+            IcsTime::Utc(ts) => (TimeZone::UTC.to_datetime(*ts), TimeZone::UTC, slot),
+            IcsTime::Floating(dt) | IcsTime::Zoned { dt, .. } => {
+                let Ok(timezone) = TimeZone::get(&zone) else { return false };
+                (*dt, timezone, slot)
+            }
+        };
+        rules.iter().any(|(rule, count)| {
+            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, *count, target)
+        })
     }
 }
 
@@ -2208,6 +2222,39 @@ mod tests {
         assert!(event.includes_occurrence(slot(24), zone)); // explicit addition
         event.status = "cancelled".into();
         assert!(!event.includes_occurrence(slot(18), zone));
+    }
+
+    #[test]
+    fn timed_reinstatement_uses_the_providers_wall_clock_at_each_slot() {
+        let zone = "America/Havana";
+        let midnight = jiff::civil::date(2026, 12, 2).at(0, 0, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        let mut results = Vec::new();
+        for time in ["230000", "000000"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:20261030T{time}\nRRULE:FREQ=DAILY;COUNT=40\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            results.push(event.includes_occurrence(midnight, "UTC"));
+        }
+        assert_eq!(results, [false, true]);
+    }
+
+    #[test]
+    fn timed_reinstatement_counts_real_slots_and_matches_the_first_fold_instant() {
+        let ms = |utc: &str| utc.parse::<Timestamp>().unwrap().as_millisecond();
+        let event = |start: &str, bound: &str| {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID=America/New_York:{start}\nRRULE:FREQ=DAILY;{bound}\nEND:VEVENT\nEND:VCALENDAR");
+            events_in(&parse(&raw).unwrap()).remove(0)
+        };
+        let spring = event("20260307T023000", "COUNT=2");
+        assert!(!spring.includes_occurrence(ms("2026-03-08T07:30:00Z"), "UTC"));
+        assert!(spring.includes_occurrence(ms("2026-03-09T06:30:00Z"), "UTC"));
+        assert!(!spring.includes_occurrence(ms("2026-03-10T06:30:00Z"), "UTC"));
+        let autumn = event("20261031T013000", "COUNT=2");
+        assert!(autumn.includes_occurrence(ms("2026-11-01T05:30:00Z"), "UTC"));
+        assert!(!autumn.includes_occurrence(ms("2026-11-01T06:30:00Z"), "UTC"));
+        let slot = ms("2026-11-02T06:30:00Z");
+        assert!(event("20261031T013000", "UNTIL=20261102T063000Z").includes_occurrence(slot, "UTC"));
+        assert!(!event("20261031T013000", "UNTIL=20261102T062959Z").includes_occurrence(slot, "UTC"));
     }
 
     #[test]
