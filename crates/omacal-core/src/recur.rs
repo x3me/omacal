@@ -1,6 +1,6 @@
 use crate::layout::Interval;
 use crate::windows_zone::iana_for_windows;
-use crate::zone::{date_in_zone, midnight_in_zone};
+use crate::zone::{all_day_slot_start, date_in_zone, midnight_in_zone};
 use chrono::TimeZone;
 use rrule::{RRuleSet, Tz};
 use std::str::FromStr;
@@ -41,52 +41,6 @@ fn to_chrono(ms: i64) -> Result<chrono::DateTime<Tz>, RecurError> {
         .timestamp_millis_opt(ms)
         .single()
         .ok_or(RecurError::OutOfRange(ms))
-}
-
-/// Renders the DTSTART line in the series' own zone, which is what makes a
-/// "09:00 every Monday" meeting stay at 09:00 across a DST transition.
-///
-/// An all-day series takes RFC 5545's `VALUE=DATE` form, which carries no
-/// TZID — but the date it carries is still read **in the series' own zone**,
-/// because that is where the instant came from: the store holds midnight in
-/// the *calendar's* zone for an all-day event, and both resolvers put it
-/// there (`omacal_sync::convert` for Google's bare `date`, `omacal_caldav`'s
-/// `resolve` for `DTSTART;VALUE=DATE`). [`crate::zone`] says the same thing,
-/// and reading it in any other zone is a day out on one side of midnight or
-/// the other.
-///
-/// **Reading it in UTC was issue #44.** Every zone ahead of UTC puts local
-/// midnight on the *previous* UTC day — Wednesday 12 August in Brisbane is
-/// 14:00 Tuesday 11 August UTC — so the whole series expanded from the wrong
-/// anchor and every occurrence landed a day early. Zones behind UTC were
-/// unaffected, which is why the report named positive offsets, and why this
-/// survived: the fixtures that covered it were built from midnight UTC, an
-/// instant the store never actually holds.
-///
-/// It is [`crate::zone::date_in_zone`] rather than a second derivation for
-/// the reason that module exists: this project has twice nearly shipped a
-/// second date formatter, and the copy that got written here is what was
-/// wrong. Re-anchoring on the way back out is `midnight_in_zone`'s job —
-/// `rrule` parses a TZID-less `VALUE=DATE` DTSTART against `Tz::LOCAL`, the
-/// *host machine's* zone, so the occurrences it hands back have to be pinned
-/// to something host-independent before they mean anything.
-fn dtstart_line(series: &Series, zone: chrono_tz::Tz) -> Result<String, RecurError> {
-    if series.is_all_day {
-        let date = date_in_zone(series.dtstart_ms, series.dtstart_tz);
-        return Ok(format!("DTSTART;VALUE=DATE:{}", date.replace('-', "")));
-    }
-
-    let local = chrono::Utc
-        .timestamp_millis_opt(series.dtstart_ms)
-        .single()
-        .ok_or(RecurError::OutOfRange(series.dtstart_ms))?
-        .with_timezone(&zone);
-
-    Ok(format!(
-        "DTSTART;TZID={}:{}",
-        series.dtstart_tz,
-        local.format("%Y%m%dT%H%M%S")
-    ))
 }
 
 /// `line` with a Windows `TZID` (Outlook's `EXDATE;TZID=India Standard
@@ -186,58 +140,117 @@ fn until_ms(upper: &str) -> Option<i64> {
     date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
 }
 
-fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, RecurError> {
-    for line in recurrence {
-        source.push('\n');
-        source.push_str(&with_iana_tzid(line.trim()));
-    }
-
-    RRuleSet::from_str(&source)
-        .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
+/// Coordinate for iterating a DATE with rrule. Civil dates have no offset;
+/// UTC is an internal clock with a midnight on every date.
+fn civil_midnight(date: chrono::NaiveDate) -> chrono::DateTime<Tz> {
+    Tz::UTC.from_utc_datetime(&date.and_time(chrono::NaiveTime::MIN))
 }
 
-/// Build RRULEs on civil dates. UTC midnight is just a coordinate for the
-/// rule iterator: a host clock can skip midnight or repeat it. A DATE UNTIL
-/// is inclusive on that same civil timeline. CalDAV resolves explicit RDATE
-/// and EXDATE values in the calendar's zone before asking about the rules.
-fn all_day_rules(start: chrono::NaiveDate, rules: &[String]) -> Result<RRuleSet, RecurError> {
-    let mut source = format!("DTSTART:{}T000000Z", start.format("%Y%m%d"));
-    for rule in rules {
-        let (name, parts) = rule.trim().split_once(':')
-            .ok_or_else(|| RecurError::InvalidRule(rule.clone()))?;
-        source.push('\n');
-        source.push_str(name);
-        source.push(':');
-        for (i, part) in parts.split(';').enumerate() {
-            if i != 0 { source.push(';'); }
-            source.push_str(part);
-            if part.split_once('=').is_some_and(|(key, value)| {
-                key.eq_ignore_ascii_case("UNTIL") && value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit())
-            }) {
-                source.push_str("T000000Z");
+/// The all-day interval containing an instant. In St John's the clock once
+/// rolled back at 00:01. During the repeated hour the wall date is yesterday
+/// although today's all-day interval has already started.
+fn interval_date(instant: chrono::DateTime<Tz>, zone: chrono_tz::Tz) -> chrono::NaiveDate {
+    let date = instant.with_timezone(&zone).date_naive();
+    if let Some(next) = date.succ_opt() {
+        if midnight_in_zone(next, zone) <= instant.timestamp_millis() {
+            return next;
+        }
+    }
+    date
+}
+
+/// Interpret a DATE or the UTC UNTIL used by some servers on DATE series.
+/// The latter bounds actual starts in the calendar zone.
+fn all_day_until(value: &str, zone: chrono_tz::Tz) -> Option<chrono::NaiveDate> {
+    if value.len() == 8 {
+        chrono::NaiveDate::parse_from_str(value, "%Y%m%d").ok()
+    } else {
+        let utc = chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok()?;
+        Some(interval_date(Tz::UTC.from_utc_datetime(&utc), zone))
+    }
+}
+
+fn all_day_line(line: &str, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<String, RecurError> {
+    let invalid = || RecurError::InvalidRule(line.to_owned());
+    let (head, values) = line.split_once(':').ok_or_else(invalid)?;
+    let name = head.split(';').next().unwrap_or(head);
+    if name.eq_ignore_ascii_case("RDATE") || name.eq_ignore_ascii_case("EXDATE") {
+        // Standard DATE lists can go directly to rrule with an explicit
+        // zero-offset zone. Its default for a bare DATE is the host zone.
+        if values.split(',').all(|v| v.len() == 8 && v.bytes().all(|b| b.is_ascii_digit())) {
+            return Ok(format!("{name};TZID=UTC:{values}"));
+        }
+        let mut dates = Vec::new();
+        for value in values.split(',') {
+            // Some providers send DATE-TIME on an all-day series. Resolve it
+            // in its stated zone (floating times use the calendar zone).
+            let params = &head[name.len()..];
+            let property = if params.split(';').any(|p| p.to_ascii_uppercase().starts_with("TZID=")) {
+                format!("RDATE{params}:{value}")
+            } else {
+                format!("RDATE{params};TZID={zone}:{value}")
+            };
+            let parsed = RRuleSet::new(anchor).set_from_string(&property).map_err(|_| invalid())?;
+            let instant = parsed.get_rdate().first().ok_or_else(invalid)?;
+            let local = instant.with_timezone(&zone);
+            if name.eq_ignore_ascii_case("RDATE") || all_day_slot_start(instant.timestamp_millis(), zone).is_some() {
+                dates.push(local.format("%Y%m%d").to_string());
             }
+        }
+        if dates.is_empty() {
+            return Ok(String::new());
+        }
+        return Ok(format!("{name};TZID=UTC:{}", dates.join(",")));
+    }
+
+    let mut result = format!("{head}:");
+    for (i, part) in values.split(';').enumerate() {
+        if i != 0 { result.push(';'); }
+        if let Some(until) = part.split_once('=').and_then(|(key, value)| {
+            if key.eq_ignore_ascii_case("UNTIL") { all_day_until(value, zone) } else { None }
+        }) {
+            result.push_str(&format!("UNTIL={}T000000Z", until.format("%Y%m%d")));
+        } else {
+            result.push_str(part);
+        }
+    }
+    Ok(result)
+}
+
+fn rule_set(series: &Series, zone: chrono_tz::Tz) -> Result<RRuleSet, RecurError> {
+    let local = to_chrono(series.dtstart_ms)?.with_timezone(&zone);
+    let anchor = civil_midnight(local.date_naive());
+    let mut source = if series.is_all_day {
+        format!("DTSTART:{}", anchor.format("%Y%m%dT%H%M%SZ"))
+    } else {
+        format!("DTSTART;TZID={zone}:{}", local.format("%Y%m%dT%H%M%S"))
+    };
+    for line in series.recurrence {
+        let mut line = with_iana_tzid(line.trim());
+        if series.is_all_day {
+            line = all_day_line(&line, zone, anchor)?.into();
+        }
+        if !line.is_empty() {
+            source.push('\n');
+            source.push_str(&line);
         }
     }
     RRuleSet::from_str(&source).map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
 }
 
-/// Does an RRULE generate this exact occurrence start? The caller handles
-/// explicit dates separately. Duration and overlaps do not identify a slot.
-pub fn rules_start_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
+/// Does the recurrence set generate this exact occurrence start?
+pub fn starts_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
     let zone = series.dtstart_tz.parse()
         .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
-    let target = to_chrono(slot_ms)?;
-    let (set, target) = if series.is_all_day {
+    let mut target = to_chrono(slot_ms)?;
+    if series.is_all_day {
         let date = target.with_timezone(&zone).date_naive();
-        if midnight_in_zone(date, zone) != slot_ms {
+        if all_day_slot_start(slot_ms, zone).is_none() {
             return Ok(false);
         }
-        let start = to_chrono(series.dtstart_ms)?.with_timezone(&zone).date_naive();
-        (all_day_rules(start, series.recurrence)?, to_chrono(midnight_in_zone(date, chrono_tz::UTC))?)
-    } else {
-        (rule_set(dtstart_line(series, zone)?, series.recurrence)?, target)
-    };
-    Ok(!set.after(target).before(target).all(1).dates.is_empty())
+        target = civil_midnight(date);
+    }
+    Ok(!rule_set(series, zone)?.after(target).before(target).all(1).dates.is_empty())
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
@@ -258,7 +271,9 @@ pub fn expand(
         .dtstart_tz
         .parse()
         .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_string()))?;
-    let dtstart = dtstart_line(series, zone)?;
+    if to_ms <= from_ms {
+        return Ok(Expansion { intervals: Vec::new(), truncated: false });
+    }
 
     if series.recurrence.is_empty() {
         let end = series.dtstart_ms + series.duration_ms;
@@ -279,21 +294,25 @@ pub fn expand(
         return Ok(Expansion { intervals: Vec::new(), truncated: false });
     }
 
-    let set = rule_set(dtstart, series.recurrence)?;
-
-    // Widen the query by the event duration so an occurrence that started
-    // before the window but is still running is not dropped.
-    let query_from = from_ms.saturating_sub(series.duration_ms);
-    let result = set
-        .after(to_chrono(query_from)?)
-        .before(to_chrono(to_ms)?)
-        .all(limit);
-
+    let set = rule_set(series, zone)?;
     let span_days = all_day_span_days(series.dtstart_ms, series.dtstart_ms.saturating_add(series.duration_ms), series.dtstart_tz);
+    let (first, last) = if series.is_all_day {
+        // An N-day occurrence can start up to N-1 dates before the first
+        // displayed date. Each endpoint belongs to the same civil timeline
+        // as DTSTART, even when the real day is shorter or longer than 24h.
+        let first = interval_date(to_chrono(from_ms)?, zone)
+            .checked_sub_days(chrono::Days::new(span_days - 1)).ok_or(RecurError::OutOfRange(from_ms))?;
+        let last = interval_date(to_chrono(to_ms - 1)?, zone);
+        (civil_midnight(first), civil_midnight(last))
+    } else {
+        (to_chrono(from_ms.saturating_sub(series.duration_ms))?, to_chrono(to_ms)?)
+    };
+    let result = set.after(first).before(last).all(limit);
+
     let intervals = result
         .dates
         .into_iter()
-        .map(|d| {
+        .filter_map(|d| {
             if series.is_all_day {
                 // Both ends are midnights of civil dates, so the occurrence
                 // covers whole days whatever their length. The master's
@@ -304,14 +323,14 @@ pub fn expand(
                 // short. Either way the span ended on the day before it
                 // started, and the occurrence vanished.
                 let date = d.date_naive();
-                let last = date + chrono::Days::new(span_days);
-                Interval {
-                    start_ms: midnight_in_zone(date, zone),
-                    end_ms: midnight_in_zone(last, zone),
-                }
+                let last = date.checked_add_days(chrono::Days::new(span_days))?;
+                let start_ms = midnight_in_zone(date, zone);
+                // A dateline change can skip the entire date.
+                let actual = chrono::DateTime::from_timestamp_millis(start_ms)?.with_timezone(&zone);
+                (actual.date_naive() == date).then(|| Interval { start_ms, end_ms: midnight_in_zone(last, zone) })
             } else {
                 let start = d.timestamp_millis();
-                Interval { start_ms: start, end_ms: start + series.duration_ms }
+                Some(Interval { start_ms: start, end_ms: start.saturating_add(series.duration_ms) })
             }
         })
         .filter(|i| i.start_ms < to_ms && i.end_ms > from_ms)
@@ -704,10 +723,8 @@ mod tests {
         assert_eq!(dates, ["2026-08-12", "2026-08-26", "2026-09-09"]);
     }
 
-    /// Regression guard for the fix: keeping DTSTART as `VALUE=DATE` (rather
-    /// than switching all-day series to a timed, TZID-bearing DTSTART) means
-    /// a date-valued EXDATE — the form Google actually sends for an all-day
-    /// series' cancelled instances — must still line up and exclude.
+    /// A date-valued EXDATE, the form Google sends for a cancelled all-day
+    /// instance, must exclude exactly that civil date.
     #[test]
     fn exdate_removes_an_instance_from_an_all_day_series() {
         let s = Series {
@@ -723,6 +740,41 @@ mod tests {
         assert_eq!(out.len(), 2, "the excluded instance should not be produced");
         let excluded_start = ALL_DAY_AUG3_SOFIA + DAY; // Aug 4 midnight Sofia
         assert!(out.iter().all(|i| i.start_ms != excluded_start));
+    }
+
+    #[test]
+    fn an_all_day_window_uses_civil_dates_for_limits_and_explicit_dates() {
+        let zone = "America/Havana";
+        let instant = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let start = instant("2026-03-07T05:00:00Z");
+        let gap = instant("2026-03-08T05:00:00Z");
+        let after_gap = instant("2026-03-09T04:00:00Z");
+        let extra = instant("2026-03-10T04:00:00Z");
+        for (lines, expected) in [
+            (vec!["RRULE:FREQ=DAILY;UNTIL=20260308"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;UNTIL=20260308T020000Z"], vec![]),
+            (vec!["RRULE:FREQ=DAILY;UNTIL=20260308T050000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T050000Z"], vec![]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T051500Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20260307,20260308",
+                  "RDATE;VALUE=DATE:20260310"], vec![after_gap, extra]),
+        ] {
+            let rules = weekly(&lines);
+            let series = Series { dtstart_ms: start, dtstart_tz: zone, duration_ms: DAY,
+                                  is_all_day: true, recurrence: &rules };
+            let dates: Vec<_> = expand(&series, gap, extra + DAY, 10).unwrap().intervals
+                .into_iter().map(|i| i.start_ms).collect();
+            assert_eq!(dates, expected, "{lines:?}");
+            for slot in [gap, after_gap, extra] {
+                assert_eq!(starts_at(&series, slot).unwrap(), dates.contains(&slot));
+            }
+        }
+        // A one-result query inside a two-day slot must find its first date.
+        let rules = weekly(&["RRULE:FREQ=WEEKLY;COUNT=2"]);
+        let two_days = Series { dtstart_ms: start, dtstart_tz: zone, duration_ms: after_gap - start,
+                                is_all_day: true, recurrence: &rules };
+        assert_eq!(expand(&two_days, after_gap - 1, after_gap, 1).unwrap().intervals,
+                   [Interval { start_ms: start, end_ms: after_gap }]);
     }
 
     /// Outlook writes Windows zone names into `EXDATE;TZID=…` too (#158).

@@ -377,7 +377,7 @@ impl CalEvent {
     /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
     /// including floating times in the collection's zone.
     pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
-        use omacal_core::recur::{Series, rules_start_at};
+        use omacal_core::recur::{Series, starts_at};
 
         let Some((start, zone, all_day)) = resolve(&self.start, cal_tz) else { return false };
         if self.status == "cancelled" {
@@ -403,7 +403,7 @@ impl CalEvent {
                 }
             }
         }
-        included || (!rules.is_empty() && rules_start_at(&Series {
+        included || (!rules.is_empty() && starts_at(&Series {
             dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0, is_all_day: all_day,
             recurrence: &rules,
         }, slot_ms).unwrap_or(false))

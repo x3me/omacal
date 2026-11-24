@@ -51,38 +51,36 @@ pub fn date_in_zone(ms: i64, tz: &str) -> String {
 /// Resolves a calendar date to midnight local time in `zone`, deterministically
 /// and without ever consulting the host machine's system timezone.
 ///
-/// `rrule` parses a bare (TZID-less) `VALUE=DATE` DTSTART against `Tz::LOCAL`
-/// — the *host's* system zone — so the `DateTime<rrule::Tz>` it hands back
-/// for each all-day occurrence carries a host-dependent instant. We sidestep
-/// that by reading back only the *calendar date* it computed
-/// (`DateTime::date_naive`, which reflects the wall-clock fields as
-/// constructed and is therefore the same regardless of which offset
-/// `Tz::LOCAL` happened to resolve to) and re-anchoring that date here,
-/// explicitly, in the series' real zone.
+/// Ambiguous midnight uses its earlier instant. A gap uses the transition
+/// to the first valid instant, including when an entire date was skipped.
 pub fn midnight_in_zone(date: chrono::NaiveDate, zone: chrono_tz::Tz) -> i64 {
     let midnight = date
         .and_hms_opt(0, 0, 0)
         .expect("00:00:00 is always a valid NaiveTime");
     match zone.from_local_datetime(&midnight) {
         LocalResult::Single(dt) => dt.timestamp_millis(),
-        // A fall-back transition spanning midnight: take the earlier
-        // instant, matching the convention `rrule` itself uses (see
-        // `add_time_to_date` in the `rrule` crate).
-        LocalResult::Ambiguous(earlier, _later) => earlier.timestamp_millis(),
-        // A spring-forward transition spanning midnight (rare, but not
-        // impossible historically): advance to the first valid local
-        // instant that day instead of panicking or unwrapping.
-        LocalResult::None => (1..24 * 60)
-            .find_map(
-                |m: i64| match zone.from_local_datetime(&(midnight + chrono::Duration::minutes(m))) {
-                    LocalResult::Single(dt) => Some(dt.timestamp_millis()),
-                    _ => None,
-                },
-            )
-            // Total fallback so this can never panic. Unreachable for any
-            // real IANA zone — no calendar date is entirely invalid.
-            .unwrap_or_else(|| chrono::Utc.from_utc_datetime(&midnight).timestamp_millis()),
+        LocalResult::Ambiguous(earlier, _) => earlier.timestamp_millis(),
+        LocalResult::None => chrono_tz::GapInfo::new(&midnight, &zone)
+            .and_then(|gap| gap.end)
+            .map(|end| end.timestamp_millis())
+            .unwrap_or_else(|| midnight.and_utc().timestamp_millis()),
     }
+}
+
+/// Convert a stored DATE occurrence ID to its rendered boundary. Google and
+/// CalDAV resolve missing midnight with Jiff's compatible disambiguation,
+/// which can place it inside the day when the gap straddles midnight.
+pub fn all_day_slot_start(ms: i64, zone: chrono_tz::Tz) -> Option<i64> {
+    let instant = chrono::DateTime::from_timestamp_millis(ms)?.with_timezone(&zone);
+    let date = instant.date_naive();
+    let start = midnight_in_zone(date, zone);
+    if start == ms {
+        return Some(start);
+    }
+    let gap = chrono_tz::GapInfo::new(&date.and_time(chrono::NaiveTime::MIN), &zone)?;
+    let (gap_start, _) = gap.begin?;
+    let shifted = gap.end? + (date.and_time(chrono::NaiveTime::MIN) - gap_start);
+    (shifted.timestamp_millis() == ms).then_some(start)
 }
 
 /// Midnight on the calendar date `ms` falls on, both read in `tz`.
