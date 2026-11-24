@@ -372,18 +372,18 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
-/// Resolve UNTIL against the real occurrence. Apply COUNT only after
-/// discarding generated wall times that don't exist in the provider's zone.
-fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<(String, Option<u32>)> {
+/// Check UNTIL against the real instant. Keep COUNT on the civil rule.
+fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<String> {
     let value = std::mem::take(&mut rule.value);
     let mut fields = Vec::new();
-    let mut count = None;
     let mut bounded = false;
-    for field in value.split(';') {
+    // The recurrence parser used by the renderer ignores empty separators.
+    for field in value.split(';').filter(|field| !field.is_empty()) {
         let (key, value) = field.split_once('=')?;
         if key.eq_ignore_ascii_case("COUNT") {
-            if count.is_some() || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
-            count = Some(value.parse().ok()?);
+            if bounded || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
+            bounded = true;
+            fields.push(field);
         } else if key.eq_ignore_ascii_case("UNTIL") {
             if bounded { return None; }
             bounded = true;
@@ -403,8 +403,7 @@ fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -
             fields.push(field);
         }
     }
-    if bounded && count.is_some() { return None; }
-    Some((format!("RRULE:{}", fields.join(";")), count))
+    Some(format!("RRULE:{}", fields.join(";")))
 }
 
 /// Does this instant identify a DATE under the installed rules?
@@ -487,8 +486,8 @@ impl CalEvent {
                 (*dt, timezone, slot)
             }
         };
-        rules.iter().any(|(rule, count)| {
-            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, *count, target)
+        rules.iter().any(|rule| {
+            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, target)
         })
     }
 }
@@ -2239,15 +2238,15 @@ mod tests {
     }
 
     #[test]
-    fn timed_reinstatement_counts_real_slots_and_matches_the_first_fold_instant() {
+    fn timed_reinstatement_counts_the_shifted_gap_and_matches_the_first_fold_instant() {
         let ms = |utc: &str| utc.parse::<Timestamp>().unwrap().as_millisecond();
         let event = |start: &str, bound: &str| {
             let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID=America/New_York:{start}\nRRULE:FREQ=DAILY;{bound}\nEND:VEVENT\nEND:VCALENDAR");
             events_in(&parse(&raw).unwrap()).remove(0)
         };
         let spring = event("20260307T023000", "COUNT=2");
-        assert!(!spring.includes_occurrence(ms("2026-03-08T07:30:00Z"), "UTC"));
-        assert!(spring.includes_occurrence(ms("2026-03-09T06:30:00Z"), "UTC"));
+        assert!(spring.includes_occurrence(ms("2026-03-08T07:30:00Z"), "UTC"));
+        assert!(!spring.includes_occurrence(ms("2026-03-09T06:30:00Z"), "UTC"));
         assert!(!spring.includes_occurrence(ms("2026-03-10T06:30:00Z"), "UTC"));
         let autumn = event("20261031T013000", "COUNT=2");
         assert!(autumn.includes_occurrence(ms("2026-11-01T05:30:00Z"), "UTC"));
@@ -2255,6 +2254,45 @@ mod tests {
         let slot = ms("2026-11-02T06:30:00Z");
         assert!(event("20261031T013000", "UNTIL=20261102T063000Z").includes_occurrence(slot, "UTC"));
         assert!(!event("20261031T013000", "UNTIL=20261102T062959Z").includes_occurrence(slot, "UTC"));
+    }
+
+    #[test]
+    fn empty_rule_fields_preserve_the_bound_and_invalid_fields_still_fail() {
+        let start = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART:20260307T023000Z";
+        let slot = "2026-03-09T02:30:00Z".parse::<Timestamp>().unwrap().as_millisecond();
+        for (rule, included) in [
+            ("FREQ=DAILY;;COUNT=3;;", true),
+            ("FREQ=DAILY;COUNT=2;", false),
+            ("FREQ=DAILY;COUNT=3;invalid;", false),
+            ("FREQ=DAILY;COUNT=3;COUNT=4;", false),
+            ("FREQ=DAILY;UNTIL=20260309T022959Z;", false),
+        ] {
+            let raw = format!("{start}\nRRULE:{rule}\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            assert_eq!(event.includes_occurrence(slot, "UTC"), included, "{rule}");
+        }
+    }
+
+    #[test]
+    fn timed_reinstatement_uses_the_actual_gap_width_and_inclusive_until() {
+        // Lord Howe skips 02:00 through 02:29:59 on October 4. Both the
+        // missing local time and its shifted counterpart can be scheduled.
+        let zone = "Australia/Lord_Howe";
+        for (time, slot, included) in [
+            ("020000", "2026-10-03T15:30:00Z", true),  // start of gap -> 02:30
+            ("021500", "2026-10-03T15:45:00Z", true),  // 02:15 -> 02:45
+            ("024500", "2026-10-03T15:45:00Z", true),  // actual 02:45
+            ("021500", "2026-10-03T16:15:00Z", false), // 03:15
+            ("023000", "2026-10-03T16:00:00Z", false), // end of gap is real
+        ] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:20261003T{time}\n\
+                RRULE:FREQ=DAILY;UNTIL=20261003T154500Z;\nEND:VEVENT\nEND:VCALENDAR");
+            let mut event = events_in(&parse(&raw).unwrap()).remove(0);
+            let ms = slot.parse::<Timestamp>().unwrap().as_millisecond();
+            assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{time} at {slot}");
+            event.recurrence = vec!["RRULE:FREQ=DAILY;COUNT=2".into()];
+            assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{time} at {slot}");
+        }
     }
 
     #[test]

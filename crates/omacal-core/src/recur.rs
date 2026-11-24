@@ -204,49 +204,44 @@ pub fn legacy_date_id(slot_ms: i64, tz: &str) -> Option<chrono::NaiveDate> {
     (midnight_in_zone(date, zone) == slot_ms).then_some(date)
 }
 
-/// Test a CalDAV rule on the provider's wall clock. UTC is only the
-/// coordinate system for rrule's civil candidates. Resolve the target fold
-/// and discard nonexistent generated times with the provider's timezone.
+/// Test RRULE membership on the provider's clock. Generate civil candidates
+/// in UTC coordinates so rrule applies BYSETPOS and COUNT to the authored times.
 pub fn civil_rule_starts_at(
     start: jiff::civil::DateTime,
     zone: &jiff::tz::TimeZone,
     rule: &str,
-    count: Option<u32>,
     slot: jiff::Timestamp,
 ) -> bool {
     let Ok(first) = zone.to_timestamp(start) else { return false };
-    let wall_slot = zone.to_datetime(slot);
-    if slot < first || zone.to_timestamp(wall_slot).ok() != Some(slot) {
+    let wall = zone.to_datetime(slot);
+    if slot < first || zone.to_timestamp(wall).ok() != Some(slot) {
         return false;
     }
-    let utc = jiff::tz::TimeZone::UTC;
-    let Ok(target) = utc.to_timestamp(wall_slot) else { return false };
-    let Ok(target) = to_chrono(target.as_millisecond()) else { return false };
-    let mut source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
-    // On a fixed clock every generated time exists. The iterator can
-    // enforce COUNT directly, just as it does for an all-day DATE rule.
-    let mut count = count;
-    if zone.to_fixed_offset().is_ok() {
-        if let Some(n) = count.take() { source.push_str(&format!(";COUNT={n}")); }
-    }
+    let source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
     let Ok(set) = RRuleSet::from_str(&source) else { return false };
-    let Some(count) = count else {
-        return !set.after(target).before(target).all(1).dates.is_empty();
-    };
-    let first_real_wall = zone.to_datetime(first);
+    let utc = jiff::tz::TimeZone::UTC;
+    let Ok(target) = utc.to_timestamp(wall) else { return false };
+
+    // During a forward jump, two civil times can identify the same instant.
+    // For example, both 02:30 in the gap and 03:30 after it resolve to 07:30Z
+    // in New York. RFC 5545 erratum 4271 assigns the old offset to the former.
+    // preceding() is exclusive. Include a transition at the slot itself.
+    let tick = jiff::SignedDuration::from_nanos(1);
+    let inclusive_end = slot.checked_add(tick).unwrap_or(slot);
+    let gap_target = zone.preceding(inclusive_end).next().and_then(|transition| {
+        let old = zone.to_offset(transition.timestamp().checked_sub(tick).ok()?);
+        let skipped = old.to_datetime(slot);
+        if old >= transition.offset() || zone.to_timestamp(skipped).ok() != Some(slot) {
+            return None;
+        }
+        Some(utc.to_timestamp(skipped).ok()?.as_millisecond())
+    });
+    let target = target.as_millisecond();
     let set = set.limit();
     (&set).into_iter()
-        .take_while(|d| *d <= target)
-        .filter(|d| {
-            let Ok(ts) = jiff::Timestamp::from_millisecond(d.timestamp_millis()) else { return false };
-            let wall = utc.to_datetime(ts);
-            // Explicit DTSTART counts even in a gap. Ignore nonexistent
-            // generated times and avoid counting its resolved instant twice.
-            wall == start || (wall > first_real_wall &&
-                !matches!(zone.to_ambiguous_timestamp(wall).offset(), jiff::tz::AmbiguousOffset::Gap { .. }))
-        })
-        .take(count as usize)
-        .any(|d| d == target)
+        .map(|candidate| candidate.timestamp_millis())
+        .take_while(|&ms| ms <= target)
+        .any(|ms| ms == target || Some(ms) == gap_target)
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
