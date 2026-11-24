@@ -8710,6 +8710,105 @@ test.describe('tasks, the grid and the sidebar agree', () => {
 });
 
 /**
+ * A drag says when a task is due and nothing else, so everything else about
+ * the task survives it. `update_task` takes the task whole, priority
+ * included, and 0 there clears it on the server: a drag that sent no
+ * priority used to clear a High task's level every time it moved (#152's
+ * chip vanished from the pane). Each of the three drops — a TASKS row chip
+ * to another day, an hour pin to another hour, a pane task onto the grid —
+ * is completed for real (no Escape), and the level is asked of both the
+ * write and the pane.
+ */
+test.describe('a drag keeps a task\'s priority', () => {
+  const DAY = 24 * 3_600_000;
+  const open = async (page: Page, fixture = 'default') => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app(fixture));
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const updates = (page: Page) => page.evaluate(() =>
+    (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').map((c: any) => c.args));
+  /** Makes a task High through the pane's editor and waits for the save. */
+  const makeHigh = async (page: Page, side: ReturnType<Page['getByRole']>, title: string) => {
+    await side.getByRole('button', { name: title, exact: true }).click();
+    await side.getByRole('combobox', { name: 'Priority' }).click();
+    await side.getByRole('option', { name: 'High' }).click();
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(async () => (await updates(page)).pop()).toMatchObject({ summary: title, priority: 1 });
+    await expect(side.locator('.row', { hasText: title }).locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+    return (await updates(page)).length;
+  };
+  /** The write the drop made: the first `update_task` after the `n` before it. */
+  const dropWrite = async (page: Page, n: number) => {
+    await expect.poll(async () => (await updates(page)).length).toBe(n + 1);
+    return (await updates(page))[n];
+  };
+
+  test('a TASKS row chip dropped on another day', async ({ page }) => {
+    const side = await open(page);
+    const n = await makeHigh(page, side, 'Ship the release');
+    const title = page.locator('.trow .tchip .tt', { hasText: 'Ship the release' });
+    const from = (await title.boundingBox())!;
+    const cell = (await page.locator('.trow .tcell').first().boundingBox())!;
+    const y = from.y + from.height / 2;
+    await page.mouse.move(from.x + 4, y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 4 + cell.width * 2, y, { steps: 8 });
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      id: 12, dueMs: Date.UTC(2024, 0, 31), dueAllDay: true, priority: 1,
+    });
+    const row = side.locator('.row', { hasText: 'Ship the release' });
+    await expect(row.locator('.due')).toHaveText('Wed 31');
+    await expect(row.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  test('an hour pin dropped on another hour', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    const n = await makeHigh(page, side, 'Call the bank');
+    const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    await title.hover();
+    const from = (await title.boundingBox())!;
+    const x = from.x + from.width / 2;
+    const y = from.y + from.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 70, { steps: 8 });
+    await expect(page.locator('.tpin.dragging')).toContainText('12:30');
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      summary: 'Call the bank', dueMs: APP_MON + 12.5 * 3_600_000, dueAllDay: false, priority: 1,
+    });
+    await expect(side.locator('.row', { hasText: 'Call the bank' })
+      .locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  test('a pane task dropped on an hour', async ({ page }) => {
+    const side = await open(page);
+    const n = await makeHigh(page, side, 'Buy milk');
+    const col = page.locator(`.col[data-start-ms="${APP_MON + DAY}"]`);
+    const box = (await col.boundingBox())!;
+    const from = (await side.getByRole('button', { name: 'Buy milk', exact: true }).boundingBox())!;
+    await page.mouse.move(from.x + 10, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * (11 / 24) + 4, { steps: 12 });
+    await expect(col.locator('.tpin.landing')).toContainText('11:00');
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      id: 11, dueMs: APP_MON + DAY + 11 * 3_600_000, dueAllDay: false, priority: 1,
+    });
+    await expect(side.locator('.row', { hasText: 'Buy milk' })
+      .locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+});
+
+/**
  * The forecast's place, set in OmaCal (#117) — pressing since 2026-09-17,
  * when an IP that named no city put the forecast in the middle of India.
  */
