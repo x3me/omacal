@@ -1068,8 +1068,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_google_date_tombstone_suppresses_the_rendered_toronto_slot() {
+    #[tokio::test]
+    async fn a_google_date_tombstone_suppresses_the_rendered_toronto_slot() {
         let zone = "America/Toronto";
         let master = serde_json::from_value(serde_json::json!({
             "id":"s", "start":{"date":"1919-03-30"}, "end":{"date":"1919-03-31"},
@@ -1086,7 +1086,20 @@ mod tests {
         let end = instant("1919-04-01T04:00:00Z");
         assert_eq!(rows[1].original_start_utc, Some(instant("1919-03-31T05:00:00Z")));
         assert_eq!(occurrences(&rows[0], start, end), [Interval { start_ms: start, end_ms: end }]);
-        assert!(suppressed_slots(&rows).contains(&(1, "s", start)));
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','e',0);
+                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                     VALUES (1,'work','Work','America/Toronto','owner')")
+            .execute(&pool).await.unwrap();
+        for row in &rows {
+            omacal_store::upsert_event(&pool, row).await.unwrap();
+        }
+        // The stored ID is 30 minutes after the rendered day starts. Even
+        // a narrow query ending before that ID must retrieve the cancellation.
+        let inside = omacal_store::events_in_window(&pool, start, start + 60_000).await.unwrap();
+        assert!(suppressed_slots(&inside).contains(&(1, "s", start)));
+        let before = omacal_store::events_in_window(&pool, start - 60_000, start).await.unwrap();
+        assert_eq!(before.len(), 1, "only the master is returned before the original slot");
     }
 
     /// #158's own fixture, end to end: an Outlook feed in "India Standard

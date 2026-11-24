@@ -170,39 +170,7 @@ fn all_day_until(value: &str, zone: chrono_tz::Tz) -> Option<chrono::NaiveDate> 
     }
 }
 
-fn all_day_line(line: &str, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<String, RecurError> {
-    let invalid = || RecurError::InvalidRule(line.to_owned());
-    let (head, values) = line.split_once(':').ok_or_else(invalid)?;
-    let name = head.split(';').next().unwrap_or(head);
-    if name.eq_ignore_ascii_case("RDATE") || name.eq_ignore_ascii_case("EXDATE") {
-        // Standard DATE lists can go directly to rrule with an explicit
-        // zero-offset zone. Its default for a bare DATE is the host zone.
-        if values.split(',').all(|v| v.len() == 8 && v.bytes().all(|b| b.is_ascii_digit())) {
-            return Ok(format!("{name};TZID=UTC:{values}"));
-        }
-        let mut dates = Vec::new();
-        for value in values.split(',') {
-            // Some providers send DATE-TIME on an all-day series. Resolve it
-            // in its stated zone (floating times use the calendar zone).
-            let params = &head[name.len()..];
-            let property = if params.split(';').any(|p| p.to_ascii_uppercase().starts_with("TZID=")) {
-                format!("RDATE{params}:{value}")
-            } else {
-                format!("RDATE{params};TZID={zone}:{value}")
-            };
-            let parsed = RRuleSet::new(anchor).set_from_string(&property).map_err(|_| invalid())?;
-            let instant = parsed.get_rdate().first().ok_or_else(invalid)?;
-            let local = instant.with_timezone(&zone);
-            if name.eq_ignore_ascii_case("RDATE") || all_day_slot_start(instant.timestamp_millis(), zone).is_some() {
-                dates.push(local.format("%Y%m%d").to_string());
-            }
-        }
-        if dates.is_empty() {
-            return Ok(String::new());
-        }
-        return Ok(format!("{name};TZID=UTC:{}", dates.join(",")));
-    }
-
+fn civil_rule_line(head: &str, values: &str, zone: chrono_tz::Tz) -> String {
     let mut result = format!("{head}:");
     for (i, part) in values.split(';').enumerate() {
         if i != 0 { result.push(';'); }
@@ -214,26 +182,80 @@ fn all_day_line(line: &str, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -
             result.push_str(part);
         }
     }
-    Ok(result)
+    result
+}
+
+/// DATE identifies the civil-day boundary. For DATE-TIME additions and
+/// exclusions keep the actual instant until matching pairs are subtracted.
+fn explicit_slot(value: &str, params: &str, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<Option<i64>, RecurError> {
+    if value.len() == 8 {
+        let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+            .map_err(|_| RecurError::InvalidRule(value.to_owned()))?;
+        let start = midnight_in_zone(date, zone);
+        // A skipped calendar date has no instant to add or exclude.
+        return Ok((to_chrono(start)?.with_timezone(&zone).date_naive() == date).then_some(start));
+    }
+    let property = if params.split(';').any(|p| p.to_ascii_uppercase().starts_with("TZID=")) {
+        format!("RDATE{params}:{value}")
+    } else {
+        format!("RDATE{params};TZID={zone}:{value}")
+    };
+    let parsed = RRuleSet::new(anchor).set_from_string(&property)
+        .map_err(|e| RecurError::InvalidRule(format!("{e}: {property}")))?;
+    let ms = parsed.get_rdate().first().ok_or_else(|| RecurError::InvalidRule(property))?.timestamp_millis();
+    Ok(Some(all_day_slot_start(ms, zone).unwrap_or(ms)))
+}
+
+fn all_day_set(series: &Series, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<RRuleSet, RecurError> {
+    use std::collections::BTreeSet;
+    let mut set = RRuleSet::new(anchor);
+    let mut additions = BTreeSet::new();
+    let mut exclusions = BTreeSet::new();
+    for raw in series.recurrence {
+        let line = with_iana_tzid(raw.trim());
+        let (head, values) = line.split_once(':').ok_or_else(|| RecurError::InvalidRule(raw.clone()))?;
+        let name = head.split(';').next().unwrap_or(head);
+        let target = if name.eq_ignore_ascii_case("RDATE") {
+            &mut additions
+        } else if name.eq_ignore_ascii_case("EXDATE") {
+            &mut exclusions
+        } else {
+            set = set.set_from_string(&civil_rule_line(head, values, zone))
+                .map_err(|e| RecurError::InvalidRule(format!("{e}: {line}")))?;
+            continue;
+        };
+        for value in values.split(',') {
+            target.extend(explicit_slot(value, &head[name.len()..], zone, anchor)?);
+        }
+    }
+    if set.get_rrule().is_empty() {
+        additions.insert(midnight_in_zone(anchor.date_naive(), zone));
+    }
+    let mut extra_days = BTreeSet::new();
+    for &ms in additions.difference(&exclusions) {
+        extra_days.insert(civil_midnight(to_chrono(ms)?.with_timezone(&zone).date_naive()));
+    }
+    // An EXDATE at noon removes an explicit addition at noon, while the
+    // recurring midnight on that day remains. Conversely a surviving extra
+    // occurrence keeps the civil day visible even if midnight was excluded.
+    for ms in exclusions {
+        if all_day_slot_start(ms, zone).is_some() {
+            let day = civil_midnight(to_chrono(ms)?.with_timezone(&zone).date_naive());
+            if !extra_days.contains(&day) { set = set.exdate(day); }
+        }
+    }
+    Ok(set.set_rdates(extra_days.into_iter().collect()))
 }
 
 fn rule_set(series: &Series, zone: chrono_tz::Tz) -> Result<RRuleSet, RecurError> {
     let local = to_chrono(series.dtstart_ms)?.with_timezone(&zone);
-    let anchor = civil_midnight(local.date_naive());
-    let mut source = if series.is_all_day {
-        format!("DTSTART:{}", anchor.format("%Y%m%dT%H%M%SZ"))
-    } else {
-        format!("DTSTART;TZID={zone}:{}", local.format("%Y%m%dT%H%M%S"))
-    };
+    if series.is_all_day {
+        return all_day_set(series, zone, civil_midnight(local.date_naive()));
+    }
+    let mut source = format!("DTSTART;TZID={zone}:{}", local.format("%Y%m%dT%H%M%S"));
     for line in series.recurrence {
-        let mut line = with_iana_tzid(line.trim());
-        if series.is_all_day {
-            line = all_day_line(&line, zone, anchor)?.into();
-        }
-        if !line.is_empty() {
-            source.push('\n');
-            source.push_str(&line);
-        }
+        source.push('\n');
+        source.push_str(&with_iana_tzid(line.trim()));
     }
     RRuleSet::from_str(&source).map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
 }
@@ -307,7 +329,20 @@ pub fn expand(
     } else {
         (to_chrono(from_ms.saturating_sub(series.duration_ms))?, to_chrono(to_ms)?)
     };
-    let result = set.after(first).before(last).all(limit);
+    let result = if series.is_all_day && !set.get_rdate().is_empty() {
+        // A rule and an explicit addition may cover the same day. Union the
+        // dates before applying the display limit so a duplicate uses no slot.
+        let extra: Vec<_> = set.get_rdate().iter().copied().filter(|d| first <= *d && *d <= last).collect();
+        let mut result = set.set_rdates(Vec::new()).after(first).before(last).all(limit);
+        result.dates.extend(extra);
+        result.dates.sort_unstable();
+        result.dates.dedup();
+        result.limited |= result.dates.len() > usize::from(limit);
+        result.dates.truncate(usize::from(limit));
+        result
+    } else {
+        set.after(first).before(last).all(limit)
+    };
 
     let intervals = result
         .dates
@@ -754,6 +789,11 @@ mod tests {
             (vec!["RRULE:FREQ=DAILY;UNTIL=20260308"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;UNTIL=20260308T020000Z"], vec![]),
             (vec!["RRULE:FREQ=DAILY;UNTIL=20260308T050000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=1", "RDATE:20260308T120000Z", "EXDATE:20260308T120000Z"], vec![]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=2", "RDATE:20260308T120000Z", "EXDATE:20260308T120000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=1", "RDATE:20260308T120000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=2", "RDATE:20260308T120000Z"], vec![gap]),
+            (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE;VALUE=DATE:20260308", "RDATE:20260308T120000Z"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T050000Z"], vec![]),
             (vec!["RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20260308T051500Z"], vec![gap]),
             (vec!["RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20260307,20260308",

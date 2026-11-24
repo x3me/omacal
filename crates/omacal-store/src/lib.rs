@@ -76,40 +76,50 @@ async fn register_sql_functions(conn: &mut SqliteConnection) -> Result<(), sqlx:
             "sqlite3_create_function_v2(fold_ci) failed with code {code}"
         )));
     }
-    let code = unsafe {
-        ffi::sqlite3_create_function_v2(
-            handle.as_raw_handle().as_ptr(), c"all_day_slot_end".as_ptr(), 4,
-            ffi::SQLITE_UTF8 | ffi::SQLITE_DETERMINISTIC, std::ptr::null_mut(),
-            Some(all_day_slot_end_sql), None, None, None,
-        )
-    };
-    if code != ffi::SQLITE_OK {
-        return Err(sqlx::Error::Protocol(format!("register all_day_slot_end failed with code {code}")));
+    for (name, arity) in [(c"all_day_slot_start", 2), (c"all_day_slot_end", 4)] {
+        let code = unsafe {
+            ffi::sqlite3_create_function_v2(
+                handle.as_raw_handle().as_ptr(), name.as_ptr(), arity,
+                ffi::SQLITE_UTF8 | ffi::SQLITE_DETERMINISTIC, std::ptr::null_mut(),
+                Some(all_day_boundary_sql), None, None, None,
+            )
+        };
+        if code != ffi::SQLITE_OK {
+            return Err(sqlx::Error::Protocol(format!("register {name:?} failed with code {code}")));
+        }
     }
     Ok(())
 }
 
-/// SQLite provides exactly the four arguments registered above, valid for
-/// the lifetime of this call. NULL falls back to the original slot in SQL.
-unsafe extern "C" fn all_day_slot_end_sql(
+/// Start takes (zone, stored slot). End additionally takes the master's
+/// start and end as its first two arguments. SQLite owns argv for this call.
+unsafe extern "C" fn all_day_boundary_sql(
     ctx: *mut ffi::sqlite3_context, argc: c_int, argv: *mut *mut ffi::sqlite3_value,
 ) {
-    if argc != 4 {
+    if argc != 2 && argc != 4 {
         ffi::sqlite3_result_error_code(ctx, ffi::SQLITE_CONSTRAINT_FUNCTION);
         return;
     }
-    let args = std::slice::from_raw_parts(argv, 4);
-    let zone = ffi::sqlite3_value_text(args[2]);
+    let args = std::slice::from_raw_parts(argv, argc as usize);
+    let tz_arg = args[args.len() - 2];
+    let zone = ffi::sqlite3_value_text(tz_arg);
     if zone.is_null() {
         ffi::sqlite3_result_null(ctx);
         return;
     }
-    let bytes = std::slice::from_raw_parts(zone, ffi::sqlite3_value_bytes(args[2]) as usize);
-    let get = |i: usize| ffi::sqlite3_value_int64(args[i]);
-    let end = std::str::from_utf8(bytes).ok().and_then(|tz|
-        omacal_core::recur::all_day_slot_end(get(0), get(1), tz, get(3)));
-    match end {
-        Some(end) => ffi::sqlite3_result_int64(ctx, end),
+    let bytes = std::slice::from_raw_parts(zone, ffi::sqlite3_value_bytes(tz_arg) as usize);
+    let slot = ffi::sqlite3_value_int64(args[args.len() - 1]);
+    let boundary = std::str::from_utf8(bytes).ok().and_then(|tz| {
+        if argc == 2 {
+            omacal_core::zone::all_day_slot_start(slot, tz.parse().ok()?)
+        } else {
+            omacal_core::recur::all_day_slot_end(
+                ffi::sqlite3_value_int64(args[0]), ffi::sqlite3_value_int64(args[1]), tz, slot,
+            )
+        }
+    });
+    match boundary {
+        Some(ms) => ffi::sqlite3_result_int64(ctx, ms),
         None => ffi::sqlite3_result_null(ctx),
     }
 }

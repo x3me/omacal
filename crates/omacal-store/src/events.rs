@@ -689,8 +689,12 @@ pub async fn events_in_window(
            AND (e.status != 'cancelled' OR e.recurring_event_id IS NOT NULL)
            AND (e.recurrence IS NOT NULL
                 OR (e.start_utc < ?2 AND e.end_utc > ?1)
-                OR (e.recurring_event_id IS NOT NULL
-                    AND e.original_start_utc < ?2
+                OR (e.recurring_event_id IS NOT NULL AND e.original_start_utc IS NOT NULL
+                    AND (e.original_start_utc < ?2 OR (
+                        SELECT all_day_slot_start(m.start_tz, e.original_start_utc)
+                        FROM events m WHERE m.calendar_id = e.calendar_id
+                          AND m.google_id = e.recurring_event_id AND m.is_all_day
+                    ) < ?2)
                     AND (e.original_start_utc >= ?1 OR {original_end} > ?1)))
          ORDER BY e.start_utc",
         original_end = crate::history::ORIGINAL_SLOT_END,

@@ -383,6 +383,12 @@ impl CalEvent {
         if self.status == "cancelled" {
             return false;
         }
+        if all_day {
+            return starts_at(&Series {
+                dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0,
+                is_all_day: true, recurrence: &self.recurrence,
+            }, slot_ms).unwrap_or(false);
+        }
         let mut included = start == slot_ms;
         let mut rules = Vec::new();
         for line in &self.recurrence {
