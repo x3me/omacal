@@ -17,7 +17,8 @@ WHERE a.provider = 'caldav' AND master.is_all_day
 UNION
 SELECT ec.calendar_id, ec.gid FROM event_changes ec
 JOIN calendars c ON c.id = ec.calendar_id JOIN accounts a ON a.id = c.account_id
-WHERE a.provider = 'caldav' AND ec.series_gid IS NOT NULL AND ec.is_all_day;
+LEFT JOIN events master ON master.calendar_id=ec.calendar_id AND master.google_id=ec.series_gid
+WHERE a.provider = 'caldav' AND ec.series_gid IS NOT NULL AND (ec.is_all_day OR master.is_all_day);
 
 UPDATE sync_state SET sync_token = NULL
 WHERE calendar_id IN (SELECT calendar_id FROM caldav_recurrence_dates);

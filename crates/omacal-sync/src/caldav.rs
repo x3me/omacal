@@ -349,7 +349,7 @@ pub async fn sync_caldav_calendar(
             .await?;
         let mut seen: Vec<String> = Vec::new();
         let mut masters = HashMap::new();
-        let mut date_ids = Vec::new();
+        let mut recurrence_ids = Vec::new();
         let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
         for res in &resources {
             let Some(root) = omacal_caldav::parse(&res.ics) else {
@@ -365,8 +365,11 @@ pub async fn sync_caldav_calendar(
                     tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
                     continue;
                 };
-                if let Some(IcsTime::Date(date)) = ev.recurrence_id {
-                    date_ids.push((stored.google_id.clone(), date));
+                if let Some(rid) = &ev.recurrence_id {
+                    recurrence_ids.push((stored.google_id.clone(), match rid {
+                        IcsTime::Date(d) => Some(*d),
+                        _ => None,
+                    }));
                 }
                 seen.push(stored.google_id.clone());
                 // The master (first, by events_in's ordering) carries the
@@ -405,12 +408,18 @@ pub async fn sync_caldav_calendar(
         let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
 
         recover_cached_dates(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
-        for (gid, date) in date_ids {
-            sqlx::query("INSERT INTO caldav_recurrence_dates(calendar_id,gid,recurrence_date)
-                         VALUES (?,?,?) ON CONFLICT(calendar_id,gid) DO UPDATE
-                         SET recurrence_date=excluded.recurrence_date")
-                .bind(calendar_id).bind(gid).bind(date.to_string())
-                .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+        for (gid, date) in recurrence_ids {
+            if let Some(date) = date {
+                sqlx::query("INSERT INTO caldav_recurrence_dates(calendar_id,gid,recurrence_date)
+                             VALUES (?,?,?) ON CONFLICT(calendar_id,gid) DO UPDATE
+                             SET recurrence_date=excluded.recurrence_date")
+                    .bind(calendar_id).bind(gid).bind(date.to_string())
+                    .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+            } else {
+                // A DATE-TIME override can reuse a former DATE's numeric key.
+                sqlx::query("DELETE FROM caldav_recurrence_dates WHERE calendar_id=? AND gid=?")
+                    .bind(calendar_id).bind(gid).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+            }
         }
         for (row, src) in &rows {
             let id = omacal_store::upsert_event(&mut *tx, row).await?;

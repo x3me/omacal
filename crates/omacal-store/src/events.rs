@@ -1958,6 +1958,25 @@ mod tests {
         assert_eq!(account_email, "a@x",
             "must be account a's own email, not account b's merely sharing an id with cal_on_a");
     }
+    #[tokio::test]
+    async fn date_id_migration_recognizes_an_orphan_from_its_all_day_master() {
+        let pool = pool_migrated_below(21, 20).await;
+        let calendar = seed(&pool).await;
+        sqlx::query("UPDATE accounts SET provider='caldav'").execute(&pool).await.unwrap();
+        let mut master = ev(calendar, "series", 1_000, 2_000);
+        master.is_all_day = true;
+        upsert_event(&pool, &master).await.unwrap();
+        // The original DATE was moved to a timed DTSTART. The detached
+        // row is gone, and the notice describes the moved time.
+        sqlx::query("INSERT INTO event_changes(calendar_id,gid,series_gid,kind,is_all_day,old_start_utc,changed_at_ms)
+                     VALUES(?, 'series#1000', 'series', 'cancelled', 0, 3000, 0)")
+            .bind(calendar).execute(&pool).await.unwrap();
+        apply_migration(&pool, 21).await;
+        let gids: Vec<String> = sqlx::query_scalar("SELECT gid FROM caldav_recurrence_dates")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(gids, ["series#1000"]);
+    }
+
     /// Exercise the new migration on the actual preceding schema, including
     /// main's 0019, rather than replaying SQL over a fully migrated database.
     #[tokio::test]

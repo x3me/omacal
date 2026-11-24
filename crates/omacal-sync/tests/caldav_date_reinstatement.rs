@@ -3,10 +3,10 @@ use omacal_store::changes::changed_meetings;
 use omacal_sync::caldav::sync_caldav_calendar;
 use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
-async fn report(server: &MockServer, tag: &str, extra: &str, exception: &str) {
+async fn report(server: &MockServer, tag: &str, master_start: &str, extra: &str, exception: &str) {
     server.reset().await;
     let guest = "ORGANIZER:mailto:organizer@example.org\nATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.org";
-    let ics = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nSUMMARY:Meeting\nDTSTART;VALUE=DATE:20261201\nRRULE:FREQ=DAILY;COUNT=2\n{extra}{guest}\nEND:VEVENT\n{exception}END:VCALENDAR");
+    let ics = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nSUMMARY:Meeting\nDTSTART{master_start}\nRRULE:FREQ=DAILY;COUNT=2\n{extra}{guest}\nEND:VEVENT\n{exception}END:VCALENDAR");
     for (verb, path, prop) in [
         ("PROPFIND", "/cal/", format!("<cs:getctag>{tag}</cs:getctag>")),
         ("REPORT", "/cal/s.ics", format!("<d:getetag>{tag}</d:getetag><c:calendar-data>{ics}</c:calendar-data>")),
@@ -39,7 +39,8 @@ async fn check_reinstatement(legacy: bool) {
     let now = ms("2026-11-24T12:00:00Z");
     let sync = || sync_caldav_calendar(&pool, &client, 1, &url, true, false, now, ms("2027-01-01T00:00:00Z"), now);
     let moved = "BEGIN:VEVENT\nUID:s\nRECURRENCE-ID;VALUE=DATE:20261202\nDTSTART;VALUE=DATE:20261203\nSUMMARY:Meeting\nORGANIZER:mailto:organizer@example.org\nATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.org\nEND:VEVENT\n";
-    report(&server, "moved", "", moved).await;
+    let date_start = ";VALUE=DATE:20261201";
+    report(&server, "moved", date_start, "", moved).await;
     sync().await.unwrap();
 
     if legacy {
@@ -51,14 +52,26 @@ async fn check_reinstatement(legacy: bool) {
     // Pin both offsets so the regression is independent of the host tzdata.
     // At the new offset, the saved 04:00Z ID even falls on the previous date.
     sqlx::query("UPDATE calendars SET timezone='Etc/GMT+5' WHERE id=1").execute(&pool).await.unwrap();
-    report(&server, "cancelled", "EXDATE;VALUE=DATE:20261202\n", "").await;
+    report(&server, "cancelled", date_start, "EXDATE;VALUE=DATE:20261202\n", "").await;
     sync().await.unwrap();
     let cancellations = || async {
         changed_meetings(&pool, now).await.unwrap().into_iter().filter(|m| m.kind == "cancelled").count()
     };
     assert_eq!(cancellations().await, 1);
 
-    report(&server, "restored", "", "").await;
+    report(&server, "restored", date_start, "", "").await;
+    sync().await.unwrap();
+    assert_eq!(cancellations().await, 0);
+
+    // A timed override can reuse an old DATE key exactly. Restoring it
+    // must consult the timed rule, even when its predecessor was all-day.
+    report(&server, "all-day-move", date_start, "", moved).await;
+    sync().await.unwrap();
+    let timed = moved.replace(";VALUE=DATE:20261202", ":20261202T050000Z")
+        .replace(";VALUE=DATE:20261203", ":20261203T050000Z");
+    report(&server, "timed-move", ":20261201T050000Z", "", &timed).await;
+    sync().await.unwrap();
+    report(&server, "timed-restored", ":20261201T050000Z", "", "").await;
     sync().await.unwrap();
     assert_eq!(cancellations().await, 0);
 }
