@@ -2,10 +2,12 @@
 <script lang="ts">
   import { rotate } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
+  import { rowWeek } from './weeknumbers';
   import type { YearPayload } from './api';
 
-  let { year, ondaypick }: {
+  let { year, showWeekNumbers = false, ondaypick }: {
     year: YearPayload;
+    showWeekNumbers?: boolean;
     /** Asks the parent to switch to Day view for this day's `start_ms` — the
      *  same contract `MonthGrid` already established. */
     ondaypick: (startMs: number) => void;
@@ -40,22 +42,32 @@
   {#each year.months as month (month.month)}
     <div class="ymonth">
       <div class="mname">{MONTH_NAMES[month.month - 1]}</div>
-      <div class="dow">
+      <div class="dow" class:numbered={showWeekNumbers}>
+        {#if showWeekNumbers}<span aria-hidden="true"></span>{/if}
         {#each DOW as d, i (i)}<span>{d}</span>{/each}
       </div>
-      <div class="days">
-        {#each Array.from({ length: month.lead_blanks }) as _, i (i)}
-          <div class="blank"></div>
-        {/each}
-        {#each month.days as d (d.start_ms)}
-          <button
-            class="yday"
-            class:dotted={d.has_all_day}
-            class:today={d.start_ms === todayStart}
-            class:unsynced={d.unsynced}
-            data-start-ms={d.start_ms}
-            onclick={() => ondaypick(d.start_ms)}
-          >{d.day}</button>
+      <div class="days" class:numbered={showWeekNumbers}>
+        {#each Array.from({ length: Math.ceil((month.lead_blanks + month.days.length) / 7) }) as _, row (row)}
+          {#if showWeekNumbers}
+            {@const rowStart = new Date(year.year, month.month - 1, 1 - month.lead_blanks + row * 7).getTime()}
+            <span class="row-week" data-week-number aria-label="Week {rowWeek(rowStart)}">{rowWeek(rowStart)}</span>
+          {/if}
+          {#each Array.from({ length: 7 }) as _, col (col)}
+            {@const index = row * 7 + col - month.lead_blanks}
+            {#if index >= 0 && index < month.days.length}
+              {@const d = month.days[index]}
+              <button
+                class="yday"
+                class:dotted={d.has_all_day}
+                class:today={d.start_ms === todayStart}
+                class:unsynced={d.unsynced}
+                data-start-ms={d.start_ms}
+                onclick={() => ondaypick(d.start_ms)}
+              >{d.day}</button>
+            {:else if index < 0}
+              <div class="blank"></div>
+            {/if}
+          {/each}
         {/each}
       </div>
     </div>
@@ -77,6 +89,8 @@
            letter-spacing: .02em; }
 
   .dow { display: grid; grid-template-columns: repeat(7, 1fr); }
+  .dow.numbered, .days.numbered { grid-template-columns: 20px repeat(7, 1fr); }
+  .row-week { align-self: center; text-align: center; font-size: 9px; color: var(--muted); }
   .dow span { text-align: center; font-size: 9px; color: var(--muted); }
 
   .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }

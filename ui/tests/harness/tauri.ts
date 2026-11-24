@@ -788,6 +788,7 @@ type StubSettings = {
   menubarLabelFormat: string;
   weekStart: WeekStartDay;
   weekStartsToday: boolean;
+  showWeekNumbers: boolean;
   weekViewDays: WeekViewDays;
   visibleStartHour: number;
   visibleEndHour: number;
@@ -886,6 +887,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   // The week omacal has always drawn, so every golden holds.
   weekStart: 'monday',
   weekStartsToday: false,
+  showWeekNumbers: false,
   weekViewDays: 7,
   visibleStartHour: 0,
   visibleEndHour: 24,

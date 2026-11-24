@@ -5,6 +5,7 @@
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
   import { listable } from './filmstrip';
+  import { rangeWeeks, rowWeek } from './weeknumbers';
   import CalendarPopover from './CalendarPopover.svelte';
   import CalendarGroupSwitcher from './CalendarGroupSwitcher.svelte';
   import type { CalendarGroup } from './calendargroups';
@@ -17,6 +18,7 @@
 
   let {
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
+    showWeekNumbers = false, weekPanned = false, weekNumberStartMs = weekStartMs,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
     busy, syncing = false, error, errorAction = null, onDismissError, calendars, view, onpick,
@@ -41,6 +43,9 @@
     weekStartsToday?: boolean;
     /** Total columns in that rolling range. Ignored for fixed weeks. */
     weekDays?: 3 | 5 | 7;
+    showWeekNumbers?: boolean;
+    weekPanned?: boolean;
+    weekNumberStartMs?: number;
     /** The year Year and Big Year are showing — `App`'s own `yearNum` or
      *  `bigYearNum`, whichever the view reads. Neither is `anchorMs`'s year:
      *  the two counters are deliberately kept apart from the anchor (see
@@ -356,6 +361,11 @@
       </div>
       <h1 data-tauri-drag-region>{#each titleParts as part}<span class:year={part.type === 'year'}>{part.value}</span>{/each}</h1>
     </div>
+    {#if view === 'week' && showWeekNumbers}
+      <span class="week-number" data-week-number>{weekStartsToday || weekPanned
+        ? rangeWeeks(weekNumberStartMs, weekStartsToday ? weekDays : 7)
+        : `Week ${rowWeek(weekNumberStartMs)}`}</span>
+    {/if}
     <div class="nav">
       <button onclick={onPrev} aria-label="Previous {unit}">‹</button>
       <button onclick={onNext} aria-label="Next {unit}">›</button>
@@ -651,6 +661,9 @@
 {/if}
 
 <style>
+  .week-number { color: var(--muted); font-size: 11px; white-space: nowrap;
+                 width: 8em; font-variant-numeric: tabular-nums; }
+
   /* `padding-top`, moved here out of `App`'s `main` — see the comment there
      for why it is layout-neutral. A drag region covers its own box and
      nothing above it, so this is what carries the top edge of the window into

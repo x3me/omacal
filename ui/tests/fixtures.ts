@@ -2376,6 +2376,7 @@ export const FIXTURES: Record<string, Record<string, any>> = {
   },
   YearGrid: {
     y2026: { year: y2026() },
+    "y2026-weeks": { year: y2026(), showWeekNumbers: true },
   },
   BigYearRibbon: {
     y2026: { ribbon: bigYear2026(), calendars: RIBBON_CALENDARS },

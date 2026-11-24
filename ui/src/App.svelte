@@ -117,6 +117,7 @@
    *  the current/anchored day and show a rolling 3/5/7-day range. The fixed
    *  weekday remains in `weekstartstore` for Month, Year and Big Year. */
   let weekStartsToday = $state(false);
+  let showWeekNumbers = $state(false);
   let weekViewDays = $state<WeekViewDays>(7);
 
   // Year and Big Year read a bare calendar year rather than a millisecond
@@ -967,6 +968,7 @@
     const enteringRolling = !weekStartsToday && s.weekStartsToday;
     setWeekStartDay(s.weekStart);
     weekStartsToday = s.weekStartsToday;
+    showWeekNumbers = s.showWeekNumbers;
     weekViewDays = s.weekViewDays;
     if (jumpOnEntry && enteringRolling) anchorMs = dayStart(Date.now());
   }
@@ -2723,6 +2725,8 @@
   <Header
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
+    {showWeekNumbers} weekPanned={weekPanDays % 7 !== 0}
+    weekNumberStartMs={hideWeekends() ? weekdayOnOrAfter(pannedWeekStartMs) : pannedWeekStartMs}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
     {busy} error={writeError ?? error} {calendars} {view} {listMode}
     errorAction={retry && retry.forError === (writeError ?? error) ? retry : null}
@@ -2817,7 +2821,7 @@
                      onopen={openGridEvent} />
         {:else}
           <div class="pager" bind:this={pagerEl}>
-            <MonthGrid month={shownMonth} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
+            <MonthGrid {showWeekNumbers} month={shownMonth} keyboardCursor={visibleKeyboardCursor} onopen={openGridEvent}
                        onedit={editGridEvent}
                        ondaypick={handleDayPick} oncreate={newEventOnDay} />
           </div>
@@ -2831,7 +2835,7 @@
            create in it, or press `n`. -->
       {#if year}
         <div class="pager" bind:this={pagerEl}>
-          <YearGrid {year} ondaypick={handleDayPick} />
+          <YearGrid {year} {showWeekNumbers} ondaypick={handleDayPick} />
         </div>
       {/if}
     {:else if view === 'bigyear'}

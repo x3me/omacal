@@ -5,13 +5,15 @@
   import { isFree, isPrivate } from './showas';
   import { rotate } from './weekstart';
   import { weekStartDay } from './weekstartstore.svelte';
+  import { rowWeek } from './weeknumbers';
   import type { MonthPayload, UiEvent } from './api';
   import type { Rect } from './position';
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { MONTH_GRID_TIMED_LIMIT } from './filmstrip';
 
-  let { month, keyboardCursor = null, onopen, onedit = null, ondaypick, oncreate }: {
+  let { month, showWeekNumbers = false, keyboardCursor = null, onopen, onedit = null, ondaypick, oncreate }: {
     month: MonthPayload;
+    showWeekNumbers?: boolean;
     keyboardCursor?: KeyboardCursor | null;
     /** Same contract as `WeekGrid`'s: an anchor rect plus the clicked event,
      *  handed straight to `EventPopover` via `placePopover`. */
@@ -121,13 +123,17 @@
   }
 </script>
 
-<div class="head">
+<div class="head" class:numbered={showWeekNumbers}>
+  {#if showWeekNumbers}<span aria-hidden="true"></span>{/if}
   {#each DOW as d}<span>{d}</span>{/each}
 </div>
 
-<div class="grid quiet-scroll">
+<div class="grid quiet-scroll" class:numbered={showWeekNumbers}>
   {#each month.rows as row}
     <div class="mrow">
+      {#if showWeekNumbers && row.cells.length}
+        <span class="row-week" data-week-number aria-label="Week {rowWeek(row.cells[0].start_ms)}">{rowWeek(row.cells[0].start_ms)}</span>
+      {/if}
       <div class="bars">
         {#each row.bars as lane (`${lane.idx}:${lane.lane}`)}
           {@const ev = row.bar_events[lane.idx]}
@@ -219,6 +225,7 @@
 
 <style>
   .head { display: grid; grid-template-columns: repeat(7, 1fr); padding-bottom: 6px; }
+  .head.numbered { grid-template-columns: 28px repeat(7, 1fr); }
   .head span { text-align: center; font-size: 11px; color: var(--muted);
                letter-spacing: .05em; }
 
@@ -230,6 +237,9 @@
           overflow-y: auto; }
   .mrow { flex: 1 0 auto; display: flex; flex-direction: column;
           border-top: 1px solid var(--hairline); }
+  .grid.numbered .mrow { padding-left: 28px; position: relative; }
+  .row-week { position: absolute; left: 0; top: 7px; width: 28px;
+              text-align: center; font-size: 10px; color: var(--muted); }
   .mrow:first-child { border-top: 0; }
 
   .bars { display: grid; grid-template-columns: repeat(7, 1fr);
