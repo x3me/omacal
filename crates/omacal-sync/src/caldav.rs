@@ -272,7 +272,11 @@ async fn clear_reinstated_notices(
         let Some((uid, timestamp)) = gid.rsplit_once('#') else { continue };
         let Ok(slot) = timestamp.parse::<i64>() else { continue };
         if uid != series { continue; }
+        // The organizer may have changed the master to a timed series
+        // between REPORTs. Its rule then names instants, even if the last
+        // detached component we saw used a DATE.
         let reinstated = match date {
+            _ if !matches!(master.start, IcsTime::Date(_)) => master.includes_occurrence(slot, cal_tz),
             Some(date) => date.parse().ok().is_some_and(|d| master.includes_date(d, cal_tz)),
             None if date_id => master.includes_legacy_date_id(slot, cal_tz),
             None => master.includes_occurrence(slot, cal_tz),

@@ -67,6 +67,12 @@ async fn check_reinstatement(legacy: bool) {
     // must consult the timed rule, even when its predecessor was all-day.
     report(&server, "all-day-move", date_start, "", moved).await;
     sync().await.unwrap();
+    // The server can also omit the override in the very first timed REPORT.
+    report(&server, "direct-timed-restore", ":20261201T050000Z", "", "").await;
+    sync().await.unwrap();
+    assert_eq!(cancellations().await, 0);
+    report(&server, "all-day-move-again", date_start, "", moved).await;
+    sync().await.unwrap();
     let timed = moved.replace(";VALUE=DATE:20261202", ":20261202T050000Z")
         .replace(";VALUE=DATE:20261203", ":20261203T050000Z");
     report(&server, "timed-move", ":20261201T050000Z", "", &timed).await;
