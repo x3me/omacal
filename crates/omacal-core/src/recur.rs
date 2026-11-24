@@ -196,25 +196,15 @@ fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, Recur
         .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
 }
 
-/// Does an RRULE generate this exact occurrence start? The caller handles
-/// explicit dates and checks all-day UNTIL bounds against the original slot.
-pub fn rules_start_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
-    let zone = series.dtstart_tz.parse()
-        .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
-    let target = to_chrono(slot_ms)?;
-    let (set, target) = if series.is_all_day {
-        let date = target.with_timezone(&zone).date_naive();
-        if midnight_in_zone(date, zone) != slot_ms {
-            return Ok(false);
-        }
-        // Count civil dates on a clock with no gaps. Only the real slot
-        // above is in the calendar's zone. The host zone is irrelevant.
-        let start = date_in_zone(series.dtstart_ms, series.dtstart_tz).replace('-', "");
-        let set = rule_set(format!("DTSTART:{start}T000000Z"), series.recurrence)?;
-        (set, to_chrono(midnight_in_zone(date, chrono_tz::UTC))?)
-    } else {
-        (rule_set(dtstart_line(series, zone)?, series.recurrence)?, target)
+/// Match an RRULE at one instant. For DATE rules the caller projects both
+/// civil dates onto a UTC clock after checking the provider's original slot.
+pub fn rules_start_at(start_ms: i64, tz: &str, rules: &[String], slot_ms: i64) -> Result<bool, RecurError> {
+    let zone = tz.parse().map_err(|_| RecurError::UnknownTimeZone(tz.to_owned()))?;
+    let series = Series {
+        dtstart_ms: start_ms, dtstart_tz: tz, duration_ms: 0, is_all_day: false, recurrence: rules,
     };
+    let set = rule_set(dtstart_line(&series, zone)?, rules)?;
+    let target = to_chrono(slot_ms)?;
     Ok(!set.after(target).before(target).all(1).dates.is_empty())
 }
 

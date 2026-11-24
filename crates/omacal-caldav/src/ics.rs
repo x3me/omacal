@@ -379,6 +379,12 @@ fn all_day_rule_at(mut rule: Property, slot_ms: i64, zone: &str) -> Option<Strin
     let mut fields = Vec::new();
     for field in value.split(';') {
         if let Some((_, until)) = field.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("UNTIL")) {
+            // The general ICS property parser tolerates trailing text. A rule
+            // can clear a notice only when its entire bound is understood.
+            let wall = until.strip_suffix('Z').unwrap_or(until);
+            if until.len() != 8 && (wall.len() != 15 || wall.as_bytes()[8] != b'T') {
+                return None;
+            }
             rule.value = until.to_owned();
             let (end, ..) = resolve(&parse_time(&rule)?, zone)?;
             if slot_ms > end { return None; }
@@ -389,12 +395,23 @@ fn all_day_rule_at(mut rule: Property, slot_ms: i64, zone: &str) -> Option<Strin
     Some(format!("RRULE:{}", fields.join(";")))
 }
 
+/// Verify the stored RECURRENCE-ID using the same conversion that wrote it.
+/// Then put both civil dates on a gap-free clock for the rule iterator.
+fn all_day_rule_instants(first: Date, slot_ms: i64, zone: &str) -> Option<(i64, i64)> {
+    let date = Timestamp::from_millisecond(slot_ms).ok()?.in_tz(zone).ok()?.date();
+    let slot = IcsTime::Date(date);
+    if resolve(&slot, zone)?.0 != slot_ms {
+        return None;
+    }
+    Some((resolve(&IcsTime::Date(first), "UTC")?.0, resolve(&slot, "UTC")?.0))
+}
+
 impl CalEvent {
     /// A missing override is reinstated only if the returned master still
     /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
     /// including floating times in the collection's zone.
     pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
-        use omacal_core::recur::{Series, rules_start_at};
+        use omacal_core::recur::rules_start_at;
 
         let Some((start, zone, all_day)) = resolve(&self.start, cal_tz) else { return false };
         if self.status == "cancelled" {
@@ -424,10 +441,15 @@ impl CalEvent {
                 }
             }
         }
-        included || (!rules.is_empty() && rules_start_at(&Series {
-            dtstart_ms: start, dtstart_tz: &zone, duration_ms: 0, is_all_day: all_day,
-            recurrence: &rules,
-        }, slot_ms).unwrap_or(false))
+        if included || rules.is_empty() {
+            return included;
+        }
+        if let IcsTime::Date(first) = self.start {
+            let Some((anchor, slot)) = all_day_rule_instants(first, slot_ms, &zone) else { return false };
+            rules_start_at(anchor, "UTC", &rules, slot).unwrap_or(false)
+        } else {
+            rules_start_at(start, &zone, &rules, slot_ms).unwrap_or(false)
+        }
     }
 }
 
@@ -2192,6 +2214,33 @@ mod tests {
             assert_eq!(event.includes_occurrence(slot, "America/Havana"), included, "{rule}");
             assert!(!event.includes_occurrence(slot + 3_600_000, "America/Havana"), "{rule}");
             assert!(!event.includes_occurrence(slot + 23 * 3_600_000, "America/Havana"), "{rule}");
+        }
+    }
+
+    #[test]
+    fn all_day_reinstatement_matches_the_stored_date_id() {
+        for (zone, start, slot) in [
+            ("America/Havana", "20261201", jiff::civil::date(2026, 12, 2)),
+            ("America/Toronto", "19190330", jiff::civil::date(1919, 3, 31)),
+        ] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:{start}\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            let (id, ..) = resolve(&IcsTime::Date(slot), zone).unwrap();
+            assert!(event.includes_occurrence(id, zone), "{zone}");
+            assert!(!event.includes_occurrence(id + 1, zone), "{zone}");
+        }
+    }
+
+    #[test]
+    fn all_day_reinstatement_rejects_a_malformed_until() {
+        let zone = "America/Havana";
+        let (slot, ..) = resolve(&IcsTime::Date(jiff::civil::date(2026, 3, 8)), zone).unwrap();
+        for until in ["20260308T060000+0200", "20260309T235959TYPO", "20260309T2359599Z"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:20260307\nRRULE:FREQ=DAILY;UNTIL={until}\nEND:VEVENT\nEND:VCALENDAR");
+            let mut event = events_in(&parse(&raw).unwrap()).remove(0);
+            assert!(!event.includes_occurrence(slot, zone), "{until}");
+            event.recurrence.push("RDATE;VALUE=DATE:20260308".into());
+            assert!(event.includes_occurrence(slot, zone), "independent RDATE");
         }
     }
 
