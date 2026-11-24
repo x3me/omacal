@@ -2297,6 +2297,41 @@ mod tests {
     }
 
     #[test]
+    fn subdaily_gap_start_membership_agrees_with_the_calendar_expansion() {
+        for (zone, start, rules) in [
+            ("Australia/Lord_Howe", "20261004T021500", &[
+                "FREQ=HOURLY;COUNT=2", "FREQ=HOURLY;BYMINUTE=15,45;COUNT=3",
+                "FREQ=HOURLY;BYMINUTE=15;COUNT=2",
+                "FREQ=HOURLY;BYMINUTE=15,45;BYSETPOS=1,2;COUNT=3",
+            ][..]),
+            ("America/New_York", "20260308T023000", &[
+                "FREQ=HOURLY;BYHOUR=2;BYMINUTE=30,45;COUNT=2",
+                "FREQ=MINUTELY;INTERVAL=17;COUNT=3",
+                "FREQ=SECONDLY;INTERVAL=17;COUNT=3",
+            ][..]),
+        ] {
+            for rule in rules {
+                let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:{start}\nRRULE:{rule}\nEND:VEVENT\nEND:VCALENDAR");
+                let event = events_in(&parse(&raw).unwrap()).remove(0);
+                let (first, ..) = resolve(&event.start, zone).unwrap();
+                let series = omacal_core::Series {
+                    dtstart_ms: first, dtstart_tz: zone, recurrence: &event.recurrence,
+                    duration_ms: 1_000, is_all_day: false,
+                };
+                let end = first + 86_400_000;
+                let expanded = omacal_core::expand(&series, first, end, 16).unwrap();
+                let mut starts: std::collections::BTreeSet<_> =
+                    expanded.intervals.iter().map(|i| i.start_ms).collect();
+                starts.insert(first);
+                let nearby = (first..first + 2 * 3_600_000).step_by(60_000);
+                for slot in nearby.chain(starts.iter().flat_map(|&ms| [ms - 1_000, ms, ms + 1_000])) {
+                    assert_eq!(event.includes_occurrence(slot, zone), starts.contains(&slot), "{zone} {rule} at {slot}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn timed_reinstatement_uses_the_actual_gap_width_and_inclusive_until() {
         // Lord Howe skips 02:00 through 02:29:59 on October 4. Both the
         // missing local time and its shifted counterpart can be scheduled.

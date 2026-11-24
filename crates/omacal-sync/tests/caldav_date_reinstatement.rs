@@ -125,13 +125,18 @@ async fn guest_cancellations_follow_the_replacement_rule_across_a_gap() {
         (late_in_gap, "FREQ=MINUTELY;COUNT=3", "20260308T040000", false),
         (late_in_gap, "FREQ=MINUTELY;COUNT=3", "20260308T040100", true),
         (in_gap, "FREQ=MINUTELY;INTERVAL=15;COUNT=4", "20260308T041500", false),
+        (in_gap, "FREQ=MINUTELY;INTERVAL=17;COUNT=2", "20260308T033800", true),
+        (in_gap, "FREQ=MINUTELY;INTERVAL=17;COUNT=2", "20260308T034700", false),
+        (in_gap, "FREQ=MINUTELY;INTERVAL=17;COUNT=3", "20260308T040400", false),
+        (in_gap, "FREQ=HOURLY;INTERVAL=2;COUNT=2", "20260308T043000", true),
+        (in_gap, "FREQ=HOURLY;INTERVAL=2;COUNT=2", "20260308T053000", false),
     ] {
         let pool = guest_calendar(&url, "America/New_York").await;
         let moved = format!("BEGIN:VEVENT\nUID:s\nRECURRENCE-ID;TZID=America/New_York:{slot}\n\
             DTSTART;TZID=America/New_York:{}T130000\nSUMMARY:Meeting\nORGANIZER:mailto:organizer@example.org\n\
             ATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.org\nEND:VEVENT\n", &slot[..8]);
         let sync = || sync_caldav_calendar(&pool, &client, 1, &url, true, false, now, ms("2026-04-01T00:00:00Z"), now);
-        report(&server, "moved", &format!("{before_gap}\nRRULE:FREQ=DAILY;BYHOUR=2,3,4,5;BYMINUTE=0,1,15,30,45,59"), &moved).await;
+        report(&server, "moved", &format!("{before_gap}\nRRULE:FREQ=DAILY;BYHOUR=2,3,4,5;BYMINUTE=0,1,4,15,30,38,45,47,59"), &moved).await;
         sync().await.unwrap();
         let overrides = || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE recurring_event_id='s'")
             .fetch_one(&pool);

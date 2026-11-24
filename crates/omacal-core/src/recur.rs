@@ -220,6 +220,31 @@ fn position_period(rule: &rrule::RRule, civil: chrono::DateTime<Tz>) -> i64 {
     }
 }
 
+/// Build the iterator in civil coordinates. Date-based rules retain the
+/// authored date and clock defaults. A subdaily interval starts ticking at
+/// the resolved DTSTART, including when a gap has advanced it.
+fn civil_rule_set(
+    text: &str,
+    start: jiff::civil::DateTime,
+    first_wall: jiff::civil::DateTime,
+    native_count: Option<u32>,
+) -> Option<RRuleSet> {
+    use rrule::Frequency::{Hourly, Minutely, Secondly};
+
+    let mut rule = text.parse::<rrule::RRule<rrule::Unvalidated>>().ok()?;
+    if let Some(n) = native_count { rule = rule.count(n); }
+    // Keep every selected time in the first subdaily period available for
+    // instant comparison, including explicit BYMINUTE/BYSECOND values.
+    let (defaults, seed) = match rule.get_freq() {
+        Hourly if start != first_wall => (first_wall, first_wall.date().at(first_wall.hour(), 0, 0, 0)),
+        Minutely if start != first_wall => (first_wall, first_wall.date().at(first_wall.hour(), first_wall.minute(), 0, 0)),
+        Secondly if start != first_wall => (first_wall, first_wall),
+        _ => (start, start),
+    };
+    let coordinate = |wall| to_chrono(jiff::tz::TimeZone::UTC.to_timestamp(wall).ok()?.as_millisecond()).ok();
+    Some(RRuleSet::new(coordinate(seed)?).rrule(rule.validate(coordinate(defaults)?).ok()?))
+}
+
 /// Test a CalDAV rule on the provider's clock. The recurrence iterator selects
 /// civil dates in UTC coordinates. Resolve them under the provider's zone
 /// before applying any count affected by a clock change (RFC 5545 EID 4271).
@@ -238,13 +263,9 @@ pub fn civil_rule_starts_at(
     }
     let Ok(target) = utc.to_timestamp(wall) else { return false };
     let fixed = zone.to_fixed_offset().is_ok();
-    let mut source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
-    // On a fixed clock civil order and instant order coincide. Let rrule
-    // stop generating the period as soon as COUNT is exhausted.
-    if let Some(n) = count.filter(|_| fixed) {
-        source.push_str(&format!(";COUNT={n}"));
-    }
-    let Ok(set) = RRuleSet::from_str(&source) else { return false };
+    let first_wall = zone.to_datetime(first);
+    // On a fixed clock rrule can stop generating a period as soon as COUNT runs out.
+    let Some(set) = civil_rule_set(rule, start, first_wall, count.filter(|_| fixed)) else { return false };
     if fixed {
         let Ok(target) = to_chrono(target.as_millisecond()) else { return false };
         return !set.after(target).before(target).all(1).dates.is_empty();
@@ -261,13 +282,13 @@ pub fn civil_rule_starts_at(
 
     let mut remaining = count.map_or(usize::MAX, |n| n as usize);
     let mut instants = std::collections::BTreeSet::new();
-    let first_wall = zone.to_datetime(first);
-    if first_wall != start {
+    let Ok(first_coordinate) = utc.to_timestamp(first_wall) else { return false };
+    if first_wall != start && rule.get_freq() < rrule::Frequency::Hourly {
         // A series starting at 02:30 in a gap starts at 03:30. Its 02:45
         // candidate is later than DTSTART. A real 03:45 candidate, if the
         // rule also emits one, identifies that same meeting. Collect both
         // spellings in instant order before spending COUNT.
-        let Ok(mut through) = utc.to_timestamp(first_wall) else { return false };
+        let mut through = first_coordinate;
         while let Some(d) = candidates.next_if(|d| d.timestamp_millis() <= through.as_millisecond()) {
             if let Some(instant) = resolve(d).filter(|&t| t >= first) {
                 let Ok(wall) = utc.to_timestamp(zone.to_datetime(instant)) else { return false };
@@ -281,6 +302,13 @@ pub fn civil_rule_starts_at(
         }
         remaining = remaining.saturating_sub(instants.len());
     }
+    // The first subdaily period may contain explicit minute or second
+    // positions before DTSTART's displayed clock time. Keep each position
+    // whose provider instant is at or after DTSTART, as the renderer does.
+    let candidates = candidates.filter(|d| {
+        d.timestamp_millis() >= first_coordinate.as_millisecond()
+            || resolve(*d).is_some_and(|instant| instant >= first)
+    });
     if count.is_none() || rule.get_by_set_pos().len() < 2 {
         // An earlier civil date cannot map to this slot under any provider
         // offset. Avoid a zone lookup for each date in a long-running series.
@@ -291,6 +319,7 @@ pub fn civil_rule_starts_at(
     // rrule sorts and deduplicates selected positions within each period
     // before consuming COUNT. A gap can change their order or make distinct
     // wall times coincide, so do this part on the provider's actual instants.
+    let mut candidates = candidates.peekable();
     while remaining > 0 {
         let Some(candidate) = candidates.next() else { break };
         let period = position_period(rule, candidate);
