@@ -22,6 +22,17 @@ test('a task is drawn on the day it is due', () => {
   expect(timed.size).toBe(0);
 });
 
+/** The chip is all the grid sees of a task, so the priority marks (#190)
+ *  ride on it: the raw value, which `priorityLabel` reads. */
+test('a chip carries the task\'s priority', () => {
+  const { row, timed } = taskChips([
+    task({ id: 1, dueMs: on(11), priority: 1 }),
+    task({ id: 2, dueMs: on(11, 15), dueAllDay: false, priority: 7 }),
+  ], NOW);
+  expect(row.get('2026-09-11')![0].priority).toBe(1);
+  expect(timed.get('2026-09-11')![0].priority).toBe(7);
+});
+
 /** macOS Calendar's shape: "by 15:00" is a time, and the row would drop it. */
 test('a task due at an hour is drawn at it, not in the row', () => {
   const { row, timed } = taskChips([task({ id: 1, dueMs: on(11, 15), dueAllDay: false })], NOW);

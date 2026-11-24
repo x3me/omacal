@@ -84,6 +84,10 @@ export const priorityLabel = (raw: number): 'High' | 'Medium' | 'Low' | null =>
   : raw >= 6 && raw <= 9 ? 'Low'
   : null;
 
+/** Fantastical's marks for a level, which the grid draws before a task's
+ *  title (#190): `!!!` High, `!!` Medium, `!` Low. */
+export const PRIORITY_MARKS = { High: '!!!', Medium: '!!', Low: '!' } as const;
+
 /** The option the editor should *show* for a stored integer: the value itself
  *  when it is one of the four, else the band's canonical level — so a server's
  *  non-canonical 7 shows as Low rather than falling back to None. Display

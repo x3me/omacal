@@ -507,7 +507,8 @@
     if (!press) return;
     if (!carried()) {
       if (!beganDrag(e.clientX - press.x, e.clientY - press.y)) return;
-      beginCarry({ id: press.task.id, summary: press.task.summary, color: listColor(press.task) }, e.clientX, e.clientY);
+      beginCarry({ id: press.task.id, summary: press.task.summary, color: listColor(press.task),
+                   priority: press.task.priority }, e.clientX, e.clientY);
       window.getSelection()?.removeAllRanges();
       return;
     }
