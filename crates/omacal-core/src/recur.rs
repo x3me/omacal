@@ -237,8 +237,18 @@ pub fn civil_rule_starts_at(
         return false;
     }
     let Ok(target) = utc.to_timestamp(wall) else { return false };
-    let source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
+    let fixed = zone.to_fixed_offset().is_ok();
+    let mut source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
+    // On a fixed clock civil order and instant order coincide. Let rrule
+    // stop generating the period as soon as COUNT is exhausted.
+    if let Some(n) = count.filter(|_| fixed) {
+        source.push_str(&format!(";COUNT={n}"));
+    }
     let Ok(set) = RRuleSet::from_str(&source) else { return false };
+    if fixed {
+        let Ok(target) = to_chrono(target.as_millisecond()) else { return false };
+        return !set.after(target).before(target).all(1).dates.is_empty();
+    }
     let set = set.limit();
     let Some(rule) = set.get_rrule().first() else { return false };
     let resolve = |civil: chrono::DateTime<Tz>| {
@@ -246,14 +256,19 @@ pub fn civil_rule_starts_at(
         zone.to_timestamp(utc.to_datetime(coordinate)).ok()
     };
     let Ok(first_wall) = utc.to_timestamp(zone.to_datetime(first)) else { return false };
-    let start_ms = set.get_dt_start().timestamp_millis();
+    let first_wall_ms = first_wall.as_millisecond();
     let candidates = (&set).into_iter()
         .take_while(|d| d.timestamp_millis() <= target.as_millisecond())
-        // An explicit DTSTART in a gap has already advanced the clock.
-        .filter(|d| d.timestamp_millis() == start_ms || d.timestamp_millis() > first_wall.as_millisecond());
+        .filter(|d| {
+            // 02:30 in a gap can resolve to 03:30. Keep the authored start
+            // once. Between those wall times, 02:45 resolves after the start
+            // while 03:15 resolves before it. Compare their actual instants.
+            d == set.get_dt_start() || d.timestamp_millis() > first_wall_ms
+                || resolve(*d).is_some_and(|instant| instant > first)
+        });
 
     let mut remaining = count.map_or(usize::MAX, |n| n as usize);
-    if count.is_none() || rule.get_by_set_pos().len() < 2 || zone.to_fixed_offset().is_ok() {
+    if count.is_none() || rule.get_by_set_pos().len() < 2 {
         // An earlier civil date cannot map to this slot under any provider
         // offset. Avoid a zone lookup for each date in a long-running series.
         let earliest = slot.as_millisecond() + i64::from(jiff::tz::Offset::MIN.seconds()) * 1000;

@@ -2275,6 +2275,28 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_start_counts_later_instants_and_skips_the_second_copy_of_dtstart() {
+        // Lord Howe jumps from 02:00 to 02:30. A start at 02:10 becomes
+        // 02:40. The authored 02:20 is later, 02:30 is earlier, and 02:40
+        // is the start again. Only 02:10 and 02:20 consume COUNT that day.
+        for positions in ["", ";BYSETPOS=1,2,3,4"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID=Australia/Lord_Howe:20261004T021000\n\
+                RRULE:FREQ=DAILY;BYHOUR=2;BYMINUTE=10,20,30,40{positions};COUNT=3\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            for (slot, included) in [
+                ("2026-10-03T15:30:00Z", false),
+                ("2026-10-03T15:40:00Z", true),
+                ("2026-10-03T15:50:00Z", true),
+                ("2026-10-04T15:10:00Z", true),
+                ("2026-10-04T15:20:00Z", false),
+            ] {
+                let ms = slot.parse::<Timestamp>().unwrap().as_millisecond();
+                assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{positions} {slot}");
+            }
+        }
+    }
+
+    #[test]
     fn timed_reinstatement_uses_the_actual_gap_width_and_inclusive_until() {
         // Lord Howe skips 02:00 through 02:29:59 on October 4. Both the
         // missing local time and its shifted counterpart can be scheduled.
