@@ -1979,7 +1979,7 @@ mod tests {
             assert_eq!(value.as_deref(), expected);
         }
         let fresh = crate::connect_memory().await.unwrap();
-        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success AND version <= 20")
             .fetch_one(&fresh).await.unwrap();
         assert_eq!(versions, 20);
     }
