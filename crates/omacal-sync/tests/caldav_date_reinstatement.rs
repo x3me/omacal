@@ -95,23 +95,35 @@ async fn guest_cancellations_follow_the_replacement_rule_across_a_gap() {
     let client = CalDavClient::new(&server.uri(), "guest@example.org", "pw").unwrap();
     let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
     let now = ms("2026-03-01T12:00:00Z");
-    for (rule, slot, cancelled) in [
-        ("FREQ=DAILY;COUNT=2", "20260308T033000", false),
-        ("FREQ=DAILY;COUNT=2", "20260309T023000", true),
-        ("FREQ=DAILY", "20260308T033000", false),
-        ("FREQ=DAILY;BYHOUR=2,3;BYSETPOS=1;COUNT=3", "20260308T033000", false),
-        ("FREQ=DAILY;BYHOUR=2,3;BYSETPOS=1;COUNT=3", "20260309T023000", false),
-        ("FREQ=DAILY;BYHOUR=2,3;BYSETPOS=1;COUNT=3", "20260310T023000", true),
-        ("FREQ=DAILY;COUNT=5;", "20260309T023000", false),
-        ("FREQ=DAILY;COUNT=5", "20260309T023000", false),
+    let before_gap = ";TZID=America/New_York:20260307T023000";
+    let in_gap = ";TZID=America/New_York:20260308T023000";
+    let first_position = "FREQ=DAILY;BYHOUR=2,3;BYSETPOS=1;COUNT=3";
+    let two_positions = "FREQ=DAILY;BYHOUR=2,3;BYSETPOS=1,2;COUNT=5";
+    let reordered = "FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30;BYSETPOS=2,3;COUNT=3";
+    for (start, rule, slot, cancelled) in [
+        (before_gap, "FREQ=DAILY;COUNT=2", "20260308T033000", false),
+        (before_gap, "FREQ=DAILY;COUNT=2", "20260309T023000", true),
+        (before_gap, "FREQ=DAILY", "20260308T033000", false),
+        (before_gap, first_position, "20260308T033000", false),
+        (before_gap, first_position, "20260309T023000", false),
+        (before_gap, first_position, "20260310T023000", true),
+        (before_gap, "FREQ=DAILY;COUNT=5;", "20260309T023000", false),
+        (before_gap, "FREQ=DAILY;COUNT=5", "20260309T023000", false),
+        (before_gap, two_positions, "20260309T033000", false),
+        (before_gap, "FREQ=DAILY;BYHOUR=2,3;COUNT=5", "20260309T033000", true),
+        (before_gap, reordered, "20260308T030000", false),
+        (before_gap, reordered, "20260308T033000", true),
+        (in_gap, "FREQ=HOURLY;COUNT=2", "20260308T043000", false),
+        (in_gap, "FREQ=HOURLY;COUNT=2", "20260308T053000", true),
+        (in_gap, "FREQ=DAILY;COUNT=2", "20260309T023000", false),
+        (in_gap, "FREQ=DAILY;COUNT=2", "20260309T033000", true),
     ] {
         let pool = guest_calendar(&url, "America/New_York").await;
-        let start = ";TZID=America/New_York:20260307T023000";
         let moved = format!("BEGIN:VEVENT\nUID:s\nRECURRENCE-ID;TZID=America/New_York:{slot}\n\
             DTSTART;TZID=America/New_York:{}T130000\nSUMMARY:Meeting\nORGANIZER:mailto:organizer@example.org\n\
             ATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.org\nEND:VEVENT\n", &slot[..8]);
         let sync = || sync_caldav_calendar(&pool, &client, 1, &url, true, false, now, ms("2026-04-01T00:00:00Z"), now);
-        report(&server, "moved", &format!("{start}\nRRULE:FREQ=DAILY;BYHOUR=2,3"), &moved).await;
+        report(&server, "moved", &format!("{before_gap}\nRRULE:FREQ=DAILY;BYHOUR=2,3,4,5;BYMINUTE=0,30"), &moved).await;
         sync().await.unwrap();
         let overrides = || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE recurring_event_id='s'")
             .fetch_one(&pool);

@@ -204,44 +204,81 @@ pub fn legacy_date_id(slot_ms: i64, tz: &str) -> Option<chrono::NaiveDate> {
     (midnight_in_zone(date, zone) == slot_ms).then_some(date)
 }
 
-/// Test RRULE membership on the provider's clock. Generate civil candidates
-/// in UTC coordinates so rrule applies BYSETPOS and COUNT to the authored times.
+/// BYSETPOS selects positions within one interval of the rule's frequency.
+fn position_period(rule: &rrule::RRule, civil: chrono::DateTime<Tz>) -> i64 {
+    use chrono::Datelike;
+    use rrule::Frequency::*;
+
+    match rule.get_freq() {
+        Yearly => i64::from(civil.year()),
+        Monthly => i64::from(civil.year()) * 12 + i64::from(civil.month0()),
+        Weekly => i64::from(civil.date_naive().week(rule.get_week_start()).first_day().num_days_from_ce()),
+        Daily => civil.timestamp().div_euclid(86_400),
+        Hourly => civil.timestamp().div_euclid(3600),
+        Minutely => civil.timestamp().div_euclid(60),
+        Secondly => civil.timestamp(),
+    }
+}
+
+/// Test a CalDAV rule on the provider's clock. The recurrence iterator selects
+/// civil dates in UTC coordinates. Resolve them under the provider's zone
+/// before applying any count affected by a clock change (RFC 5545 EID 4271).
 pub fn civil_rule_starts_at(
     start: jiff::civil::DateTime,
     zone: &jiff::tz::TimeZone,
     rule: &str,
+    count: Option<u32>,
     slot: jiff::Timestamp,
 ) -> bool {
+    let utc = jiff::tz::TimeZone::UTC;
     let Ok(first) = zone.to_timestamp(start) else { return false };
     let wall = zone.to_datetime(slot);
     if slot < first || zone.to_timestamp(wall).ok() != Some(slot) {
         return false;
     }
+    let Ok(target) = utc.to_timestamp(wall) else { return false };
     let source = format!("DTSTART:{}Z\n{rule}", start.strftime("%Y%m%dT%H%M%S"));
     let Ok(set) = RRuleSet::from_str(&source) else { return false };
-    let utc = jiff::tz::TimeZone::UTC;
-    let Ok(target) = utc.to_timestamp(wall) else { return false };
-
-    // During a forward jump, two civil times can identify the same instant.
-    // For example, both 02:30 in the gap and 03:30 after it resolve to 07:30Z
-    // in New York. RFC 5545 erratum 4271 assigns the old offset to the former.
-    // preceding() is exclusive. Include a transition at the slot itself.
-    let tick = jiff::SignedDuration::from_nanos(1);
-    let inclusive_end = slot.checked_add(tick).unwrap_or(slot);
-    let gap_target = zone.preceding(inclusive_end).next().and_then(|transition| {
-        let old = zone.to_offset(transition.timestamp().checked_sub(tick).ok()?);
-        let skipped = old.to_datetime(slot);
-        if old >= transition.offset() || zone.to_timestamp(skipped).ok() != Some(slot) {
-            return None;
-        }
-        Some(utc.to_timestamp(skipped).ok()?.as_millisecond())
-    });
-    let target = target.as_millisecond();
     let set = set.limit();
-    (&set).into_iter()
-        .map(|candidate| candidate.timestamp_millis())
-        .take_while(|&ms| ms <= target)
-        .any(|ms| ms == target || Some(ms) == gap_target)
+    let Some(rule) = set.get_rrule().first() else { return false };
+    let resolve = |civil: chrono::DateTime<Tz>| {
+        let coordinate = jiff::Timestamp::from_millisecond(civil.timestamp_millis()).ok()?;
+        zone.to_timestamp(utc.to_datetime(coordinate)).ok()
+    };
+    let Ok(first_wall) = utc.to_timestamp(zone.to_datetime(first)) else { return false };
+    let start_ms = set.get_dt_start().timestamp_millis();
+    let candidates = (&set).into_iter()
+        .take_while(|d| d.timestamp_millis() <= target.as_millisecond())
+        // An explicit DTSTART in a gap has already advanced the clock.
+        .filter(|d| d.timestamp_millis() == start_ms || d.timestamp_millis() > first_wall.as_millisecond());
+
+    let mut remaining = count.map_or(usize::MAX, |n| n as usize);
+    if count.is_none() || rule.get_by_set_pos().len() < 2 || zone.to_fixed_offset().is_ok() {
+        // An earlier civil date cannot map to this slot under any provider
+        // offset. Avoid a zone lookup for each date in a long-running series.
+        let earliest = slot.as_millisecond() + i64::from(jiff::tz::Offset::MIN.seconds()) * 1000;
+        return candidates.take(remaining).any(|d| d.timestamp_millis() >= earliest && resolve(d) == Some(slot));
+    }
+
+    // rrule sorts and deduplicates selected positions within each period
+    // before consuming COUNT. A gap can change their order or make distinct
+    // wall times coincide, so do this part on the provider's actual instants.
+    let mut candidates = candidates.peekable();
+    let mut instants = std::collections::BTreeSet::new();
+    while remaining > 0 {
+        let Some(candidate) = candidates.next() else { break };
+        let period = position_period(rule, candidate);
+        instants.clear();
+        instants.extend(resolve(candidate));
+        while let Some(next) = candidates.next_if(|d| position_period(rule, *d) == period) {
+            instants.extend(resolve(next));
+        }
+        if instants.iter().take(remaining).any(|&instant| instant == slot) {
+            return true;
+        }
+        remaining = remaining.saturating_sub(instants.len());
+    }
+    false
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.

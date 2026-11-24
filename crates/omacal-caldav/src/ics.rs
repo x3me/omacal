@@ -372,18 +372,19 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
-/// Check UNTIL against the real instant. Keep COUNT on the civil rule.
-fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<String> {
+/// Check UNTIL against the real instant. Apply COUNT after resolving positions.
+fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<(String, Option<u32>)> {
     let value = std::mem::take(&mut rule.value);
     let mut fields = Vec::new();
     let mut bounded = false;
+    let mut count = None;
     // The recurrence parser used by the renderer ignores empty separators.
     for field in value.split(';').filter(|field| !field.is_empty()) {
         let (key, value) = field.split_once('=')?;
         if key.eq_ignore_ascii_case("COUNT") {
             if bounded || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
             bounded = true;
-            fields.push(field);
+            count = Some(value.parse().ok()?);
         } else if key.eq_ignore_ascii_case("UNTIL") {
             if bounded { return None; }
             bounded = true;
@@ -403,7 +404,7 @@ fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -
             fields.push(field);
         }
     }
-    Some(format!("RRULE:{}", fields.join(";")))
+    Some((format!("RRULE:{}", fields.join(";")), count))
 }
 
 /// Does this instant identify a DATE under the installed rules?
@@ -486,8 +487,8 @@ impl CalEvent {
                 (*dt, timezone, slot)
             }
         };
-        rules.iter().any(|rule| {
-            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, target)
+        rules.iter().any(|(rule, count)| {
+            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, *count, target)
         })
     }
 }
