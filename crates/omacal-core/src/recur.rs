@@ -255,19 +255,32 @@ pub fn civil_rule_starts_at(
         let coordinate = jiff::Timestamp::from_millisecond(civil.timestamp_millis()).ok()?;
         zone.to_timestamp(utc.to_datetime(coordinate)).ok()
     };
-    let Ok(first_wall) = utc.to_timestamp(zone.to_datetime(first)) else { return false };
-    let first_wall_ms = first_wall.as_millisecond();
-    let candidates = (&set).into_iter()
+    let mut candidates = (&set).into_iter()
         .take_while(|d| d.timestamp_millis() <= target.as_millisecond())
-        .filter(|d| {
-            // 02:30 in a gap can resolve to 03:30. Keep the authored start
-            // once. Between those wall times, 02:45 resolves after the start
-            // while 03:15 resolves before it. Compare their actual instants.
-            d == set.get_dt_start() || d.timestamp_millis() > first_wall_ms
-                || resolve(*d).is_some_and(|instant| instant > first)
-        });
+        .peekable();
 
     let mut remaining = count.map_or(usize::MAX, |n| n as usize);
+    let mut instants = std::collections::BTreeSet::new();
+    let first_wall = zone.to_datetime(first);
+    if first_wall != start {
+        // A series starting at 02:30 in a gap starts at 03:30. Its 02:45
+        // candidate is later than DTSTART. A real 03:45 candidate, if the
+        // rule also emits one, identifies that same meeting. Collect both
+        // spellings in instant order before spending COUNT.
+        let Ok(mut through) = utc.to_timestamp(first_wall) else { return false };
+        while let Some(d) = candidates.next_if(|d| d.timestamp_millis() <= through.as_millisecond()) {
+            if let Some(instant) = resolve(d).filter(|&t| t >= first) {
+                let Ok(wall) = utc.to_timestamp(zone.to_datetime(instant)) else { return false };
+                // Include the ordinary wall time of every shifted candidate.
+                through = through.max(wall);
+                instants.insert(instant);
+            }
+        }
+        if instants.iter().take(remaining).any(|&instant| instant == slot) {
+            return true;
+        }
+        remaining = remaining.saturating_sub(instants.len());
+    }
     if count.is_none() || rule.get_by_set_pos().len() < 2 {
         // An earlier civil date cannot map to this slot under any provider
         // offset. Avoid a zone lookup for each date in a long-running series.
@@ -278,8 +291,6 @@ pub fn civil_rule_starts_at(
     // rrule sorts and deduplicates selected positions within each period
     // before consuming COUNT. A gap can change their order or make distinct
     // wall times coincide, so do this part on the provider's actual instants.
-    let mut candidates = candidates.peekable();
-    let mut instants = std::collections::BTreeSet::new();
     while remaining > 0 {
         let Some(candidate) = candidates.next() else { break };
         let period = position_period(rule, candidate);
