@@ -8007,6 +8007,24 @@ test.describe('the tasks sidebar', () => {
     expect(overflow, 'nothing in the row is wider than the pane').toBeLessThanOrEqual(0);
   });
 
+  /** The grid draws priority as marks (#190), the pane does not: there the
+   *  word chip stays, red, amber and blue at 4.5:1, where the marks would
+   *  only be as clear as the calendar's colour. A task on both shows each. */
+  test('the pane keeps the word chip while the grid draws the marks', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Ship the release', exact: true }).click();
+    await side.getByRole('combobox', { name: 'Priority' }).click();
+    await side.getByRole('option', { name: 'High' }).click();
+    await side.getByRole('button', { name: 'Save' }).click();
+    // The grid has them, so their absence below is not a page without any.
+    await expect(page.locator('.trow .tchip', { hasText: 'Ship the release' })
+      .getByRole('img', { name: 'High priority' })).toHaveText('!!!');
+    const row = side.locator('.row', { hasText: 'Ship the release' });
+    await expect(row.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+    await expect(row.getByRole('img', { name: /priority$/ })).toHaveCount(0);
+    await expect(side.locator('.prio')).toHaveCount(0);
+  });
+
   /** The order switch is a view choice: it repaints at once and persists. */
   test('the tasks order switches between date and priority, and is kept', async ({ page }) => {
     const side = await openTasks(page);
@@ -8595,6 +8613,372 @@ test.describe('tasks on the grid', () => {
 });
 
 /**
+ * Priority on the grid (#190): Fantastical's marks, `!!!` High, `!!` Medium
+ * and `!` Low, before the title on a TASKS row chip and an hour pin, and on
+ * the landing chip a drag draws in their place. In the calendar's colour,
+ * inked as an event's title is, so they are never a hue of their own.
+ */
+test.describe('priority marks on the grid', () => {
+  const DAY = 24 * 3_600_000;
+  const open = async (page: Page, fixture = 'default') => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app(fixture));
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const RAW = { High: 1, Medium: 5, Low: 9 } as const;
+  /** Gives a task a priority through the pane's editor, and optionally a new
+   *  title or tomorrow's date, and waits for the save. */
+  const prioritise = async (
+    page: Page, title: string, level: keyof typeof RAW,
+    opts: { rename?: string; tomorrow?: boolean } = {},
+  ) => {
+    const side = page.getByRole('complementary', { name: 'Tasks' });
+    await side.getByRole('button', { name: title, exact: true }).click();
+    if (opts.rename) await side.getByRole('textbox', { name: 'Task title', exact: true }).fill(opts.rename);
+    if (opts.tomorrow) await side.getByRole('button', { name: 'Tomorrow' }).click();
+    await side.getByRole('combobox', { name: 'Priority' }).click();
+    await side.getByRole('option', { name: level }).click();
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: opts.rename ?? title, priority: RAW[level] });
+  };
+  const rowChip = (page: Page, title: string) => page.locator('.trow .tchip', { hasText: title });
+
+  test('a TASKS row chip draws !!!, !! or ! before its title, and nothing for none', async ({ page }) => {
+    await open(page);
+    await prioritise(page, 'Ship the release', 'High');
+    await prioritise(page, 'Buy milk', 'Medium', { tomorrow: true });
+
+    const ship = rowChip(page, 'Ship the release');
+    const marks = ship.getByRole('img', { name: 'High priority' });
+    await expect(marks).toHaveText('!!!');
+    // The level is told to a screen reader once, not as "exclamation ...".
+    await expect(marks.locator('[aria-hidden="true"]')).toHaveText('!!!');
+    // Checkbox, marks, title.
+    await expect(ship.locator('input + .prio + .tt')).toHaveCount(1);
+    await expect(rowChip(page, 'Buy milk').getByRole('img', { name: 'Medium priority' })).toHaveText('!!');
+    // The overdue one has none yet, and draws nothing.
+    await expect(rowChip(page, 'Answer the issue').locator('.prio')).toHaveCount(0);
+    await prioritise(page, 'Answer the issue', 'Low');
+    await expect(rowChip(page, 'Answer the issue').getByRole('img', { name: 'Low priority' })).toHaveText('!');
+  });
+
+  /** The colour is an event title's: the calendar's colour mixed toward the
+   *  text by `--event-ink` (Daylight's knob), else a chip's 60%. Held to 3:1
+   *  (bold glyphs) over the chip in Daylight, Daylight Dark and the stock
+   *  Light and Dark (3.5:1 at the lowest, teal on stock Light's overdue chip).
+   *  Catppuccin Latte is checked for the mix only: teal there is 2.65:1 over
+   *  its chip and 2.45:1 over an overdue one, from the same mix its all-day
+   *  event titles take, and the marks cannot be clearer than those titles. */
+  test('the marks take the calendar\'s colour, inked as an event title is', async ({ page }) => {
+    await open(page);
+    await prioritise(page, 'Ship the release', 'High');
+    await prioritise(page, 'Buy milk', 'Medium', { tomorrow: true });
+    await prioritise(page, 'Answer the issue', 'Low');
+    const themes: Record<string, Record<string, unknown> & { bg: string }> = {
+      daylight: { bg: '#ffffff', surface: '#f4f6f9', text: '#14161a', muted: '#5a6270',
+                  accent: '#d32f3a', is_dark: false,
+                  style: { tint: 22, spine: 3, title_weight: 600, ink: 48, sub: 85,
+                           today: '#f2f2f4', heading_size: 24, heading_weight: 700 } },
+      'daylight-dark': { bg: '#16171a', surface: '#1f2125', text: '#eceef1', muted: '#9aa1ab',
+                         accent: '#ef5350', is_dark: true,
+                         style: { tint: 10, spine: 3, title_weight: 600, ink: 42, sub: 85,
+                                  today: '#1e2024', heading_size: 24, heading_weight: 700,
+                                  tint_space: 'srgb-linear', accent_fill: '#d32f3a' } },
+      light: { bg: '#fbfbfd', surface: '#f1f1f4', text: '#1b1b1f', muted: '#63636b', accent: '#3566d6', is_dark: false },
+      dark: { bg: '#17171a', surface: '#1e1e22', text: '#e8e8ea', muted: '#8a8a90', accent: '#5b8def', is_dark: true },
+      latte: { bg: '#eff1f5', surface: '#e9ebef', text: '#4c4f69', muted: '#5c5f77', accent: '#8839ef', is_dark: false },
+    };
+    const chips = [['Ship the release', 'high', '#2dd4bf'], ['Buy milk', 'medium', '#5b8def'],
+                   ['Answer the issue', 'low', '#2dd4bf']] as const;
+    for (const [name, palette] of Object.entries(themes)) {
+      await page.evaluate((p) => window.__harness.emit('theme-changed', p), palette);
+      const got = await page.evaluate((chips) => {
+        // `color-mix` computes to `color(srgb 0.2 0.3 0.5)`, channels 0-1.
+        const rgb = (c: string) => (c.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number)
+          .map((v) => (c.startsWith('color(') ? v * 255 : v));
+        const lum = (c: number[]) => {
+          const [r, g, b] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a: number[], b: number[]) => {
+          const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+        const computed = (css: string) => {
+          const probe = document.createElement('span');
+          probe.style.color = css;
+          document.body.append(probe);
+          const c = getComputedStyle(probe).color;
+          probe.remove();
+          return c;
+        };
+        return chips.map(([title, level, cal]) => {
+          const chip = [...document.querySelectorAll('.trow .tchip')].find((c) => c.textContent!.includes(title))!;
+          const mark = getComputedStyle(chip.querySelector(`.prio[data-level="${level}"]`)!).color;
+          return {
+            title, mark,
+            expected: computed(`color-mix(in srgb, ${cal} var(--event-ink, 60%), var(--text))`),
+            at60: computed(`color-mix(in srgb, ${cal} 60%, var(--text))`),
+            overChip: ratio(rgb(mark), rgb(getComputedStyle(chip).backgroundColor)),
+          };
+        });
+      }, chips);
+      for (const m of got) {
+        expect(m.mark, `${name}: ${m.title} is its calendar's event ink`).toBe(m.expected);
+        if (name !== 'latte') expect(m.overChip, `${name}: ${m.title} over its chip`).toBeGreaterThanOrEqual(3);
+      }
+      // The colour follows the calendar: Work's two alike, Personal's apart.
+      expect(got[0].mark, `${name}: the colour follows the calendar`).not.toBe(got[1].mark);
+      expect(got[0].mark).toBe(got[2].mark);
+      // Daylight's knob is what tells it from the stock 60%.
+      if (name.startsWith('daylight')) expect(got[0].mark).not.toBe(got[0].at60);
+      else expect(got[0].mark).toBe(got[0].at60);
+    }
+  });
+
+  /** A pin is one line in a column a meeting may have halved: the marks keep
+   *  their width and it is the title that ellipsises, inside the pin. */
+  test('an hour pin carries the marks, and a long title ellipsises before they do', async ({ page }) => {
+    await open(page, 'timed-task');
+    await prioritise(page, 'Call the bank', 'Medium',
+      { rename: 'Call the bank about the quarterly reconciliation and the invoices' });
+    const pin = page.getByTestId('week-body').locator('.tpin', { hasText: 'Call the bank' });
+    await expect(pin.getByRole('img', { name: 'Medium priority' })).toHaveText('!!');
+    await expect(pin.locator('input + .prio + .tt')).toHaveCount(1);
+    const m = await pin.evaluate((el) => {
+      const prio = el.querySelector('.prio')!, tt = el.querySelector('.tt')!;
+      return { prio: prio.getBoundingClientRect().width, scroll: prio.scrollWidth,
+               pin: el.getBoundingClientRect().right, tt: tt.getBoundingClientRect().right,
+               clipped: tt.scrollWidth > tt.clientWidth };
+    });
+    expect(m.clipped, 'the title is what is cut').toBe(true);
+    // scrollWidth rounds to whole pixels; the tight letter-spacing leaves a fraction.
+    expect(m.prio, 'the marks keep their width').toBeGreaterThanOrEqual(m.scroll - 1);
+    expect(m.tt, 'nothing runs past the pin').toBeLessThanOrEqual(m.pin);
+  });
+
+  /** A row chip never grows past its day for the marks either. */
+  test('a long title on a row chip ellipsises, and the chip keeps to its day', async ({ page }) => {
+    await open(page);
+    await prioritise(page, 'Ship the release', 'High',
+      { rename: 'Ship the release once the quarterly reconciliation and the invoices are in' });
+    const chip = rowChip(page, 'Ship the release');
+    await expect(chip.getByRole('img', { name: 'High priority' })).toHaveText('!!!');
+    const m = await chip.evaluate((el) => {
+      const prio = el.querySelector('.prio')!, tt = el.querySelector('.tt')!;
+      return { prio: prio.getBoundingClientRect().width, scroll: prio.scrollWidth,
+               chip: el.getBoundingClientRect().right, cell: el.parentElement!.getBoundingClientRect().right,
+               tt: tt.getBoundingClientRect().right, clipped: tt.scrollWidth > tt.clientWidth };
+    });
+    expect(m.clipped, 'the title is what is cut').toBe(true);
+    expect(m.prio, 'the marks keep their width').toBeGreaterThanOrEqual(m.scroll - 1);
+    expect(m.tt, 'nothing runs past the chip').toBeLessThanOrEqual(m.chip);
+    expect(m.chip, 'the chip keeps to its day').toBeLessThanOrEqual(m.cell);
+  });
+
+  /** Three to a column, a pin is ~37px: the checkbox, the gaps and `!!!`
+   *  came to more than its inside, and the title, the one thing to point at
+   *  or grab, went to 0px. A pin that narrow keeps its title as wide as a pin
+   *  with no priority, keeps the level for a screen reader, and draws the
+   *  marks again once the hover lift has widened it; it still drags. */
+  test('an hour pin sharing its column three ways keeps its title to grab', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    await prioritise(page, 'Call the bank', 'High');
+    // Buy milk at the same 11:30, no priority: the meeting, it and the bank.
+    await side.getByRole('button', { name: 'Buy milk', exact: true }).click();
+    await side.getByRole('combobox', { name: 'Due time' }).fill('11:30');
+    await side.getByRole('combobox', { name: 'Due time' }).press('Enter');
+    await side.getByRole('button', { name: 'Save' }).click();
+    const body = page.getByTestId('week-body');
+    const bank = body.locator('.tpin', { hasText: 'Call the bank' });
+    const milk = body.locator('.tpin', { hasText: 'Buy milk' });
+    await expect(milk).toHaveCount(1);
+    const widths = async () => page.evaluate(() => {
+      const pin = (t: string) => [...document.querySelectorAll('[data-testid="week-body"] .tpin')]
+        .find((p) => p.textContent!.includes(t))!;
+      const w = (el: Element | null) => el ? el.getBoundingClientRect().width : 0;
+      const bank = pin('Call the bank'), milk = pin('Buy milk');
+      return { pin: w(bank), other: w(milk), tt: w(bank.querySelector('.tt')),
+               plain: w(milk.querySelector('.tt')), prio: w(bank.querySelector('.prio')) };
+    });
+    const m = await widths();
+    expect(m.pin, 'three to a column').toBeLessThan(45);
+    expect(m.pin, 'the two pins are the same width').toBeCloseTo(m.other, 0);
+    expect(m.tt, 'the title is as wide as an unprioritised pin\'s').toBeCloseTo(m.plain, 0);
+    expect(m.tt, 'and there is a title to grab').toBeGreaterThanOrEqual(8);
+    expect(m.prio, 'the marks are out of the paint').toBeLessThanOrEqual(1);
+    await expect(bank.getByRole('img', { name: 'High priority' })).toHaveCount(1);
+
+    // Pointed at, the pin lifts to its column and the marks are back.
+    await bank.locator('.tt').hover();
+    await expect.poll(async () => (await widths()).pin).toBeGreaterThan(90);
+    const lifted = await widths();
+    expect(lifted.prio, 'the marks are drawn again').toBeGreaterThan(5);
+    expect(lifted.tt).toBeGreaterThan(m.tt);
+
+    // And the narrow title is still the drag handle.
+    const t = (await bank.locator('.tt').boundingBox())!;
+    await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2 + 70, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: 'Call the bank', dueMs: APP_MON + 12.5 * 3_600_000, priority: 1 });
+  });
+
+  /** The left lane's pin lifts rightward: its left edge is already the
+   *  column's, so the marks come back where the title began and push it
+   *  ~13px right, under a pointer that was on the title's first pixels. The
+   *  lift was keyed off the title alone, so the pin shrank, the title slid
+   *  back, and it lifted again: WebKit flipped 37px / 123px on every mouse
+   *  move and Chromium never lifted. The lift holds over the marks, and a
+   *  press there drags as the title does. */
+  test('a left-lane pin lifted from its title\'s start stays lifted, and drags from the marks', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    const titles = ['Buy milk', 'Ship the release', 'Call the bank'];
+    for (const t of titles) {
+      await side.getByRole('button', { name: t, exact: true }).click();
+      await side.getByRole('combobox', { name: 'Due time' }).fill('07:00');
+      await side.getByRole('combobox', { name: 'Due time' }).press('Enter');
+      await side.getByRole('combobox', { name: 'Priority' }).click();
+      await side.getByRole('option', { name: 'High' }).click();
+      await side.getByRole('button', { name: 'Save' }).click();
+      await expect.poll(() => page.evaluate(() =>
+        (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+      )).toMatchObject({ summary: t, priority: 1 });
+    }
+    const body = page.getByTestId('week-body');
+    await expect(body.locator('.tpin')).toHaveCount(3);
+    // The left lane is whichever pin sits furthest left.
+    const xs = await Promise.all(titles.map(async (t) =>
+      (await body.locator('.tpin', { hasText: t }).boundingBox())!.x));
+    const left = titles[xs.indexOf(Math.min(...xs))];
+    const pin = body.locator('.tpin', { hasText: left });
+    await pin.scrollIntoViewIfNeeded();
+    const narrow = (await pin.boundingBox())!;
+    expect(narrow.width, 'three to a column').toBeLessThan(45);
+
+    // A frame after each move, so the hover the move set has been styled.
+    const state = () => page.evaluate(async (title) => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const p = [...document.querySelectorAll('[data-testid="week-body"] .tpin')]
+        .find((e) => e.textContent!.includes(title))!;
+      return { pin: p.getBoundingClientRect().width,
+               prio: p.querySelector('.prio')!.getBoundingClientRect().width };
+    }, left);
+
+    const t = (await pin.locator('.tt').boundingBox())!;
+    const x = t.x + 2, y = t.y + t.height / 2;
+    await page.mouse.move(x, y);
+    await expect.poll(async () => (await state()).pin, 'pointed at, it lifts').toBeGreaterThan(90);
+    const widths: number[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      await page.mouse.move(x + i, y);
+      const s = await state();
+      widths.push(Math.round(s.pin));
+      expect(s.prio, `the marks are drawn at +${i}px`).toBeGreaterThan(5);
+    }
+    expect(widths.every((w) => w > 90), `lifted on every move: ${widths.join(', ')}`).toBe(true);
+    // The pointer is on the marks now, not the title.
+    expect(await page.evaluate(([px, py]) =>
+      !!document.elementFromPoint(px, py)?.closest('.tpin .prio'), [x + 6, y])).toBe(true);
+
+    // And a press there drags the pin, keeping its priority.
+    await page.mouse.down();
+    await page.mouse.move(x + 6, y + 70, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: left, dueMs: APP_MON + 8 * 3_600_000, priority: 1 });
+  });
+
+  /** A drop the drag completes (not Escaped) leaves the marks on what it
+   *  becomes: the row chip on its new day, the pin at its new hour, and a
+   *  task carried from the pane on the row. The write keeps the priority
+   *  (the stacked fix), so the chip the grid redraws from it has the level. */
+  test('the marks survive a completed drop', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    await prioritise(page, 'Ship the release', 'High');
+    await prioritise(page, 'Call the bank', 'Medium');
+    await prioritise(page, 'Buy milk', 'Low');
+    const body = page.getByTestId('week-body');
+
+    const title = page.locator('.trow .tchip .tt', { hasText: 'Ship the release' });
+    const from = (await title.boundingBox())!;
+    const w = (await page.locator('.trow .tcell').first().boundingBox())!.width;
+    await page.mouse.move(from.x + 4, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 4 + w * 2, from.y + from.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const wed = page.locator(`.trow .tcell[data-start-ms="${APP_MON + 2 * DAY}"]`);
+    await expect(wed.locator('.tchip:not(.landing)', { hasText: 'Ship the release' })
+      .getByRole('img', { name: 'High priority' })).toHaveText('!!!');
+
+    const pinTitle = body.locator('.tpin .tt', { hasText: 'Call the bank' });
+    await pinTitle.hover();
+    const p = (await pinTitle.boundingBox())!;
+    await page.mouse.move(p.x + p.width / 2, p.y + p.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(p.x + p.width / 2, p.y + p.height / 2 + 70, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: 'Call the bank', dueMs: APP_MON + 12.5 * 3_600_000 });
+    await expect(body.locator('.tpin:not(.dragging):not(.landing)', { hasText: 'Call the bank' })
+      .getByRole('img', { name: 'Medium priority' })).toHaveText('!!');
+
+    const milk = (await side.getByRole('button', { name: 'Buy milk', exact: true }).boundingBox())!;
+    const tue = page.locator(`.trow .tcell[data-start-ms="${APP_MON + DAY}"]`);
+    const at = (await tue.boundingBox())!;
+    await page.mouse.move(milk.x + 10, milk.y + milk.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2, { steps: 12 });
+    await page.mouse.up();
+    await expect(tue.locator('.tchip:not(.landing)', { hasText: 'Buy milk' })
+      .getByRole('img', { name: 'Low priority' })).toHaveText('!');
+  });
+
+  /** The chip a drag draws where the task would land stands in for the chip
+   *  or pin it will become, so it carries the marks too: a task carried from
+   *  the pane (onto an hour, then a day's row) and a row chip dragged along. */
+  test('the landing chips a drag draws carry the marks', async ({ page }) => {
+    const side = await open(page);
+    await prioritise(page, 'Buy milk', 'High');
+    await prioritise(page, 'Ship the release', 'Low');
+
+    const from = (await side.getByRole('button', { name: 'Buy milk', exact: true }).boundingBox())!;
+    await page.mouse.move(from.x + 10, from.y + from.height / 2);
+    await page.mouse.down();
+    const col = page.locator(`.col[data-start-ms="${APP_MON + DAY}"]`);
+    const box = (await col.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * (11 / 24) + 4, { steps: 12 });
+    await expect(col.locator('.tpin.landing').getByRole('img', { name: 'High priority' })).toHaveText('!!!');
+    const cell = page.locator(`.trow .tcell[data-start-ms="${APP_MON + 2 * DAY}"]`);
+    const at = (await cell.boundingBox())!;
+    await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2, { steps: 12 });
+    await expect(cell.locator('.tchip.landing').getByRole('img', { name: 'High priority' })).toHaveText('!!!');
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+
+    const title = page.locator('.trow .tchip .tt', { hasText: 'Ship the release' });
+    const t = (await title.boundingBox())!;
+    const w = (await page.locator('.trow .tcell').first().boundingBox())!.width;
+    await page.mouse.move(t.x + 4, t.y + t.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(t.x + 4 + w * 2, t.y + t.height / 2, { steps: 8 });
+    await expect(page.locator('.trow .tchip.landing').getByRole('img', { name: 'Low priority' })).toHaveText('!');
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+  });
+});
+
+/**
  * One list of tasks for the whole window (2026-09-17). The grid and the
  * sidebar used to hold a copy each, so a task ticked off on the week stayed
  * open in the sidebar until it was closed and opened again.
@@ -8706,6 +9090,105 @@ test.describe('tasks, the grid and the sidebar agree', () => {
 
     await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
     await expect(doneRows(side).getByText('Ship the release')).toBeVisible();
+  });
+});
+
+/**
+ * A drag says when a task is due and nothing else, so everything else about
+ * the task survives it. `update_task` takes the task whole, priority
+ * included, and 0 there clears it on the server: a drag that sent no
+ * priority used to clear a High task's level every time it moved (#152's
+ * chip vanished from the pane). Each of the three drops — a TASKS row chip
+ * to another day, an hour pin to another hour, a pane task onto the grid —
+ * is completed for real (no Escape), and the level is asked of both the
+ * write and the pane.
+ */
+test.describe('a drag keeps a task\'s priority', () => {
+  const DAY = 24 * 3_600_000;
+  const open = async (page: Page, fixture = 'default') => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app(fixture));
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const updates = (page: Page) => page.evaluate(() =>
+    (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').map((c: any) => c.args));
+  /** Makes a task High through the pane's editor and waits for the save. */
+  const makeHigh = async (page: Page, side: ReturnType<Page['getByRole']>, title: string) => {
+    await side.getByRole('button', { name: title, exact: true }).click();
+    await side.getByRole('combobox', { name: 'Priority' }).click();
+    await side.getByRole('option', { name: 'High' }).click();
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(async () => (await updates(page)).pop()).toMatchObject({ summary: title, priority: 1 });
+    await expect(side.locator('.row', { hasText: title }).locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+    return (await updates(page)).length;
+  };
+  /** The write the drop made: the first `update_task` after the `n` before it. */
+  const dropWrite = async (page: Page, n: number) => {
+    await expect.poll(async () => (await updates(page)).length).toBe(n + 1);
+    return (await updates(page))[n];
+  };
+
+  test('a TASKS row chip dropped on another day', async ({ page }) => {
+    const side = await open(page);
+    const n = await makeHigh(page, side, 'Ship the release');
+    const title = page.locator('.trow .tchip .tt', { hasText: 'Ship the release' });
+    const from = (await title.boundingBox())!;
+    const cell = (await page.locator('.trow .tcell').first().boundingBox())!;
+    const y = from.y + from.height / 2;
+    await page.mouse.move(from.x + 4, y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 4 + cell.width * 2, y, { steps: 8 });
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      id: 12, dueMs: Date.UTC(2024, 0, 31), dueAllDay: true, priority: 1,
+    });
+    const row = side.locator('.row', { hasText: 'Ship the release' });
+    await expect(row.locator('.due')).toHaveText('Wed 31');
+    await expect(row.locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  test('an hour pin dropped on another hour', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    const n = await makeHigh(page, side, 'Call the bank');
+    const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    await title.hover();
+    const from = (await title.boundingBox())!;
+    const x = from.x + from.width / 2;
+    const y = from.y + from.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 70, { steps: 8 });
+    await expect(page.locator('.tpin.dragging')).toContainText('12:30');
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      summary: 'Call the bank', dueMs: APP_MON + 12.5 * 3_600_000, dueAllDay: false, priority: 1,
+    });
+    await expect(side.locator('.row', { hasText: 'Call the bank' })
+      .locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
+  });
+
+  test('a pane task dropped on an hour', async ({ page }) => {
+    const side = await open(page);
+    const n = await makeHigh(page, side, 'Buy milk');
+    const col = page.locator(`.col[data-start-ms="${APP_MON + DAY}"]`);
+    const box = (await col.boundingBox())!;
+    const from = (await side.getByRole('button', { name: 'Buy milk', exact: true }).boundingBox())!;
+    await page.mouse.move(from.x + 10, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * (11 / 24) + 4, { steps: 12 });
+    await expect(col.locator('.tpin.landing')).toContainText('11:00');
+    await page.mouse.up();
+
+    expect(await dropWrite(page, n)).toMatchObject({
+      id: 11, dueMs: APP_MON + DAY + 11 * 3_600_000, dueAllDay: false, priority: 1,
+    });
+    await expect(side.locator('.row', { hasText: 'Buy milk' })
+      .locator('.pchip', { hasText: /^High$/ })).toHaveCount(1);
   });
 });
 

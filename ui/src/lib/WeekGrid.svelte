@@ -14,6 +14,7 @@
   import WeatherGlyph from './WeatherGlyph.svelte';
   import { dateKey, type DayWeather } from './weather';
   import type { TaskChip, WeekTasks } from './taskchips';
+  import PriorityMarks from './PriorityMarks.svelte';
   import { carried, registerTaskLanding, taskLanding, type TaskLanding } from './taskdrag.svelte';
   import { layOutDay } from './daylayout';
   import { formatClock, gutterLabel, zoneAbbrev, zoneGutterLabel } from './timefmt';
@@ -2246,6 +2247,7 @@
                   aria-label="Complete {chip.summary}"
                   onchange={(e) => void tickTask(chip, e.currentTarget)}
                 />
+                <PriorityMarks priority={chip.priority} />
                 <!-- The title is the grab handle: a button rather than the
                      whole chip, so the checkbox beside it stays its own
                      control instead of nesting inside one. -->
@@ -2258,12 +2260,14 @@
           {#if taskDropMs === d.start_ms && taskDrag?.moving}
             <div class="tchip landing" class:over={taskDrag.chip.overdue}
                  style:--cal={calendarInk(taskDrag.chip.color)}>
+              <PriorityMarks priority={taskDrag.chip.priority} />
               <span class="tt">{taskDrag.chip.summary}</span>
             </div>
           {/if}
           <!-- A task from the Tasks pane, landing on this day with no hour. -->
           {#if paneLanding?.allDay && paneLanding.dayStartMs === d.start_ms}
             <div class="tchip landing" style:--cal={calendarInk(carried()?.color)}>
+              <PriorityMarks priority={carried()?.priority ?? 0} />
               <span class="tt">{carried()?.summary}</span>
             </div>
           {/if}
@@ -2454,6 +2458,10 @@
         {@const chip = pin.chip}
         {@const width = 100 / pin.placed.columns}
         {@const moving = pinMoving(chip)}
+        <!-- The press below is the marks' share of the title's drag, a
+             pointer gesture only: the title <button> is the pin's handle
+             for a keyboard and a screen reader, so the pin takes no role. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="tchip tpin" class:dragging={moving} class:create-mode={createMode}
              style:--cal={calendarInk(chip.color)}
              style:top="calc({pin.placed.top * 100}% + {moving ? pinDrag!.topDeltaPct : 0}% + 1px)"
@@ -2461,7 +2469,12 @@
              style:left="calc({pin.placed.column * width}% + 3px)"
              style:width="calc({width}% - 6px)"
              style:transform={moving && pinDrag!.dx !== 0 ? `translateX(${pinDrag!.dx}px)` : undefined}
-             style:z-index={pin.placed.column + 1}>
+             style:z-index={pin.placed.column + 1}
+             onpointerdown={(e) => {
+               // The marks drag as the title does; the title and the
+               // checkbox handle their own presses.
+               if ((e.target as Element).closest('.prio')) startPinDrag(chip, day, e);
+             }}>
           <input
             type="checkbox"
             checked={false}
@@ -2469,6 +2482,7 @@
             aria-label="Complete {chip.summary}"
             onchange={(e) => void tickTask(chip, e.currentTarget)}
           />
+          <PriorityMarks priority={chip.priority} />
           <!-- The title is the grab handle, as in the row. While it moves
                it reads the hour it would land on, the way a dragged block's
                card reads its span. -->
@@ -2486,6 +2500,7 @@
         <div class="tchip tpin landing" style:--cal={calendarInk(carried()?.color)}
              style:top="calc({((paneLanding.dueMs - day.start_ms) / (day.end_ms - day.start_ms)) * 100}% + 1px)"
              style:height="{TASK_PIN_PX - 2}px" style:left="3px" style:width="calc(100% - 6px)">
+          <PriorityMarks priority={carried()?.priority ?? 0} />
           <span class="tt"><span class="tclock">{formatClock(paneLanding.dueMs, clockFormat())}</span>{carried()?.summary}</span>
         </div>
       {/if}
@@ -2697,8 +2712,31 @@
         touch-action: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tt:disabled { cursor: default; }
   /* In the hour grid: placed like a block, one line, above the rules. */
-  .tpin { position: absolute; box-sizing: border-box; padding: 0 6px; gap: 5px; }
+  /* A container, for the marks below: what runs out of room is the pin,
+     which a meeting or another pin can halve or third. Its width is always
+     set inline, so containing it costs the layout nothing. */
+  .tpin { position: absolute; box-sizing: border-box; padding: 0 6px; gap: 5px;
+          container-type: inline-size; }
   .tpin .tt { flex: 1; line-height: 1; }
+  /* The marks never shrink (`PriorityMarks`), so in a pin sharing its column
+     three ways they took the title's last pixels: the checkbox, the gaps and
+     `!!!` came to ~30px of a ~25px inside, the title went to 0 and there was
+     nothing left to point at or grab. Below 42px inside, where `!!!` would
+     leave the title under 2ch, the marks leave the paint but not the
+     accessibility tree (`.vh`'s rules), so the title is as wide as a pin
+     with no priority. The hover lift widens the pin to its column, and they
+     come back with the whole title. */
+  /* Lifted, the marks are part of the handle. A left-lane pin cannot grow
+     leftward (its left edge is the column's), so the marks come back where
+     the title began and the pointer that lifted it is on them: the lift holds
+     over the marks (below), a press on them drags (`onpointerdown` on the
+     pin), and they reach across the gap to the title so no pixel between the
+     two drops it. */
+  .tpin :global(.prio) { margin-right: -5px; padding-right: 5px; cursor: grab; touch-action: none; }
+  @container (max-width: 42px) {
+    .tpin :global(.prio) { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+                           border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  }
   /* `EventBlock`'s hover lift, for its reason: a task squeezed into half a
      column beside a meeting reads "Call the …" until it is pointed at.
      `!important` against the inline geometry, as there. */
@@ -2709,9 +2747,13 @@
      became a drag; CI caught it as `<button class="tt"> intercepts pointer
      events` and it reproduces every time. Keyed off `.tt` the geometry cannot
      move while the checkbox is the target, and reading a squeezed title still
-     works: the pin grows leftward and keeps its right edge, so the point
-     being hovered stays inside the title. */
-  .tpin:has(.tt:hover):not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important;
+     works: a pin in a middle or right lane grows leftward and keeps its
+     right edge, so the point being hovered stays inside the title. The
+     left lane's grows rightward, and the marks it brings back push the title
+     ~13px right, under the pointer: keyed off the title alone, the pin
+     shrank, the title slid back and it lifted again, on every mouse move in
+     WebKit (Chromium never lifted). So the marks hold the lift as well. */
+  .tpin:has(.tt:hover, :global(.prio):hover):not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important;
                                   z-index: 20 !important; box-shadow: 0 4px 14px rgba(0, 0, 0, .5); }
   .tpin.dragging { z-index: 50 !important; opacity: .85; outline: 1px solid var(--accent); }
   .tpin.create-mode { pointer-events: none; }
