@@ -1,30 +1,8 @@
-//! The two zone derivations, and their inverses of each other.
-//!
-//! [`date_in_zone`] answers "what calendar date is this instant, read in this
-//! zone"; [`midnight_in_zone`] answers "what instant is midnight on this date,
-//! in this zone". Round-tripping an all-day event through both returns the
-//! instant it started with, and that round trip is the whole all-day story on
-//! this project — the store holds midnight in the *calendar's* zone for an
-//! all-day event, so both halves must be read in that same zone or the answer
-//! is a day out on one side of midnight or the other.
-//!
-//! They live together, in the crate below every caller, for one reason: this
-//! project has twice nearly shipped a second date formatter, and two
-//! derivations of this once disagreed silently. `date_in_zone` was in
-//! `src-tauri/src/write.rs` and `midnight_in_zone` was private to
-//! [`crate::recur`]; neither was reachable from the other, which is how a third
-//! copy would have got written. `write.rs` re-exports this one rather than
-//! keeping its own.
-//!
-//! Two date libraries, deliberately: `date_in_zone` moved here verbatim in
-//! `jiff`, because every caller of it is pinned by tests that a
-//! reimplementation could shift; `midnight_in_zone` moved here verbatim in
-//! `chrono`, because it is handed a `chrono::NaiveDate` straight out of
-//! `rrule`. Rewriting either to match the other would be exactly the silent
-//! re-derivation this module exists to prevent. They meet at a `yyyy-mm-dd`
-//! string, which is the same interchange `write.rs` already used.
+//! All-day dates and boundaries use the same timezone database as provider
+//! storage. The recurrence iterator uses chrono dates as civil coordinates.
 
-use chrono::{LocalResult, TimeZone};
+use chrono::Datelike;
+use jiff::{civil::Date, tz::{AmbiguousOffset, TimeZone}, Timestamp};
 
 /// The calendar date `ms` falls on, read in `tz`, as `yyyy-mm-dd`.
 ///
@@ -48,66 +26,49 @@ pub fn date_in_zone(ms: i64, tz: &str) -> String {
         .to_string()
 }
 
-/// Resolves a calendar date to midnight local time in `zone`, deterministically
-/// and without ever consulting the host machine's system timezone.
-///
-/// Ambiguous midnight uses its earlier instant. A gap uses the transition
-/// to the first valid instant, including when an entire date was skipped.
-pub fn midnight_in_zone(date: chrono::NaiveDate, zone: chrono_tz::Tz) -> i64 {
-    let midnight = date
-        .and_hms_opt(0, 0, 0)
-        .expect("00:00:00 is always a valid NaiveTime");
-    match zone.from_local_datetime(&midnight) {
-        LocalResult::Single(dt) => dt.timestamp_millis(),
-        LocalResult::Ambiguous(earlier, _) => earlier.timestamp_millis(),
-        LocalResult::None => chrono_tz::GapInfo::new(&midnight, &zone)
-            .and_then(|gap| gap.end)
-            .map(|end| end.timestamp_millis())
-            .unwrap_or_else(|| midnight.and_utc().timestamp_millis()),
-    }
+/// Read provider instants using the same timezone rules used to store them.
+pub(crate) fn civil_date(ms: i64, zone: &TimeZone) -> Option<chrono::NaiveDate> {
+    let d = zone.to_datetime(Timestamp::from_millisecond(ms).ok()?).date();
+    chrono::NaiveDate::from_ymd_opt(i32::from(d.year()), d.month() as u32, d.day() as u32)
 }
 
-/// Convert a stored DATE occurrence ID to its rendered boundary. Google and
-/// CalDAV resolve missing midnight with Jiff's compatible disambiguation,
-/// which can place it inside the day when the gap straddles midnight.
-pub fn all_day_slot_start(ms: i64, zone: chrono_tz::Tz) -> Option<i64> {
-    let instant = chrono::DateTime::from_timestamp_millis(ms)?.with_timezone(&zone);
-    let date = instant.date_naive();
-    let start = midnight_in_zone(date, zone);
-    if start == ms {
-        return Some(start);
-    }
-    let gap = chrono_tz::GapInfo::new(&date.and_time(chrono::NaiveTime::MIN), &zone)?;
-    let (gap_start, _) = gap.begin?;
-    let shifted = gap.end? + (date.and_time(chrono::NaiveTime::MIN) - gap_start);
-    (shifted.timestamp_millis() == ms).then_some(start)
+fn provider_date(date: chrono::NaiveDate) -> Option<Date> {
+    Date::new(date.year().try_into().ok()?, date.month() as i8, date.day() as i8).ok()
 }
 
-/// Midnight on the calendar date `ms` falls on, both read in `tz`.
-///
-/// The round trip of the two functions above, and the only thing that should
-/// ever compose them: given any instant during an all-day occurrence — the one
-/// the store holds, or one an expansion produced — it answers the instant that
-/// occurrence *starts* at, in the calendar's own zone.
-///
-/// Idempotent on a well-formed input, and that is not a reason to skip it. The
-/// store already holds midnight-in-the-calendar's-zone for an all-day event, so
-/// for those this returns what it was given; what it is for is every input that
-/// is *not* that, and the one that matters is a daylight-saving transition
-/// moving an expanded occurrence off midnight by an hour. Anchoring on the date
-/// rather than the instant is what makes a reminder "30 minutes before the
-/// day begins" land at 23:30 the evening before, every time, in every zone.
-///
-/// An unparseable date cannot come out of [`date_in_zone`] — it answers a real
-/// date for every input — and an unknown zone falls back to UTC, matching
-/// [`date_in_zone`]'s own fallback rather than inventing a second policy.
-pub fn midnight_of_instant_in_zone(ms: i64, tz: &str) -> i64 {
-    let date: chrono::NaiveDate = match date_in_zone(ms, tz).parse() {
-        Ok(d) => d,
-        // Unreachable via `date_in_zone`; returning the instant unchanged beats
-        // panicking on a path that fires notifications.
-        Err(_) => return ms,
+/// Earliest instant of a civil day. When midnight is missing, the transition
+/// ends the gap. It can lead directly to tomorrow after a dateline change.
+pub(crate) fn day_start(date: chrono::NaiveDate, zone: &TimeZone) -> Option<i64> {
+    let midnight = provider_date(date)?.at(0, 0, 0, 0);
+    let mapping = zone.to_ambiguous_timestamp(midnight);
+    let start = match mapping.offset() {
+        AmbiguousOffset::Gap { .. } => zone.following(mapping.earlier().ok()?).next()?.timestamp(),
+        _ => mapping.earlier().ok()?,
     };
-    let zone: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
-    midnight_in_zone(date, zone)
+    Some(start.as_millisecond())
+}
+
+pub fn midnight_in_zone(date: chrono::NaiveDate, zone: chrono_tz::Tz) -> i64 {
+    TimeZone::get(zone.name()).ok().and_then(|tz| day_start(date, &tz))
+        .unwrap_or_else(|| date.and_time(chrono::NaiveTime::MIN).and_utc().timestamp_millis())
+}
+
+/// A DATE recurrence ID uses the provider's compatible gap disambiguation.
+/// It can fall later than the first valid time on the same calendar day.
+pub(crate) fn stored_slot_start(ms: i64, zone: &TimeZone) -> Option<i64> {
+    let date = civil_date(ms, zone)?;
+    let start = day_start(date, zone)?;
+    if start == ms { return Some(start); }
+    let provider_id = provider_date(date)?.to_zoned(zone.clone()).ok()?.timestamp().as_millisecond();
+    (provider_id == ms).then_some(start)
+}
+
+pub fn all_day_slot_start(ms: i64, tz: &str) -> Option<i64> {
+    stored_slot_start(ms, &TimeZone::get(tz).ok()?)
+}
+
+/// Start of the calendar day containing a stored or expanded instant.
+pub fn midnight_of_instant_in_zone(ms: i64, tz: &str) -> i64 {
+    let zone = TimeZone::get(tz).unwrap_or(TimeZone::UTC);
+    civil_date(ms, &zone).and_then(|date| day_start(date, &zone)).unwrap_or(ms)
 }

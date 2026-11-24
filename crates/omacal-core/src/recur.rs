@@ -1,6 +1,7 @@
 use crate::layout::Interval;
 use crate::windows_zone::iana_for_windows;
-use crate::zone::{all_day_slot_start, date_in_zone, midnight_in_zone};
+use crate::zone::{civil_date, day_start, stored_slot_start};
+use jiff::tz::TimeZone as CalendarZone;
 use chrono::TimeZone;
 use rrule::{RRuleSet, Tz};
 use std::str::FromStr;
@@ -63,22 +64,18 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
 /// How many civil days an all-day series' occurrences span, read off the
 /// master's own two dates in the series' zone, never off its length in
 /// milliseconds. At least one: an all-day event covers its day.
-fn all_day_span_days(start: i64, end: i64, tz: &str) -> u64 {
-    let date = |ms: i64| {
-        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, tz), "%Y-%m-%d").ok()
-    };
-    match (date(start), date(end)) {
+fn all_day_span_days(start: i64, end: i64, zone: &CalendarZone) -> u64 {
+    match (civil_date(start, zone), civil_date(end, zone)) {
         (Some(first), Some(end)) => (end - first).num_days().max(1) as u64,
         _ => 1,
     }
 }
 
-/// The end of this particular all-day slot in the series' own calendar zone.
 pub fn all_day_slot_end(master_start: i64, master_end: i64, tz: &str, slot: i64) -> Option<i64> {
-    let date: chrono::NaiveDate = date_in_zone(slot, tz).parse().ok()?;
-    let days = all_day_span_days(master_start, master_end, tz);
-    let end = date.checked_add_days(chrono::Days::new(days))?;
-    Some(midnight_in_zone(end, tz.parse().unwrap_or(chrono_tz::UTC)))
+    let zone = CalendarZone::get(tz).ok()?;
+    let days = all_day_span_days(master_start, master_end, &zone);
+    let end = civil_date(slot, &zone)?.checked_add_days(chrono::Days::new(days))?;
+    day_start(end, &zone)
 }
 
 const DAY_MS: i64 = 24 * 3_600_000;
@@ -149,28 +146,28 @@ fn civil_midnight(date: chrono::NaiveDate) -> chrono::DateTime<Tz> {
 /// The all-day interval containing an instant. In St John's the clock once
 /// rolled back at 00:01. During the repeated hour the wall date is yesterday
 /// although today's all-day interval has already started.
-fn interval_date(instant: chrono::DateTime<Tz>, zone: chrono_tz::Tz) -> chrono::NaiveDate {
-    let date = instant.with_timezone(&zone).date_naive();
+fn interval_date(ms: i64, zone: &CalendarZone) -> Option<chrono::NaiveDate> {
+    let date = civil_date(ms, zone)?;
     if let Some(next) = date.succ_opt() {
-        if midnight_in_zone(next, zone) <= instant.timestamp_millis() {
-            return next;
+        if day_start(next, zone).is_some_and(|start| start <= ms) {
+            return Some(next);
         }
     }
-    date
+    Some(date)
 }
 
 /// Interpret a DATE or the UTC UNTIL used by some servers on DATE series.
 /// The latter bounds actual starts in the calendar zone.
-fn all_day_until(value: &str, zone: chrono_tz::Tz) -> Option<chrono::NaiveDate> {
+fn all_day_until(value: &str, zone: &CalendarZone) -> Option<chrono::NaiveDate> {
     if value.len() == 8 {
         chrono::NaiveDate::parse_from_str(value, "%Y%m%d").ok()
     } else {
         let utc = chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok()?;
-        Some(interval_date(Tz::UTC.from_utc_datetime(&utc), zone))
+        interval_date(utc.and_utc().timestamp_millis(), zone)
     }
 }
 
-fn civil_rule_line(head: &str, values: &str, zone: chrono_tz::Tz) -> String {
+fn civil_rule_line(head: &str, values: &str, zone: &CalendarZone) -> String {
     let mut result = format!("{head}:");
     for (i, part) in values.split(';').enumerate() {
         if i != 0 { result.push(';'); }
@@ -187,30 +184,28 @@ fn civil_rule_line(head: &str, values: &str, zone: chrono_tz::Tz) -> String {
 
 /// DATE identifies the civil-day boundary. For DATE-TIME additions and
 /// exclusions keep the actual instant until matching pairs are subtracted.
-fn explicit_slot(value: &str, params: &str, zone: chrono_tz::Tz) -> Result<Option<i64>, RecurError> {
+fn explicit_slot(value: &str, params: &str, zone: &CalendarZone) -> Result<Option<i64>, RecurError> {
     if value.len() == 8 {
         let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
             .map_err(|_| RecurError::InvalidRule(value.to_owned()))?;
-        let start = midnight_in_zone(date, zone);
+        let start = day_start(date, zone).ok_or_else(|| RecurError::InvalidRule(value.to_owned()))?;
         // A skipped calendar date has no instant to add or exclude.
-        return Ok((to_chrono(start)?.with_timezone(&zone).date_naive() == date).then_some(start));
+        return Ok((civil_date(start, zone) == Some(date)).then_some(start));
     }
     let tzid = params.split(';').filter_map(|p| p.split_once('='))
         .find(|(key, _)| key.eq_ignore_ascii_case("TZID")).map(|(_, id)| id.trim_matches('"'));
     let (wall_time, time_zone) = match value.strip_suffix('Z') {
-        Some(utc) => (utc, "UTC"),
-        None => (value, tzid.unwrap_or(zone.name())),
+        Some(utc) => (utc, CalendarZone::UTC),
+        None => (value, tzid.and_then(|id| CalendarZone::get(id).ok()).unwrap_or_else(|| zone.clone())),
     };
-    // Use the same gap and fold disambiguation as stored CalDAV recurrence IDs.
-    let wall = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", wall_time)
-        .map_err(|e| RecurError::InvalidRule(format!("{value}: {e}")))?;
-    let resolved = wall.in_tz(time_zone).or_else(|_| wall.in_tz(zone.name()))
+    let resolved = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", wall_time)
+        .and_then(|t| t.to_zoned(time_zone))
         .map_err(|e| RecurError::InvalidRule(format!("{value}: {e}")))?;
     let ms = resolved.timestamp().as_millisecond();
-    Ok(Some(all_day_slot_start(ms, zone).unwrap_or(ms)))
+    Ok(Some(stored_slot_start(ms, zone).unwrap_or(ms)))
 }
 
-fn all_day_set(series: &Series, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz>) -> Result<RRuleSet, RecurError> {
+fn all_day_set(series: &Series, zone: &CalendarZone, anchor: chrono::DateTime<Tz>) -> Result<RRuleSet, RecurError> {
     use std::collections::BTreeSet;
     let mut set = RRuleSet::new(anchor);
     let mut additions = BTreeSet::new();
@@ -233,30 +228,33 @@ fn all_day_set(series: &Series, zone: chrono_tz::Tz, anchor: chrono::DateTime<Tz
         }
     }
     if set.get_rrule().is_empty() {
-        additions.insert(midnight_in_zone(anchor.date_naive(), zone));
+        additions.insert(day_start(anchor.date_naive(), zone).ok_or(RecurError::OutOfRange(series.dtstart_ms))?);
     }
     let mut extra_days = BTreeSet::new();
     for &ms in additions.difference(&exclusions) {
-        extra_days.insert(civil_midnight(to_chrono(ms)?.with_timezone(&zone).date_naive()));
+        extra_days.insert(civil_midnight(civil_date(ms, zone).ok_or(RecurError::OutOfRange(ms))?));
     }
     // An EXDATE at noon removes an explicit addition at noon, while the
     // recurring midnight on that day remains. Conversely a surviving extra
     // occurrence keeps the civil day visible even if midnight was excluded.
     for ms in exclusions {
-        if all_day_slot_start(ms, zone).is_some() {
-            let day = civil_midnight(to_chrono(ms)?.with_timezone(&zone).date_naive());
+        if stored_slot_start(ms, zone).is_some() {
+            let day = civil_midnight(civil_date(ms, zone).ok_or(RecurError::OutOfRange(ms))?);
             if !extra_days.contains(&day) { set = set.exdate(day); }
         }
     }
     Ok(set.set_rdates(extra_days.into_iter().collect()))
 }
 
-fn rule_set(series: &Series, zone: chrono_tz::Tz) -> Result<RRuleSet, RecurError> {
-    let local = to_chrono(series.dtstart_ms)?.with_timezone(&zone);
+fn rule_set(series: &Series, zone: &CalendarZone) -> Result<RRuleSet, RecurError> {
     if series.is_all_day {
-        return all_day_set(series, zone, civil_midnight(local.date_naive()));
+        let start = civil_date(series.dtstart_ms, zone).ok_or(RecurError::OutOfRange(series.dtstart_ms))?;
+        return all_day_set(series, zone, civil_midnight(start));
     }
-    let mut source = format!("DTSTART;TZID={zone}:{}", local.format("%Y%m%dT%H%M%S"));
+    let timed_zone: chrono_tz::Tz = series.dtstart_tz.parse()
+        .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
+    let local = to_chrono(series.dtstart_ms)?.with_timezone(&timed_zone);
+    let mut source = format!("DTSTART;TZID={timed_zone}:{}", local.format("%Y%m%dT%H%M%S"));
     for line in series.recurrence {
         source.push('\n');
         source.push_str(&with_iana_tzid(line.trim()));
@@ -266,17 +264,17 @@ fn rule_set(series: &Series, zone: chrono_tz::Tz) -> Result<RRuleSet, RecurError
 
 /// Does the recurrence set generate this exact occurrence start?
 pub fn starts_at(series: &Series, slot_ms: i64) -> Result<bool, RecurError> {
-    let zone = series.dtstart_tz.parse()
+    let zone = CalendarZone::get(series.dtstart_tz)
         .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_owned()))?;
     let mut target = to_chrono(slot_ms)?;
     if series.is_all_day {
-        let date = target.with_timezone(&zone).date_naive();
-        if all_day_slot_start(slot_ms, zone).is_none() {
+        let date = civil_date(slot_ms, &zone).ok_or(RecurError::OutOfRange(slot_ms))?;
+        if stored_slot_start(slot_ms, &zone).is_none() {
             return Ok(false);
         }
         target = civil_midnight(date);
     }
-    Ok(!rule_set(series, zone)?.after(target).before(target).all(1).dates.is_empty())
+    Ok(!rule_set(series, &zone)?.after(target).before(target).all(1).dates.is_empty())
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
@@ -293,9 +291,7 @@ pub fn expand(
 ) -> Result<Expansion, RecurError> {
     // Validate the zone even when there is no rule, so callers get a
     // consistent error rather than a silent pass.
-    let zone: chrono_tz::Tz = series
-        .dtstart_tz
-        .parse()
+    let zone = CalendarZone::get(series.dtstart_tz)
         .map_err(|_| RecurError::UnknownTimeZone(series.dtstart_tz.to_string()))?;
     if to_ms <= from_ms {
         return Ok(Expansion { intervals: Vec::new(), truncated: false });
@@ -320,15 +316,15 @@ pub fn expand(
         return Ok(Expansion { intervals: Vec::new(), truncated: false });
     }
 
-    let set = rule_set(series, zone)?;
-    let span_days = all_day_span_days(series.dtstart_ms, series.dtstart_ms.saturating_add(series.duration_ms), series.dtstart_tz);
+    let set = rule_set(series, &zone)?;
+    let span_days = all_day_span_days(series.dtstart_ms, series.dtstart_ms.saturating_add(series.duration_ms), &zone);
     let (first, last) = if series.is_all_day {
         // An N-day occurrence can start up to N-1 dates before the first
         // displayed date. Each endpoint belongs to the same civil timeline
         // as DTSTART, even when the real day is shorter or longer than 24h.
-        let first = interval_date(to_chrono(from_ms)?, zone)
+        let first = interval_date(from_ms, &zone).ok_or(RecurError::OutOfRange(from_ms))?
             .checked_sub_days(chrono::Days::new(span_days - 1)).ok_or(RecurError::OutOfRange(from_ms))?;
-        let last = interval_date(to_chrono(to_ms - 1)?, zone);
+        let last = interval_date(to_ms - 1, &zone).ok_or(RecurError::OutOfRange(to_ms))?;
         (civil_midnight(first), civil_midnight(last))
     } else {
         (to_chrono(from_ms.saturating_sub(series.duration_ms))?, to_chrono(to_ms)?)
@@ -363,10 +359,10 @@ pub fn expand(
                 // started, and the occurrence vanished.
                 let date = d.date_naive();
                 let last = date.checked_add_days(chrono::Days::new(span_days))?;
-                let start_ms = midnight_in_zone(date, zone);
+                let start_ms = day_start(date, &zone)?;
                 // A dateline change can skip the entire date.
-                let actual = chrono::DateTime::from_timestamp_millis(start_ms)?.with_timezone(&zone);
-                (actual.date_naive() == date).then(|| Interval { start_ms, end_ms: midnight_in_zone(last, zone) })
+                if civil_date(start_ms, &zone)? != date { return None; }
+                Some(Interval { start_ms, end_ms: day_start(last, &zone)? })
             } else {
                 let start = d.timestamp_millis();
                 Some(Interval { start_ms: start, end_ms: start.saturating_add(series.duration_ms) })

@@ -111,7 +111,7 @@ unsafe extern "C" fn all_day_boundary_sql(
     let slot = ffi::sqlite3_value_int64(args[args.len() - 1]);
     let boundary = std::str::from_utf8(bytes).ok().and_then(|tz| {
         if argc == 2 {
-            omacal_core::zone::all_day_slot_start(slot, tz.parse().ok()?)
+            omacal_core::zone::all_day_slot_start(slot, tz)
         } else {
             omacal_core::recur::all_day_slot_end(
                 ffi::sqlite3_value_int64(args[0]), ffi::sqlite3_value_int64(args[1]), tz, slot,

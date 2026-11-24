@@ -219,7 +219,7 @@ pub(crate) fn suppressed_slots(events: &[StoredEvent]) -> HashSet<(i64, &str, i6
         // Keep provider IDs intact. Match the rendered civil-day boundary
         // even if the provider resolved a missing midnight into the day.
         let slot = all_day_zones.get(&(e.calendar_id, master))
-            .and_then(|zone| omacal_core::zone::all_day_slot_start(original, zone.parse().ok()?))
+            .and_then(|zone| omacal_core::zone::all_day_slot_start(original, zone))
             .unwrap_or(original);
         Some((e.calendar_id, master, slot))
     }).collect()
@@ -1050,6 +1050,10 @@ mod tests {
             ("America/St_Johns", "20101106", "20101107", "2010-11-08", "COUNT=2"),
             ("America/Toronto", "19190330", "19190331", "1919-04-01", "COUNT=2"),
             ("America/Havana", "20260307", "20260308", "2026-03-09", "UNTIL=20260308"),
+            ("America/Havana", "20251101", "20251102", "2025-11-03", "COUNT=2"),
+            // Provider and renderer must agree even when system tzdata and
+            // chrono-tz ship different rules for this date.
+            ("America/Havana", "20261102", "20261103", "2026-11-04", "COUNT=2"),
         ] {
             let resource = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:{first}\n\
                 RRULE:FREQ=DAILY;{bound}\nEND:VEVENT\nBEGIN:VEVENT\nUID:s\n\
