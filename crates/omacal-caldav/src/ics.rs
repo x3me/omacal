@@ -395,18 +395,44 @@ fn all_day_rule_at(mut rule: Property, slot_ms: i64, zone: &str) -> Option<Strin
     Some(format!("RRULE:{}", fields.join(";")))
 }
 
-/// Verify the stored RECURRENCE-ID using the same conversion that wrote it.
-/// Then put both civil dates on a gap-free clock for the rule iterator.
-fn all_day_rule_instants(first: Date, slot_ms: i64, zone: &str) -> Option<(i64, i64)> {
+/// Does this instant identify a DATE under the installed rules?
+fn date_for_exact_id(slot_ms: i64, zone: &str) -> Option<Date> {
     let date = Timestamp::from_millisecond(slot_ms).ok()?.in_tz(zone).ok()?.date();
     let slot = IcsTime::Date(date);
     if resolve(&slot, zone)?.0 != slot_ms {
         return None;
     }
-    Some((resolve(&IcsTime::Date(first), "UTC")?.0, resolve(&slot, "UTC")?.0))
+    Some(date)
+}
+
+fn all_day_rule_instants(first: Date, slot_ms: i64, zone: &str) -> Option<(i64, i64)> {
+    let date = date_for_exact_id(slot_ms, zone)?;
+    Some((resolve(&IcsTime::Date(first), "UTC")?.0, resolve(&IcsTime::Date(date), "UTC")?.0))
 }
 
 impl CalEvent {
+    /// Check the original DATE from the wire using the calendar's current
+    /// rules for the whole recurrence set, including RDATE, EXDATE and UNTIL.
+    pub fn includes_date(&self, date: Date, zone: &str) -> bool {
+        let Some((ms, ..)) = resolve(&IcsTime::Date(date), zone) else { return false };
+        let local = Timestamp::from_millisecond(ms).and_then(|ts| ts.in_tz(zone));
+        matches!(self.start, IcsTime::Date(_)) && local.is_ok_and(|dt| dt.date() == date)
+            && self.includes_occurrence(ms, zone)
+    }
+
+    pub fn includes_legacy_date_id(&self, slot: i64, zone: &str) -> bool {
+        // Prefer today's exact ID. An EXDATE or expired bound at that ID
+        // must not be bypassed by looking up another date.
+        if !matches!(self.start, IcsTime::Date(_)) || date_for_exact_id(slot, zone).is_some() {
+            return self.includes_occurrence(slot, zone);
+        }
+        let old = omacal_core::recur::legacy_date_id(slot, zone);
+        match old.and_then(|d| d.to_string().parse().ok()) {
+            Some(date) => self.includes_date(date, zone),
+            None => self.includes_occurrence(slot, zone),
+        }
+    }
+
     /// A missing override is reinstated only if the returned master still
     /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
     /// including floating times in the collection's zone.

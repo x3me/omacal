@@ -196,6 +196,14 @@ fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, Recur
         .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
 }
 
+/// Older CalDAV ledgers kept only a UTC slot. When the installed timezone
+/// rules have changed, the bundled rules can still identify an exact midnight.
+pub fn legacy_date_id(slot_ms: i64, tz: &str) -> Option<chrono::NaiveDate> {
+    let zone = tz.parse().ok()?;
+    let date = to_chrono(slot_ms).ok()?.with_timezone(&zone).date_naive();
+    (midnight_in_zone(date, zone) == slot_ms).then_some(date)
+}
+
 /// Match an RRULE at one instant. For DATE rules the caller projects both
 /// civil dates onto a UTC clock after checking the provider's original slot.
 pub fn rules_start_at(start_ms: i64, tz: &str, rules: &[String], slot_ms: i64) -> Result<bool, RecurError> {

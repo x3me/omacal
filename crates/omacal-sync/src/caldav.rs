@@ -205,6 +205,46 @@ pub fn caldav_todo_to_stored(
     }
 }
 
+/// Before replacing a cached resource, recover its DATE identifiers for
+/// pre-migration rows. Within one resource distinct DATEs and their saved
+/// midnights have the same order, including across offset changes. Only
+/// pair complete sets: pruning can leave fewer rows than wire components.
+async fn recover_cached_dates(conn: &mut sqlx::SqliteConnection, calendar_id: i64) -> sqlx::Result<()> {
+    let resources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT google_id, raw_ics FROM events WHERE calendar_id=?1 AND raw_ics IS NOT NULL
+         AND google_id IN (SELECT e.recurring_event_id FROM caldav_recurrence_dates d
+             JOIN events e ON e.calendar_id=d.calendar_id AND e.google_id=d.gid
+             WHERE d.calendar_id=?1 AND d.recurrence_date IS NULL)",
+    ).bind(calendar_id).fetch_all(&mut *conn).await?;
+    for (uid, raw) in resources {
+        let Some(root) = omacal_caldav::parse(&raw) else { continue };
+        let events = omacal_caldav::events_in(&root);
+        if events.len() != root.components("VEVENT").count() || events.iter().any(|e| e.uid != uid)
+            || root.components("VEVENT").filter(|c| c.prop("RECURRENCE-ID").is_none()).count() != 1 {
+            continue;
+        }
+        let dates: Option<Vec<_>> = root.components("VEVENT").filter_map(|c| c.prop("RECURRENCE-ID"))
+            .map(|p| match omacal_caldav::parse_time(p) {
+                Some(IcsTime::Date(d)) => Some(d),
+                _ => None,
+            }).collect();
+        let Some(mut dates) = dates else { continue };
+        dates.sort_unstable();
+        if dates.windows(2).any(|pair| pair[0] == pair[1]) { continue; }
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT google_id FROM events WHERE calendar_id=? AND recurring_event_id=?
+             ORDER BY original_start_utc",
+        ).bind(calendar_id).bind(&uid).fetch_all(&mut *conn).await?;
+        if keys.len() != dates.len() { continue; }
+        for (key, date) in keys.iter().zip(dates) {
+            sqlx::query("UPDATE caldav_recurrence_dates SET recurrence_date=?
+                         WHERE calendar_id=? AND gid=? AND recurrence_date IS NULL")
+                .bind(date.to_string()).bind(calendar_id).bind(key).execute(&mut *conn).await?;
+        }
+    }
+    Ok(())
+}
+
 /// A delete trigger records a cancellation even if removing an override
 /// merely reinstated the original slot. Recheck orphan notices on subsequent
 /// reports too: the organizer may later remove an EXDATE without sending
@@ -215,8 +255,9 @@ async fn clear_reinstated_notices(
     masters: &HashMap<String, CalEvent>,
     cal_tz: &str,
 ) -> sqlx::Result<()> {
-    let notices: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ec.gid, ec.series_gid FROM event_changes ec
+    let notices: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT ec.gid, ec.series_gid, d.gid IS NOT NULL, d.recurrence_date FROM event_changes ec
+         LEFT JOIN caldav_recurrence_dates d ON d.calendar_id=ec.calendar_id AND d.gid=ec.gid
          WHERE ec.calendar_id = ?1 AND ec.series_gid IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM events e
                            WHERE e.calendar_id = ec.calendar_id AND e.google_id = ec.gid)",
@@ -224,13 +265,19 @@ async fn clear_reinstated_notices(
     .bind(calendar_id)
     .fetch_all(&mut *conn)
     .await?;
-    for (gid, series) in notices {
+    for (gid, series, date_id, date) in notices {
         let Some(master) = masters.get(&series) else { continue };
         // CalDAV keys are uid#<original-start-ms>. The notice's old_start_utc
         // can be the moved time, so it cannot identify the original slot.
         let Some((uid, timestamp)) = gid.rsplit_once('#') else { continue };
         let Ok(slot) = timestamp.parse::<i64>() else { continue };
-        if uid == series && master.includes_occurrence(slot, cal_tz) {
+        if uid != series { continue; }
+        let reinstated = match date {
+            Some(date) => date.parse().ok().is_some_and(|d| master.includes_date(d, cal_tz)),
+            None if date_id => master.includes_legacy_date_id(slot, cal_tz),
+            None => master.includes_occurrence(slot, cal_tz),
+        };
+        if reinstated {
             sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1 AND gid = ?2")
                 .bind(calendar_id).bind(gid).execute(&mut *conn).await?;
         }
@@ -302,6 +349,7 @@ pub async fn sync_caldav_calendar(
             .await?;
         let mut seen: Vec<String> = Vec::new();
         let mut masters = HashMap::new();
+        let mut date_ids = Vec::new();
         let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
         for res in &resources {
             let Some(root) = omacal_caldav::parse(&res.ics) else {
@@ -317,6 +365,9 @@ pub async fn sync_caldav_calendar(
                     tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
                     continue;
                 };
+                if let Some(IcsTime::Date(date)) = ev.recurrence_id {
+                    date_ids.push((stored.google_id.clone(), date));
+                }
                 seen.push(stored.google_id.clone());
                 // The master (first, by events_in's ordering) carries the
                 // resource pointer and raw bytes for the write path.
@@ -353,6 +404,14 @@ pub async fn sync_caldav_calendar(
         // is the baseline, not news (`forget_baseline_changes`).
         let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
 
+        recover_cached_dates(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
+        for (gid, date) in date_ids {
+            sqlx::query("INSERT INTO caldav_recurrence_dates(calendar_id,gid,recurrence_date)
+                         VALUES (?,?,?) ON CONFLICT(calendar_id,gid) DO UPDATE
+                         SET recurrence_date=excluded.recurrence_date")
+                .bind(calendar_id).bind(gid).bind(date.to_string())
+                .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+        }
         for (row, src) in &rows {
             let id = omacal_store::upsert_event(&mut *tx, row).await?;
             if let Some((href, ics)) = src {
@@ -407,6 +466,10 @@ pub async fn sync_caldav_calendar(
         if first_sync {
             omacal_store::forget_baseline_changes(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
         }
+        sqlx::query("DELETE FROM caldav_recurrence_dates AS d WHERE calendar_id=?
+                     AND NOT EXISTS (SELECT 1 FROM events e WHERE e.calendar_id=d.calendar_id AND e.google_id=d.gid)
+                     AND NOT EXISTS (SELECT 1 FROM event_changes ec WHERE ec.calendar_id=d.calendar_id AND ec.gid=d.gid)")
+            .bind(calendar_id).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
         tx.commit().await.map_err(anyhow::Error::from)?;
     }
 
