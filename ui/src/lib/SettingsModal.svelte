@@ -170,6 +170,34 @@
     } catch (e) { sectionsNote = { text: String(e), kind: 'error' }; }
     finally { menubarBusy = false; }
   }
+  /** #216's quiet titles: the list, how it matches, and its two switches,
+   *  saved together like the sections above. The list is edited as text, one
+   *  title per line, and trimmed of blank lines before it is sent; the
+   *  backend refuses a blank title rather than tidying one. */
+  let quietText = $state('');
+  const quietList = $derived(quietText.split('\n').map((t) => t.trim()).filter((t) => t.length > 0));
+  const quietDirty = $derived(!!settings && quietList.join('\n') !== (settings.quietTitles ?? []).join('\n'));
+  let quietNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
+  let quietWhere = $state<'titles' | 'match' | 'menubar' | 'reminders'>('titles');
+  async function saveQuiet(
+    patch: { titles?: string[]; match?: 'exact' | 'contains'; menubar?: boolean; reminders?: boolean },
+    where: 'titles' | 'match' | 'menubar' | 'reminders',
+  ) {
+    const titles = patch.titles ?? settings?.quietTitles ?? [];
+    const match = patch.match ?? settings?.quietMatch ?? 'exact';
+    const menubar = patch.menubar ?? settings?.quietMenubar ?? true;
+    const reminders = patch.reminders ?? settings?.quietReminders ?? true;
+    quietWhere = where;
+    menubarBusy = true;
+    quietNote = { text: 'Applying…', kind: 'info' };
+    try {
+      settings = await setSetting('quietEvents', { titles, match, menubar, reminders });
+      if (where === 'titles') quietText = (settings.quietTitles ?? []).join('\n');
+      onsettingschange?.(settings);
+      quietNote = { text: 'Saved', kind: 'info' };
+    } catch (e) { quietNote = { text: String(e), kind: 'error' }; }
+    finally { menubarBusy = false; }
+  }
   /** Whether the format box holds something the bar has not been told about.
    *  What makes Save mean "there is something to save" rather than being a
    *  button that is always there and usually does nothing. */
@@ -191,6 +219,7 @@
         settings = s;
         menuDateCustom = s.menubarDateCustom ?? '%-d';
         meetingFormat = s.menubarLabelFormat ?? DEFAULT_MEETING_FORMAT;
+        quietText = (s.quietTitles ?? []).join('\n');
         intervalText = String(minutesOf(s.syncIntervalMs));
         durationText = String(s.defaultEventDurationMinutes);
         applyAppearance(s);
@@ -1937,6 +1966,60 @@
         </div>
         <p class="hint">Days after today show up to six events, then "+N more" opens OmaCal on that day.</p>
       </section>
+      <!-- #216: blocks kept on the calendar so nobody books the hour, which
+           should not be named as the next meeting or remind anybody. One
+           switch for the label and the popups together: a label and a popup
+           that disagreed would be harder to explain than they are worth. -->
+      <section class="appearance-section" aria-labelledby="quiet-heading">
+        <h2 id="quiet-heading">Quiet events</h2>
+        <p class="hint">Events with these titles stay on your calendar and in search; the menu bar and reminders leave them out. One title per line. Capitals, accents and surrounding spaces don't matter.</p>
+        <label class="lab" for="quiet-titles">Titles</label>
+        <!-- Back to the saved list, a refusal is about text no longer here. -->
+        <textarea id="quiet-titles" class="format-template" rows="3" spellcheck="false"
+                  placeholder="Unavailable" bind:value={quietText} disabled={!settings || menubarBusy}
+                  oninput={(e) => {
+                    const typed = e.currentTarget.value.split('\n').map((t) => t.trim()).filter((t) => t.length > 0);
+                    if (quietNote?.kind === 'error' && quietWhere === 'titles'
+                        && typed.join('\n') === (settings?.quietTitles ?? []).join('\n')) quietNote = null;
+                  }}></textarea>
+        <div class="inline">
+          <button type="button" disabled={!settings || menubarBusy || !quietDirty}
+                  onclick={() => saveQuiet({ titles: quietList }, 'titles')}>Save titles</button>
+          {#if quietDirty}
+            <span class="rownote unsaved" data-testid="quiet-dirty">Unsaved</span>
+          {:else if quietNote && quietWhere === 'titles' && quietNote.kind !== 'error'}
+            <span class="rownote" data-testid="quiet-note">{quietNote.text}</span>
+          {/if}
+        </div>
+        <!-- A refused list leaves the box as typed, and so still Unsaved: the
+             reason gets its own line, as the label format's does, and the
+             note beside Save titles never repeats it. -->
+        {#if quietNote?.kind === 'error' && quietWhere === 'titles'}<p class="note err" role="alert">{quietNote.text}</p>{/if}
+        <div class="inline">
+          <label class="lab" for="quiet-match">Match</label>
+          <select id="quiet-match" disabled={!settings || menubarBusy} value={settings?.quietMatch ?? 'exact'}
+            onchange={(e) => saveQuiet({ match: e.currentTarget.value as 'exact' | 'contains' }, 'match')}>
+            <option value="exact">Exact title</option>
+            <option value="contains">Title contains</option>
+          </select>
+          {#if quietNote && quietWhere === 'match'}<span class="rownote" class:err={quietNote.kind === 'error'} data-testid="quiet-note">{quietNote.text}</span>{/if}
+        </div>
+        <div class="inline">
+          <label class="check"><input type="checkbox" disabled={!settings || menubarBusy}
+            checked={settings?.quietMenubar ?? true}
+            onchange={(e) => saveQuiet({ menubar: e.currentTarget.checked }, 'menubar')} />
+            Hide from the menu bar</label>
+          {#if quietNote && quietWhere === 'menubar'}<span class="rownote" class:err={quietNote.kind === 'error'} data-testid="quiet-note">{quietNote.text}</span>{/if}
+        </div>
+        <div class="inline">
+          <label class="check"><input type="checkbox" disabled={!settings || menubarBusy}
+            checked={settings?.quietReminders ?? true}
+            onchange={(e) => saveQuiet({ reminders: e.currentTarget.checked }, 'reminders')} />
+            Hide from reminders</label>
+          {#if quietNote && quietWhere === 'reminders'}<span class="rownote" class:err={quietNote.kind === 'error'} data-testid="quiet-note">{quietNote.text}</span>{/if}
+        </div>
+        <p class="hint">The menu bar means its label and its popup.</p>
+      </section>
     {:else if pane === 'Calendars'}
       <!-- **The same rows the header's popover shows, from the same
            component.** Extracted rather than reimplemented, which is what
@@ -2429,7 +2512,7 @@
      one kind of input this rule missed, and they rendered as the platform's
      own widget — bigger type, a different border — beside styled neighbours
      (reported 2026-09-02). */
-  input[type='number'], input[type='text'], select {
+  input[type='number'], input[type='text'], select, textarea {
     font: inherit; font-size: 13px; color: var(--text);
     background-color: color-mix(in srgb, var(--text) 5%, transparent);
     border: 1px solid var(--hairline); border-radius: 5px; padding: 4px 6px;
@@ -2439,7 +2522,8 @@
      any component that restyles a select's padding owes the right side 22px. */
   select { padding-right: 22px; }
   input[type='number'] { width: 72px; }
-  input:focus, select:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+  textarea { resize: vertical; }
 
   .caldot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
 

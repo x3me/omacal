@@ -773,6 +773,10 @@ type StubSettings = {
   menubarTomorrow?: boolean;
   menubarDaysAhead?: number;
   menubarLabelHours?: number;
+  quietTitles?: string[];
+  quietMatch?: 'exact' | 'contains';
+  quietMenubar?: boolean;
+  quietReminders?: boolean;
   hourHeight: number;
   tasksWidth: number;
   fallbackReminderMinutes: number[];
@@ -892,6 +896,11 @@ const DEFAULT_SETTINGS: StubSettings = {
   menubarTomorrow: true,
   menubarDaysAhead: 0,
   menubarLabelHours: 24,
+  // #216: nothing listed, both switches on, as `read_settings` reads a fresh store.
+  quietTitles: [],
+  quietMatch: 'exact',
+  quietMenubar: true,
+  quietReminders: true,
   // The week omacal has always drawn, so every golden holds.
   weekStart: 'monday',
   weekStartsToday: false,
@@ -1364,6 +1373,18 @@ export function installTauriStub(scenario: string): Harness {
             settings = saveSettings({ ...settings, menubarEarlier: value.earlier,
               menubarTomorrow: value.tomorrow, menubarDaysAhead: value.daysAhead });
             return heldMenubar(key, { ...settings });
+          case 'quietEvents': {
+            // `settings::store`'s refusals, in its words.
+            const titles = value.titles as string[];
+            if (titles.length > 50) throw new Error('Keep to 50 quiet titles or fewer.');
+            if (titles.some((t) => t.trim() === '')) throw new Error('A quiet title cannot be blank.');
+            if (titles.some((t) => [...t].length > 200)) {
+              throw new Error('Keep each quiet title to 200 characters or fewer.');
+            }
+            settings = saveSettings({ ...settings, quietTitles: titles, quietMatch: value.match,
+              quietMenubar: value.menubar, quietReminders: value.reminders });
+            return { ...settings };
+          }
           // `settings::format_menu_label`'s placeholder refusals, in its words.
           case 'menubarLabelFormat': {
             const known = ['title', 'time', 'end_time', 'countdown', 'calendar'];

@@ -85,10 +85,17 @@ fn to_core(r: &omacal_store::Reminder) -> Reminder {
 /// declined occurrence of a series is an exception row that has already
 /// suppressed its parent's slot. `tentative` and `needsAction` still fire —
 /// a maybe and an unanswered invitation are both still claims on the hour.
+///
+/// **A quiet title notifies nothing** (#216) while the reminders switch is
+/// on; `quiet` is empty while it is off. Skipped at the row, after
+/// `suppressed_slots` has seen every row, for the reason
+/// `upcoming::assemble_window_combining` gives: a renamed occurrence's
+/// exception row must still hide its series' slot.
 async fn scheduled_events(
     pool: &SqlitePool,
     now_ms: i64,
     horizon_ms: i64,
+    quiet: &omacal_core::quiet::QuietTitles,
 ) -> anyhow::Result<Vec<ScheduledEvent>> {
     let to_ms = now_ms.saturating_add(horizon_ms).saturating_add(MAX_REMINDER_LEAD_MS);
     // From `now_ms`, not earlier: an occurrence that began in the past is still
@@ -108,6 +115,9 @@ async fn scheduled_events(
         // Declined means off the schedule (§ doc comment above): skip the row,
         // whether it is a whole event or one occurrence's exception.
         if src.self_response.as_deref() == Some("declined") {
+            continue;
+        }
+        if quiet.matches(src.summary.as_deref()) {
             continue;
         }
         for iv in crate::commands::occurrences(src, now_ms, to_ms) {
@@ -291,7 +301,7 @@ async fn run_events(
         .map(|&minutes| Reminder { method: "popup".into(), minutes })
         .collect();
 
-    let events = scheduled_events(pool, now_ms, horizon_ms).await?;
+    let events = scheduled_events(pool, now_ms, horizon_ms, &settings.quiet_for_reminders()).await?;
 
     let fired: std::collections::HashSet<FiredKey> = omacal_store::fired_keys(pool)
         .await?
@@ -762,6 +772,38 @@ mod tests {
         assert!(hidden.is_empty(), "deselecting a calendar cancels its pending reminders");
     }
 
+    /// #216: a title on the quiet list notifies nothing while the reminders
+    /// switch is on (the default once listed), and fires again once it is
+    /// off. The menu-bar switch has no say here.
+    #[tokio::test]
+    async fn a_quiet_titles_reminder_notifies_nothing_while_its_switch_is_on() {
+        use crate::settings::{store, Setting};
+        let pool = seeded("UTC", "[]").await;
+        let mut block = event("e1", T0900Z, T0900Z + HOUR, own(10));
+        block.summary = Some("Unavailable".into());
+        omacal_store::upsert_event(&pool, &block).await.unwrap();
+        // Beside it, unlisted: the skip is per event, not "anything listed".
+        omacal_store::upsert_event(&pool, &event("e2", T0900Z, T0900Z + HOUR, own(10))).await.unwrap();
+        let listed = |menubar: bool, reminders: bool| Setting::QuietEvents {
+            titles: vec!["unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar,
+            reminders,
+        };
+
+        let (_, loud) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert_eq!(loud, vec![(1, 10), (2, 10)], "fixture check: both fire while nothing is listed");
+        sqlx::query("DELETE FROM fired_reminders").execute(&pool).await.unwrap();
+
+        store(&pool, &listed(false, true)).await.unwrap();
+        let (_, quiet) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert_eq!(quiet, vec![(2, 10)], "listed with its switch on, menu bar off or not: only the block is skipped");
+
+        store(&pool, &listed(true, false)).await.unwrap();
+        let (_, back) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert_eq!(back, vec![(1, 10)], "its switch off: the block fires again (the meeting already has)");
+    }
+
     /// Declining an invitation is saying "off my schedule", and both Google
     /// and Apple go quiet from that moment. A `tentative` reply, by contrast,
     /// is still a claim on the hour and still fires — the pair below is one
@@ -830,6 +872,42 @@ mod tests {
         // Ten minutes before the *deleted* occurrence would have started.
         let (_, posted) = pass_at(&pool, T0900Z + DAY - 10 * MINUTE).await;
         assert!(posted.is_empty(), "a cancelled occurrence must not notify");
+    }
+
+    /// #216, the reminder half of `upcoming`'s renamed-occurrence test. One
+    /// occurrence of a series renamed "Unavailable" and moved to the
+    /// afternoon is an exception row, and that row is what suppresses the
+    /// series' own occurrence in its morning slot. The quiet skip must come
+    /// after `suppressed_slots`: ahead of it, the meeting the user moved away
+    /// would remind them at the old time.
+    #[tokio::test]
+    async fn a_quiet_renamed_occurrence_does_not_bring_its_series_reminder_back() {
+        use crate::settings::{store, Setting};
+        let pool = seeded("UTC", "[]").await;
+
+        let mut master = event("m1", T0900Z, T0900Z + HOUR, own(10));
+        master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        omacal_store::upsert_event(&pool, &master).await.unwrap();
+
+        // Tomorrow's occurrence, renamed and moved from 09:00 to 14:00.
+        let mut renamed = event("m1_20260811", T0900Z + DAY + 5 * HOUR, T0900Z + DAY + 6 * HOUR, own(10));
+        renamed.summary = Some("Unavailable".into());
+        renamed.recurring_event_id = Some("m1".into());
+        renamed.original_start_utc = Some(T0900Z + DAY);
+        omacal_store::upsert_event(&pool, &renamed).await.unwrap();
+        store(&pool, &Setting::QuietEvents {
+            titles: vec!["Unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar: true,
+            reminders: true,
+        }).await.unwrap();
+
+        let (_, posted) = pass_at(&pool, T0900Z + DAY - 10 * MINUTE).await;
+        assert!(posted.is_empty(), "the slot the occurrence moved away from stays silent");
+        let (_, posted) = pass_at(&pool, T0900Z + DAY + 5 * HOUR - 10 * MINUTE).await;
+        assert!(posted.is_empty(), "and the quiet occurrence itself is silent where it went");
+        let (_, posted) = pass_at(&pool, T0900Z + 2 * DAY - 10 * MINUTE).await;
+        assert_eq!(posted, vec![(1, 10)], "the rest of the series still reminds");
     }
 
     /// The all-day case, keyed by the anchor rather than the raw start, and the

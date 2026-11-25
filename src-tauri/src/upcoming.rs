@@ -20,6 +20,7 @@
 //! and after every local mutation — and written atomically (temp file +
 //! rename), so a reader never sees half a feed.
 
+use omacal_core::quiet::QuietTitles;
 use omacal_store::StoredEvent;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -287,6 +288,10 @@ pub(crate) fn conference_join_url(location: Option<&str>, description: Option<&s
 /// occurrences expanded against the same window. The window starts at
 /// `now_ms`, and `occurrences` keeps anything whose end is still ahead, which
 /// is exactly how a meeting in progress stays in the feed until it is over.
+///
+/// The tests' entry since #216: `current` calls [`assemble_window_combining`]
+/// itself, because it passes the quiet titles and the combine switch.
+#[cfg(test)]
 pub(crate) fn assemble(
     stored: &[StoredEvent],
     calendar_names: &HashMap<i64, String>,
@@ -295,11 +300,18 @@ pub(crate) fn assemble(
     assemble_window(stored, calendar_names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP)
 }
 
+#[cfg(test)]
 fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize) -> Feed {
-    assemble_window_combining(stored, calendar_names, now_ms, to_ms, cap, false)
+    assemble_window_combining(stored, calendar_names, now_ms, to_ms, cap, false, &QuietTitles::default())
 }
 
-fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize, combine: bool) -> Feed {
+/// `quiet` is the menu bar's quiet-title list (#216), empty while its switch
+/// is off. A quiet row is skipped **here, after `suppressed_slots` has seen
+/// every row**, not filtered out before: one occurrence of a series renamed
+/// "Unavailable" is an exception row, and it is that row that hides the
+/// series' own occurrence in its slot. Dropped beforehand, the slot would
+/// come back as the original meeting, a ghost the user moved away.
+fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize, combine: bool, quiet: &QuietTitles) -> Feed {
     let suppressed = crate::commands::suppressed_slots(stored);
 
     let mut events = Vec::new();
@@ -309,6 +321,9 @@ fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i6
             continue;
         }
         if src.self_response.as_deref() == Some("declined") {
+            continue;
+        }
+        if quiet.matches(src.summary.as_deref()) {
             continue;
         }
         for iv in crate::commands::occurrences(src, now_ms, to_ms) {
@@ -482,8 +497,10 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         .collect();
     let settings = crate::settings::read_settings(pool).await;
     let combine = settings.combine_identical_events;
-    let mut feed = if combine { assemble_window_combining(&stored, &names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP, true) }
-        else { assemble(&stored, &names, now_ms) };
+    // Every window below leaves out the same quiet titles, so the label, the
+    // day view and the agenda cannot disagree about what is coming up.
+    let quiet = settings.quiet_for_menubar();
+    let mut feed = assemble_window_combining(&stored, &names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP, combine, &quiet);
     // Tasks ride the same snapshot: overdue-or-imminent only, and a store
     // without a single CalDAV account contributes an empty list for free.
     let task_rows = omacal_store::tasks_for_ui(pool, now_ms).await?;
@@ -495,7 +512,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     let day_stored = crate::settings::shown_events(pool, omacal_store::events_in_window(pool, start, end).await?).await;
     // A day view needs completed events too, and a larger bound than the
     // glance-sized upcoming slice. Report truncation instead of hiding it.
-    let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine);
+    let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine, &quiet);
     let truncated = day.events.len() > 200;
     day.events.truncate(200);
     let mut agenda_days = Vec::new();
@@ -512,7 +529,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         let next = agenda_date.tomorrow()?;
         let to = next.to_zoned(tz.clone())?.timestamp().as_millisecond();
         let stored = crate::settings::shown_events(pool, omacal_store::events_in_window(pool, from, to).await?).await;
-        let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine);
+        let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine, &quiet);
         agenda_truncated |= slice.events.len() > remaining;
         slice.events.truncate(remaining);
         remaining -= slice.events.len();
@@ -845,6 +862,93 @@ mod tests {
         let feed = assemble(&[daily, tombstone], &names(), T0900Z);
         assert_eq!(feed.events.len(), 13, "fourteen days minus the deleted one");
         assert!(feed.events.iter().all(|e| e.start_ms != T0900Z + DAY + HOUR));
+    }
+
+    fn titled(google_id: &str, title: &str, start: i64, end: i64) -> StoredEvent {
+        let mut e = event(google_id, start, end);
+        e.summary = Some(title.into());
+        e
+    }
+
+    fn quiet(titles: &[&str]) -> QuietTitles {
+        QuietTitles::new(titles, omacal_core::quiet::QuietMatch::Exact)
+    }
+
+    fn titles_of(events: &[FeedEvent]) -> Vec<&str> {
+        events.iter().map(|e| e.title.as_deref().unwrap_or("")).collect()
+    }
+
+    /// #216: a block kept on the calendar so nobody books the hour stays out
+    /// of the menu bar, and while it runs the bar names the next real meeting
+    /// rather than the block it is sitting in.
+    #[test]
+    fn a_quiet_title_is_left_out_and_the_next_real_meeting_comes_first() {
+        let stored = [
+            titled("block", "Unavailable", T0900Z, T0900Z + 2 * HOUR),
+            titled("standup", "Standup", T0900Z + HOUR, T0900Z + HOUR + HOUR / 2),
+        ];
+        let now = T0900Z + HOUR / 6; // ten minutes into the block
+        let to = now + HORIZON_MS;
+        let loud = assemble_window_combining(&stored, &names(), now, to, CAP, false, &QuietTitles::default());
+        assert_eq!(titles_of(&loud.events), ["Unavailable", "Standup"], "fixture check: no list, both show");
+        let feed = assemble_window_combining(&stored, &names(), now, to, CAP, false, &quiet(&["unavailable"]));
+        assert_eq!(titles_of(&feed.events), ["Standup"]);
+    }
+
+    /// Why the skip sits after `suppressed_slots`: one occurrence of a series
+    /// renamed "Unavailable" is an exception row, and that row is what hides
+    /// the series' own occurrence in its slot. Filtered out first, the slot
+    /// would come back as the meeting the user moved away.
+    #[test]
+    fn a_quiet_renamed_occurrence_does_not_bring_its_series_slot_back() {
+        let mut daily = event("daily", T0900Z + HOUR, T0900Z + 2 * HOUR);
+        daily.recurrence = Some("RRULE:FREQ=DAILY".into());
+        let mut renamed = titled("daily-x", "Unavailable", T0900Z + DAY + HOUR, T0900Z + DAY + 2 * HOUR);
+        renamed.recurring_event_id = Some("daily".into());
+        renamed.original_start_utc = Some(T0900Z + DAY + HOUR);
+        let feed = assemble_window_combining(&[daily, renamed], &names(), T0900Z, T0900Z + HORIZON_MS, CAP, false, &quiet(&["Unavailable"]));
+        assert_eq!(feed.events.len(), 13, "fourteen days, the renamed one left out");
+        assert!(feed.events.iter().all(|e| e.start_ms != T0900Z + DAY + HOUR), "and no Standup back in its slot");
+    }
+
+    /// The switch, through `current`: on (the default), the label's window,
+    /// today's day view and the agenda all leave the quiet title out, so the
+    /// popups cannot disagree with the label; off, it is back everywhere.
+    #[tokio::test]
+    async fn the_menu_bar_leaves_quiet_titles_out_while_its_switch_is_on() {
+        use crate::settings::{read_settings, store, Setting};
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, default_reminders_json) VALUES (1, 'primary', 'Work', 'UTC', 'owner', '[]')")
+            .execute(&pool).await.unwrap();
+        omacal_store::upsert_event(&pool, &titled("block", "Unavailable", T0900Z, T0900Z + 2 * HOUR)).await.unwrap();
+        omacal_store::upsert_event(&pool, &titled("standup", "Standup", T0900Z + HOUR, T0900Z + HOUR + HOUR / 2)).await.unwrap();
+        let now = T0900Z + HOUR / 6;
+        let set = |menubar: bool| Setting::QuietEvents {
+            titles: vec!["Unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar,
+            reminders: true,
+        };
+
+        store(&pool, &set(true)).await.unwrap();
+        assert!(read_settings(&pool).await.quiet_menubar);
+        let feed = current(&pool, now).await.unwrap();
+        let panel = feed.panel.as_ref().unwrap();
+        assert_eq!(titles_of(&feed.events), ["Standup"], "the label's window");
+        assert_eq!(titles_of(&panel.events), ["Standup"], "today's day view");
+        let agenda = |p: &FeedPanel| -> Vec<String> {
+            p.agenda_days.iter().flat_map(|d| titles_of(&d.events)).map(str::to_string).collect()
+        };
+        assert_eq!(agenda(panel), ["Standup"], "the agenda: exactly the meeting, not merely no block");
+
+        store(&pool, &set(false)).await.unwrap();
+        let feed = current(&pool, now).await.unwrap();
+        let panel = feed.panel.as_ref().unwrap();
+        assert_eq!(titles_of(&feed.events), ["Unavailable", "Standup"]);
+        assert_eq!(titles_of(&panel.events), ["Unavailable", "Standup"]);
+        assert_eq!(agenda(panel), ["Unavailable", "Standup"]);
     }
 
     #[test]
