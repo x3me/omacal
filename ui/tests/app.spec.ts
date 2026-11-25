@@ -7727,11 +7727,14 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
     await modal.getByLabel('Hide from reminders').uncheck();
     await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
+    await modal.getByLabel('Hide from the menu bar').uncheck();
+    await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
 
     expect(await page.evaluate(() => window.__harness.settingValues('quietEvents'))).toEqual([
       { titles: ['Unavailable', 'Focus time'], match: 'exact', menubar: true, reminders: true },
       { titles: ['Unavailable', 'Focus time'], match: 'contains', menubar: true, reminders: true },
       { titles: ['Unavailable', 'Focus time'], match: 'contains', menubar: true, reminders: false },
+      { titles: ['Unavailable', 'Focus time'], match: 'contains', menubar: false, reminders: false },
     ]);
 
     // A refusal is said on its own line, and the box keeps what was typed.
@@ -7747,7 +7750,7 @@ test.describe("App: showing today's date", () => {
     await modal.getByRole('tab', { name: 'Menu bar' }).click();
     await expect(titles).toHaveValue('Unavailable\nFocus time');
     await expect(modal.getByLabel('Match', { exact: true })).toHaveValue('contains');
-    await expect(modal.getByLabel('Hide from the menu bar')).toBeChecked();
+    await expect(modal.getByLabel('Hide from the menu bar')).not.toBeChecked();
     await expect(modal.getByLabel('Hide from reminders')).not.toBeChecked();
   });
 

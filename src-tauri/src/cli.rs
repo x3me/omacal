@@ -542,6 +542,10 @@ pub(crate) struct Detail {
     pub mails_guests: bool,
     pub response: Option<String>,
     pub conference: Option<String>,
+    /// [`Row::quiet`], under the same name and with the same meaning (the
+    /// title is on the quiet list, whichever switches are on), so an agent
+    /// that looks one event up sees the mark the listing gives it.
+    pub quiet: bool,
     pub guests: Vec<DetailGuest>,
 }
 
@@ -595,6 +599,7 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
         conference: ev.conference_uri.clone().or_else(|| {
             crate::upcoming::conference_join_url(ev.location.as_deref(), ev.description.as_deref())
         }),
+        quiet: crate::settings::quiet_titles(pool).await.matches(ev.summary.as_deref()),
         guests: ev
             .attendees
             .iter()
@@ -1597,6 +1602,19 @@ mod tests {
         assert!(d.mails_guests);
         sqlx::query("UPDATE accounts SET provider = 'caldav'").execute(&pool).await.unwrap();
         assert!(!detail_by_id(&pool, 1).await.unwrap().unwrap().mails_guests);
+
+        // #216: `quiet` under the rows' name and meaning, so looking one event
+        // up shows the mark the listing gives it, whichever switches are on.
+        assert!(!d.quiet, "nothing listed yet");
+        crate::settings::store(&pool, &crate::settings::Setting::QuietEvents {
+            titles: vec!["feedback session".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar: false,
+            reminders: false,
+        }).await.unwrap();
+        let quiet = detail_by_id(&pool, 1).await.unwrap().unwrap();
+        assert!(quiet.quiet, "listed, with both switches off");
+        assert_eq!(serde_json::to_value(&quiet).unwrap()["quiet"], true, "the rows' field name");
     }
 
     /// The comparison behind `Row::organizer`, as a table — Google's

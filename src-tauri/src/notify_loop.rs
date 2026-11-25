@@ -782,6 +782,8 @@ mod tests {
         let mut block = event("e1", T0900Z, T0900Z + HOUR, own(10));
         block.summary = Some("Unavailable".into());
         omacal_store::upsert_event(&pool, &block).await.unwrap();
+        // Beside it, unlisted: the skip is per event, not "anything listed".
+        omacal_store::upsert_event(&pool, &event("e2", T0900Z, T0900Z + HOUR, own(10))).await.unwrap();
         let listed = |menubar: bool, reminders: bool| Setting::QuietEvents {
             titles: vec!["unavailable".into()],
             matching: omacal_core::quiet::QuietMatch::Exact,
@@ -790,16 +792,16 @@ mod tests {
         };
 
         let (_, loud) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
-        assert_eq!(loud, vec![(1, 10)], "fixture check: it fires while nothing is listed");
+        assert_eq!(loud, vec![(1, 10), (2, 10)], "fixture check: both fire while nothing is listed");
         sqlx::query("DELETE FROM fired_reminders").execute(&pool).await.unwrap();
 
         store(&pool, &listed(false, true)).await.unwrap();
         let (_, quiet) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
-        assert!(quiet.is_empty(), "listed with its switch on, menu bar off or not");
+        assert_eq!(quiet, vec![(2, 10)], "listed with its switch on, menu bar off or not: only the block is skipped");
 
         store(&pool, &listed(true, false)).await.unwrap();
         let (_, back) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
-        assert_eq!(back, vec![(1, 10)], "its switch off: it fires again");
+        assert_eq!(back, vec![(1, 10)], "its switch off: the block fires again (the meeting already has)");
     }
 
     /// Declining an invitation is saying "off my schedule", and both Google
@@ -870,6 +872,42 @@ mod tests {
         // Ten minutes before the *deleted* occurrence would have started.
         let (_, posted) = pass_at(&pool, T0900Z + DAY - 10 * MINUTE).await;
         assert!(posted.is_empty(), "a cancelled occurrence must not notify");
+    }
+
+    /// #216, the reminder half of `upcoming`'s renamed-occurrence test. One
+    /// occurrence of a series renamed "Unavailable" and moved to the
+    /// afternoon is an exception row, and that row is what suppresses the
+    /// series' own occurrence in its morning slot. The quiet skip must come
+    /// after `suppressed_slots`: ahead of it, the meeting the user moved away
+    /// would remind them at the old time.
+    #[tokio::test]
+    async fn a_quiet_renamed_occurrence_does_not_bring_its_series_reminder_back() {
+        use crate::settings::{store, Setting};
+        let pool = seeded("UTC", "[]").await;
+
+        let mut master = event("m1", T0900Z, T0900Z + HOUR, own(10));
+        master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        omacal_store::upsert_event(&pool, &master).await.unwrap();
+
+        // Tomorrow's occurrence, renamed and moved from 09:00 to 14:00.
+        let mut renamed = event("m1_20260811", T0900Z + DAY + 5 * HOUR, T0900Z + DAY + 6 * HOUR, own(10));
+        renamed.summary = Some("Unavailable".into());
+        renamed.recurring_event_id = Some("m1".into());
+        renamed.original_start_utc = Some(T0900Z + DAY);
+        omacal_store::upsert_event(&pool, &renamed).await.unwrap();
+        store(&pool, &Setting::QuietEvents {
+            titles: vec!["Unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar: true,
+            reminders: true,
+        }).await.unwrap();
+
+        let (_, posted) = pass_at(&pool, T0900Z + DAY - 10 * MINUTE).await;
+        assert!(posted.is_empty(), "the slot the occurrence moved away from stays silent");
+        let (_, posted) = pass_at(&pool, T0900Z + DAY + 5 * HOUR - 10 * MINUTE).await;
+        assert!(posted.is_empty(), "and the quiet occurrence itself is silent where it went");
+        let (_, posted) = pass_at(&pool, T0900Z + 2 * DAY - 10 * MINUTE).await;
+        assert_eq!(posted, vec![(1, 10)], "the rest of the series still reminds");
     }
 
     /// The all-day case, keyed by the anchor rather than the raw start, and the

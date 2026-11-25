@@ -938,14 +938,17 @@ mod tests {
         let panel = feed.panel.as_ref().unwrap();
         assert_eq!(titles_of(&feed.events), ["Standup"], "the label's window");
         assert_eq!(titles_of(&panel.events), ["Standup"], "today's day view");
-        assert!(panel.agenda_days.iter().flat_map(|d| d.events.iter()).all(|e| e.title.as_deref() != Some("Unavailable")), "the agenda");
+        let agenda = |p: &FeedPanel| -> Vec<String> {
+            p.agenda_days.iter().flat_map(|d| titles_of(&d.events)).map(str::to_string).collect()
+        };
+        assert_eq!(agenda(panel), ["Standup"], "the agenda: exactly the meeting, not merely no block");
 
         store(&pool, &set(false)).await.unwrap();
         let feed = current(&pool, now).await.unwrap();
         let panel = feed.panel.as_ref().unwrap();
         assert_eq!(titles_of(&feed.events), ["Unavailable", "Standup"]);
         assert_eq!(titles_of(&panel.events), ["Unavailable", "Standup"]);
-        assert!(panel.agenda_days.iter().flat_map(|d| d.events.iter()).any(|e| e.title.as_deref() == Some("Unavailable")));
+        assert_eq!(agenda(panel), ["Unavailable", "Standup"]);
     }
 
     #[test]
