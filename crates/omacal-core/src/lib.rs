@@ -1,5 +1,6 @@
 pub mod lanes;
 pub mod layout;
+pub mod quiet;
 pub mod remind;
 pub mod recur;
 pub mod search;

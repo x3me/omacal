@@ -389,6 +389,14 @@ pub(crate) struct Row {
     /// user is a guest — `response` still carries that story.
     pub organizer: bool,
     pub conference: Option<String>,
+    /// Whether the title is on the user's quiet list (#216), the blocks they
+    /// keep out of the menu bar and the reminders. The row is still here,
+    /// because the hour is still taken: an agent asked "when am I free?" must
+    /// see it as busy. Explicit for `organizer`'s reason, and set whichever
+    /// switches are on, since it says what the list holds rather than where
+    /// the app applies it. A tool that reads this output to raise its own
+    /// alerts can follow it instead of keeping a list of its own.
+    pub quiet: bool,
 }
 
 /// The comparison behind [`Row::organizer`] — `events::is_organizer`, which
@@ -424,6 +432,7 @@ pub(crate) async fn rows_in_window(
             .into_iter()
             .collect();
     let suppressed = crate::commands::suppressed_slots(&stored);
+    let quiet = crate::settings::quiet_titles(pool).await;
 
     let tz = jiff::tz::TimeZone::system();
     let stamp = |ms: i64| -> String {
@@ -469,6 +478,7 @@ pub(crate) async fn rows_in_window(
                         src.description.as_deref(),
                     )
                 }),
+                quiet: quiet.matches(src.summary.as_deref()),
             });
         }
     }
@@ -1896,5 +1906,40 @@ mod tests {
         assert!(rows.iter().find(|r| r.title == "daily").unwrap().recurring);
         assert_eq!(rows[0].calendar, "Work");
         assert!(!rows[0].start.is_empty(), "the readable stamp is missing");
+    }
+
+    /// #216: a quiet title stays in the agenda, because the hour is still
+    /// taken, and says so with `quiet: true` whichever switches are on. The
+    /// flag is on every row, `false` included, for `organizer`'s reason.
+    #[tokio::test]
+    async fn a_quiet_title_stays_in_the_agenda_marked_quiet() {
+        use crate::settings::{store, Setting};
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','me@x.com',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (id, account_id, google_id, summary, timezone, access_role) VALUES (1, 1, 'g1', 'Work', 'UTC', 'owner')")
+            .execute(&pool).await.unwrap();
+        let base = 1_788_000_000_000;
+        for (gid, title, start) in [("block", "Unavailable", base), ("standup", "Standup", base + 3_600_000)] {
+            sqlx::query(
+                "INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc, start_tz, end_tz, status, updated_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, 'UTC', 'UTC', 'confirmed', 0)",
+            )
+            .bind(gid).bind(title).bind(start).bind(start + 1_800_000)
+            .execute(&pool).await.unwrap();
+        }
+        store(&pool, &Setting::QuietEvents {
+            titles: vec!["Unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar: false,
+            reminders: false,
+        }).await.unwrap();
+
+        let rows = rows_in_window(&pool, base, base + 86_400_000).await.unwrap();
+        let marks: Vec<(&str, bool)> = rows.iter().map(|r| (r.title.as_str(), r.quiet)).collect();
+        assert_eq!(marks, [("Unavailable", true), ("Standup", false)], "kept, and marked, with both switches off");
+        let json = serde_json::to_value(&rows).unwrap();
+        assert_eq!(json[0]["quiet"], true);
+        assert_eq!(json[1]["quiet"], false, "present when false, not left out");
     }
 }

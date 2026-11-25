@@ -228,6 +228,15 @@ export type AppSettings = {
   menubarEarlier?: 'folded' | 'off';
   menubarTomorrow?: boolean;
   menubarDaysAhead?: number;
+  /** Event titles kept out of the menu bar and the reminders (#216), as
+   *  typed; matched trimmed, ignoring case and accents. The calendar views
+   *  and search never consult them, and `omacal agenda` keeps them, marked
+   *  `quiet`, because the hour is still taken. */
+  quietTitles?: string[];
+  quietMatch?: 'exact' | 'contains';
+  /** The label and the popups together: one switch, not two. */
+  quietMenubar?: boolean;
+  quietReminders?: boolean;
   /** Which palette the app wears. `'auto'` by default — omacal has no theme
    *  of its own and wears Omarchy's, which is exactly why the other two rows
    *  exist: off Omarchy there was no theme to wear and dark was the only
@@ -364,6 +373,9 @@ export type SettingValues = {
   menubarPreferences: { dayView: boolean; label: boolean; joinMinutes: number; labelHours: number };
   menubarDayView: boolean;
   menubarSections: { earlier: 'folded' | 'off'; tomorrow: boolean; daysAhead: number };
+  /** Refused, not tidied: a blank title, one over 200 characters, or more
+   *  than 50. The form trims and drops empty lines before it sends. */
+  quietEvents: { titles: string[]; match: 'exact' | 'contains'; menubar: boolean; reminders: boolean };
   /** Clamped rather than refused: the value comes off a gesture. */
   hourHeight: number;
   /** Clamped rather than refused: the value comes off a drag. */

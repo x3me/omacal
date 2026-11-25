@@ -7703,6 +7703,54 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByLabel('Earlier today')).toHaveValue('off');
   });
 
+  test('quiet titles save as a trimmed list with their match and switches, and are remembered', async ({ page }) => {
+    // #216. One title per line; blank lines and surrounding spaces are the
+    // form's to drop before it sends, because the backend refuses a blank
+    // title rather than tidying one.
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+
+    const titles = modal.getByLabel('Titles', { exact: true });
+    const save = modal.getByRole('button', { name: 'Save titles' });
+    await expect(save).toBeDisabled();
+    await titles.fill('  Unavailable \n\n Focus time\n');
+    await expect(modal.getByTestId('quiet-dirty')).toHaveText('Unsaved');
+    await save.click();
+    await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
+    await expect(titles).toHaveValue('Unavailable\nFocus time');
+    await expect(save).toBeDisabled();
+
+    await modal.getByLabel('Match', { exact: true }).selectOption('contains');
+    await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
+    await modal.getByLabel('Hide from reminders').uncheck();
+    await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
+
+    expect(await page.evaluate(() => window.__harness.settingValues('quietEvents'))).toEqual([
+      { titles: ['Unavailable', 'Focus time'], match: 'exact', menubar: true, reminders: true },
+      { titles: ['Unavailable', 'Focus time'], match: 'contains', menubar: true, reminders: true },
+      { titles: ['Unavailable', 'Focus time'], match: 'contains', menubar: true, reminders: false },
+    ]);
+
+    // A refusal is said on its own line, and the box keeps what was typed.
+    await titles.fill('x'.repeat(201));
+    await save.click();
+    await expect(modal.getByRole('alert').filter({ hasText: 'quiet title' }))
+      .toContainText('Keep each quiet title to 200 characters or fewer.');
+    await expect(modal.getByTestId('quiet-dirty')).toHaveText('Unsaved');
+
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    await expect(titles).toHaveValue('Unavailable\nFocus time');
+    await expect(modal.getByLabel('Match', { exact: true })).toHaveValue('contains');
+    await expect(modal.getByLabel('Hide from the menu bar')).toBeChecked();
+    await expect(modal.getByLabel('Hide from reminders')).not.toBeChecked();
+  });
+
   test("today's date can be asked for, and is remembered", async ({ page }) => {
     // Asked for 2026-09-04. One switch dresses two surfaces: the tray icon
     // *becomes* the date, because a tray host draws icons and nothing else,

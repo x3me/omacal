@@ -54,7 +54,10 @@ Each event row: `eventId`, `title`, `startMs`/`endMs` (epoch ms),
 `calendar`, `calendarId`, `attendees` (count, organizer included; 0 = solo),
 `recurring`, `response` (the user's own RSVP), `organizer` (v0.7.3+: true =
 this is the user's own event — trust it over any inference), `conference`
-(join URL when the meeting has one). `events show` adds `reach` (v0.21+):
+(join URL when the meeting has one), `quiet` (true when the title is on the
+user's quiet list, Settings → Menu bar: a block such as "Unavailable" kept
+out of the menu bar and the reminders. It still holds the time, so **count a
+quiet row as busy** when answering "when am I free?"). `events show` adds `reach` (v0.21+):
 `organizer` (the user's event — a change goes to everyone), `own-copy`
 (the user is a guest; Google keeps their copy apart, so a change moves it
 on THEIR calendar alone, nobody else's copy changes and nobody is told)

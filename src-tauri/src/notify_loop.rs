@@ -85,10 +85,17 @@ fn to_core(r: &omacal_store::Reminder) -> Reminder {
 /// declined occurrence of a series is an exception row that has already
 /// suppressed its parent's slot. `tentative` and `needsAction` still fire —
 /// a maybe and an unanswered invitation are both still claims on the hour.
+///
+/// **A quiet title notifies nothing** (#216) while the reminders switch is
+/// on; `quiet` is empty while it is off. Skipped at the row, after
+/// `suppressed_slots` has seen every row, for the reason
+/// `upcoming::assemble_window_combining` gives: a renamed occurrence's
+/// exception row must still hide its series' slot.
 async fn scheduled_events(
     pool: &SqlitePool,
     now_ms: i64,
     horizon_ms: i64,
+    quiet: &omacal_core::quiet::QuietTitles,
 ) -> anyhow::Result<Vec<ScheduledEvent>> {
     let to_ms = now_ms.saturating_add(horizon_ms).saturating_add(MAX_REMINDER_LEAD_MS);
     // From `now_ms`, not earlier: an occurrence that began in the past is still
@@ -108,6 +115,9 @@ async fn scheduled_events(
         // Declined means off the schedule (§ doc comment above): skip the row,
         // whether it is a whole event or one occurrence's exception.
         if src.self_response.as_deref() == Some("declined") {
+            continue;
+        }
+        if quiet.matches(src.summary.as_deref()) {
             continue;
         }
         for iv in crate::commands::occurrences(src, now_ms, to_ms) {
@@ -291,7 +301,7 @@ async fn run_events(
         .map(|&minutes| Reminder { method: "popup".into(), minutes })
         .collect();
 
-    let events = scheduled_events(pool, now_ms, horizon_ms).await?;
+    let events = scheduled_events(pool, now_ms, horizon_ms, &settings.quiet_for_reminders()).await?;
 
     let fired: std::collections::HashSet<FiredKey> = omacal_store::fired_keys(pool)
         .await?
@@ -760,6 +770,36 @@ mod tests {
 
         let (_, hidden) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
         assert!(hidden.is_empty(), "deselecting a calendar cancels its pending reminders");
+    }
+
+    /// #216: a title on the quiet list notifies nothing while the reminders
+    /// switch is on (the default once listed), and fires again once it is
+    /// off. The menu-bar switch has no say here.
+    #[tokio::test]
+    async fn a_quiet_titles_reminder_notifies_nothing_while_its_switch_is_on() {
+        use crate::settings::{store, Setting};
+        let pool = seeded("UTC", "[]").await;
+        let mut block = event("e1", T0900Z, T0900Z + HOUR, own(10));
+        block.summary = Some("Unavailable".into());
+        omacal_store::upsert_event(&pool, &block).await.unwrap();
+        let listed = |menubar: bool, reminders: bool| Setting::QuietEvents {
+            titles: vec!["unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar,
+            reminders,
+        };
+
+        let (_, loud) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert_eq!(loud, vec![(1, 10)], "fixture check: it fires while nothing is listed");
+        sqlx::query("DELETE FROM fired_reminders").execute(&pool).await.unwrap();
+
+        store(&pool, &listed(false, true)).await.unwrap();
+        let (_, quiet) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert!(quiet.is_empty(), "listed with its switch on, menu bar off or not");
+
+        store(&pool, &listed(true, false)).await.unwrap();
+        let (_, back) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
+        assert_eq!(back, vec![(1, 10)], "its switch off: it fires again");
     }
 
     /// Declining an invitation is saying "off my schedule", and both Google

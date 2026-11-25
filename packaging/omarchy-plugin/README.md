@@ -90,6 +90,11 @@ with a visible notice if there are more. Times use OmaCal's display clock.
 The optional day view uses a separate 200-event snapshot and follows the
 main calendar’s visible-hour range.
 
+Titles listed under **Settings → Menu bar → Quiet events** (a block such as
+"Unavailable" kept on the calendar so nobody books the hour) are left out of
+the label and both popups, so while one runs the bar names the next real
+meeting. The calendar itself still shows them.
+
 `Timeline.mjs` supplies the same overlap, elapsed-progress, and Join-window
 calculations to this widget and the macOS webview. The app embeds it and
 `DayView.qml` alongside the existing plugin files.

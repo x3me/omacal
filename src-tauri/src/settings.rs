@@ -118,6 +118,22 @@ const LABEL_HOURS: [u32; 7] = [1, 4, 12, 24, 72, 168, 336];
 pub(crate) const MENUBAR_EARLIER_KEY: &str = "menubar_earlier";
 pub(crate) const MENUBAR_TOMORROW_KEY: &str = "menubar_tomorrow";
 pub(crate) const MENUBAR_DAYS_AHEAD_KEY: &str = "menubar_days_ahead";
+/// The quiet titles (#216): a JSON array of the titles as typed. Folded where
+/// they are used (`omacal_core::quiet`), never on the way in, so the form
+/// shows back exactly what was entered.
+const QUIET_TITLES_KEY: &str = "quiet_titles";
+const QUIET_MATCH_KEY: &str = "quiet_match";
+/// Where the list applies. On unless switched off: a title somebody listed is
+/// one they asked to stop hearing about.
+const QUIET_MENUBAR_KEY: &str = "quiet_menubar";
+const QUIET_REMINDERS_KEY: &str = "quiet_reminders";
+/// A list for blocks and holds, not a filter language: past these the form is
+/// being used for something it was not made for.
+pub(crate) const QUIET_TITLES_MAX: usize = 50;
+pub(crate) const QUIET_TITLE_MAX_CHARS: usize = 200;
+pub(crate) const QUIET_TOO_MANY: &str = "Keep to 50 quiet titles or fewer.";
+pub(crate) const QUIET_BLANK: &str = "A quiet title cannot be blank.";
+pub(crate) const QUIET_TOO_LONG: &str = "Keep each quiet title to 200 characters or fewer.";
 pub(crate) const DATE_FORMAT_KEY: &str = "date_format";
 pub(crate) const VISIBLE_HOURS_KEY: &str = "visible_hours";
 const VISIBLE_HOURS_FIT_KEY: &str = "visible_hours_fit";
@@ -577,6 +593,22 @@ pub struct AppSettings {
     /// is not a planner, and the whole-week horizon the popups showed from
     /// v3.3.0 was the Week view's day count leaking through, not a choice.
     pub menubar_days_ahead: u32,
+    /// Event titles to keep out of the menu bar and the reminders (#216): a
+    /// block such as "Unavailable" that has to stay on its calendar, busy, so
+    /// nobody books the hour, but that should neither be named as the next
+    /// meeting nor remind anybody of anything.
+    ///
+    /// `quiet_menubar` covers the label and the popups together (the Omarchy
+    /// widget, the macOS menu bar and the tray all read `upcoming::current`),
+    /// because a label and a popup that disagreed would be harder to explain
+    /// than they are worth; `quiet_reminders` is the notify loop's. The
+    /// calendar views and search never consult the list, and `omacal agenda`
+    /// marks matches (`Row::quiet`) rather than dropping them, so an agent
+    /// asked "when am I free?" still sees the hour as taken.
+    pub quiet_titles: Vec<String>,
+    pub quiet_match: omacal_core::quiet::QuietMatch,
+    pub quiet_menubar: bool,
+    pub quiet_reminders: bool,
     /// Pixels per hour in Day and Week (2026-09-03): what a pinch,
     /// Ctrl+scroll or Ctrl+=/- left the grid at. Here for `list_mode`'s
     /// reason — a zoom that lasted one session would be redone every
@@ -1012,6 +1044,10 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         menubar_tomorrow: read(pool, MENUBAR_TOMORROW_KEY).await.as_deref() != Some("0"),
         menubar_days_ahead: read(pool, MENUBAR_DAYS_AHEAD_KEY).await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 6).unwrap_or(0),
+        quiet_titles: quiet_titles_stored(pool).await,
+        quiet_match: quiet_match_stored(pool).await,
+        quiet_menubar: read(pool, QUIET_MENUBAR_KEY).await.as_deref() != Some("0"),
+        quiet_reminders: read(pool, QUIET_REMINDERS_KEY).await.as_deref() != Some("0"),
         // **Clamped, not discarded.** A number outside the range is still an
         // answer to "how tall do you like your hours" — when the floor rose
         // from 30 to 48, discarding sent everyone who had zoomed out past it
@@ -1591,6 +1627,46 @@ pub(crate) async fn shown_events(
     if show_declined_events(pool).await { events } else { crate::commands::without_declined(events) }
 }
 
+/// The quiet titles as stored (#216). A row that does not parse is no list,
+/// not an error: the menu bar and the reminders carry on as they were.
+async fn quiet_titles_stored(pool: &SqlitePool) -> Vec<String> {
+    read(pool, QUIET_TITLES_KEY)
+        .await
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+async fn quiet_match_stored(pool: &SqlitePool) -> omacal_core::quiet::QuietMatch {
+    use omacal_core::quiet::QuietMatch;
+    match read(pool, QUIET_MATCH_KEY).await.as_deref() {
+        Some("contains") => QuietMatch::Contains,
+        _ => QuietMatch::Exact,
+    }
+}
+
+/// The list `omacal agenda` marks rows with, whichever switches are on: the
+/// mark says what the list holds, and where it is applied is the app's
+/// business, not the reader's.
+pub(crate) async fn quiet_titles(pool: &SqlitePool) -> omacal_core::quiet::QuietTitles {
+    omacal_core::quiet::QuietTitles::new(&quiet_titles_stored(pool).await, quiet_match_stored(pool).await)
+}
+
+impl AppSettings {
+    /// What the menu-bar surfaces leave out: nothing while their switch is off.
+    pub(crate) fn quiet_for_menubar(&self) -> omacal_core::quiet::QuietTitles {
+        if self.quiet_menubar { self.quiet_list() } else { Default::default() }
+    }
+
+    /// What the notify loop skips: nothing while its switch is off.
+    pub(crate) fn quiet_for_reminders(&self) -> omacal_core::quiet::QuietTitles {
+        if self.quiet_reminders { self.quiet_list() } else { Default::default() }
+    }
+
+    fn quiet_list(&self) -> omacal_core::quiet::QuietTitles {
+        omacal_core::quiet::QuietTitles::new(&self.quiet_titles, self.quiet_match)
+    }
+}
+
 /// One stored choice, as the settings form sends it: `{ key, value }`, with
 /// the key spelled as the [`AppSettings`] field it lands in wherever there is
 /// one. The four that store several fields as one decision carry an object.
@@ -1697,6 +1773,18 @@ pub enum Setting {
     /// outside their ranges — picked values, not a gesture's endpoints.
     #[serde(rename_all = "camelCase")]
     MenubarSections { earlier: String, tomorrow: bool, days_ahead: u32 },
+    /// The quiet titles, how they match, and both switches (#216), stored as
+    /// one choice. Refused past [`QUIET_TITLES_MAX`] titles or
+    /// [`QUIET_TITLE_MAX_CHARS`] characters, and refused when a title is
+    /// blank: the form trims and drops empty lines before it sends, so a
+    /// blank one is a caller to correct, not a value to tidy quietly.
+    QuietEvents {
+        titles: Vec<String>,
+        #[serde(rename = "match")]
+        matching: omacal_core::quiet::QuietMatch,
+        menubar: bool,
+        reminders: bool,
+    },
     /// Clamped: the value comes off a pinch, and the honest answer to "a
     /// little past the end" is the end, not an error under somebody's fingers.
     HourHeight(i64),
@@ -1749,6 +1837,7 @@ impl Setting {
                 | Setting::MenubarPreferences { .. }
                 | Setting::MenubarDayView(_)
                 | Setting::MenubarSections { .. }
+                | Setting::QuietEvents { .. }
                 | Setting::DateFormat(_)
                 | Setting::TimeFormat(_)
                 | Setting::WeekViewDays(_)
@@ -1977,6 +2066,28 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             )
             .await?;
         }
+        S::QuietEvents { titles, matching, menubar, reminders } => {
+            if titles.len() > QUIET_TITLES_MAX {
+                return Err(refused(QUIET_TOO_MANY));
+            }
+            if titles.iter().any(|t| t.trim().is_empty()) {
+                return Err(refused(QUIET_BLANK));
+            }
+            if titles.iter().any(|t| t.chars().count() > QUIET_TITLE_MAX_CHARS) {
+                return Err(refused(QUIET_TOO_LONG));
+            }
+            let list = serde_json::to_string(titles).map_err(anyhow::Error::from)?;
+            write_all(
+                pool,
+                &[
+                    (QUIET_TITLES_KEY, &list),
+                    (QUIET_MATCH_KEY, matching.as_str()),
+                    (QUIET_MENUBAR_KEY, flag(*menubar)),
+                    (QUIET_REMINDERS_KEY, flag(*reminders)),
+                ],
+            )
+            .await?;
+        }
         S::HourHeight(px) => {
             write(pool, HOUR_HEIGHT_KEY, &px.clamp(&HOUR_HEIGHT_MIN, &HOUR_HEIGHT_MAX).to_string()).await?;
         }
@@ -2108,6 +2219,11 @@ mod tests {
             read(json!({"key": "menubarSections", "value": {"earlier": "off", "tomorrow": true, "daysAhead": 2}})),
             Setting::MenubarSections { tomorrow: true, days_ahead: 2, .. }
         ));
+        // `match` on the wire, `matching` in Rust: a keyword cannot be a field.
+        assert!(matches!(
+            read(json!({"key": "quietEvents", "value": {"titles": ["Unavailable"], "match": "contains", "menubar": true, "reminders": false}})),
+            Setting::QuietEvents { ref titles, matching: omacal_core::quiet::QuietMatch::Contains, menubar: true, reminders: false } if titles == &["Unavailable"]
+        ));
         assert!(matches!(read(json!({"key": "visibleHours", "value": {"start": 6, "end": 22}})), Setting::VisibleHours { start: 6, end: 22 }));
         assert!(matches!(read(json!({"key": "visibleHoursFit", "value": true})), Setting::VisibleHoursFit(true)));
         assert!(matches!(read(json!({"key": "showWeekNumbers", "value": true})), Setting::ShowWeekNumbers(true)));
@@ -2157,6 +2273,80 @@ mod tests {
             write(&p, "visible_hours", value).await.unwrap();
             assert_eq!(visible_hours(&p).await, (0, 24));
         }
+    }
+
+    /// #216: a change to the quiet list rewrites the widget's feed and the
+    /// tray on the spot, as every other choice those surfaces show does.
+    #[test]
+    fn a_quiet_list_change_rebuilds_the_menu_surfaces() {
+        let change = Setting::QuietEvents {
+            titles: vec!["Unavailable".into()],
+            matching: omacal_core::quiet::QuietMatch::Exact,
+            menubar: true,
+            reminders: true,
+        };
+        assert!(change.shows_on_menu_surfaces());
+    }
+
+    /// #216. Nothing listed by default, and both switches on: a title somebody
+    /// lists is one they asked to stop hearing about. Kept as typed (folded
+    /// where it is used), and the agenda's mark ignores the switches.
+    #[tokio::test]
+    async fn quiet_titles_default_to_none_with_both_switches_on_and_store_as_one_choice() {
+        use omacal_core::quiet::QuietMatch;
+        let p = pool().await;
+        let d = read_settings(&p).await;
+        assert!(d.quiet_titles.is_empty());
+        assert_eq!(d.quiet_match, QuietMatch::Exact);
+        assert!(d.quiet_menubar, "menu bar on by default");
+        assert!(d.quiet_reminders, "reminders on by default");
+
+        store(&p, &Setting::QuietEvents {
+            titles: vec!["Unavailable".into(), " Focus time ".into()],
+            matching: QuietMatch::Contains,
+            menubar: true,
+            reminders: false,
+        }).await.unwrap();
+        let s = read_settings(&p).await;
+        assert_eq!(s.quiet_titles, ["Unavailable", " Focus time "], "stored as typed");
+        assert_eq!(s.quiet_match, QuietMatch::Contains);
+        assert!(s.quiet_menubar);
+        assert!(!s.quiet_reminders);
+        assert!(s.quiet_for_menubar().matches(Some("Focus time (AM)")));
+        assert!(!s.quiet_for_reminders().matches(Some("Unavailable")), "its switch is off");
+        assert!(quiet_titles(&p).await.matches(Some("Unavailable")), "the agenda's mark follows the list alone");
+
+        // Hand-edited rows that do not parse are no list and Exact, not errors.
+        write(&p, QUIET_TITLES_KEY, "not json").await.unwrap();
+        write(&p, QUIET_MATCH_KEY, "regex").await.unwrap();
+        let s = read_settings(&p).await;
+        assert!(s.quiet_titles.is_empty());
+        assert_eq!(s.quiet_match, QuietMatch::Exact);
+    }
+
+    #[tokio::test]
+    async fn quiet_titles_refuse_a_blank_an_overlong_or_one_too_many_and_land_nothing() {
+        use omacal_core::quiet::QuietMatch;
+        let p = pool().await;
+        let with = |titles: Vec<String>, on: bool| Setting::QuietEvents { titles, matching: QuietMatch::Exact, menubar: on, reminders: on };
+        store(&p, &with(vec!["Unavailable".into()], true)).await.unwrap();
+        for (titles, why) in [
+            (vec!["Lunch".to_string(), "   ".to_string()], QUIET_BLANK),
+            (vec!["x".repeat(QUIET_TITLE_MAX_CHARS + 1)], QUIET_TOO_LONG),
+            (vec!["t".to_string(); QUIET_TITLES_MAX + 1], QUIET_TOO_MANY),
+        ] {
+            match store(&p, &with(titles, false)).await {
+                Err(SetError::Refused(m)) => assert_eq!(m, why),
+                other => panic!("expected {why:?}, got {other:?}"),
+            }
+        }
+        let s = read_settings(&p).await;
+        assert_eq!(s.quiet_titles, ["Unavailable"], "a refused write lands nothing");
+        assert!(s.quiet_menubar && s.quiet_reminders, "not even its switches");
+        // The limits themselves are allowed.
+        let full = vec!["x".repeat(QUIET_TITLE_MAX_CHARS); QUIET_TITLES_MAX];
+        store(&p, &with(full.clone(), true)).await.unwrap();
+        assert_eq!(read_settings(&p).await.quiet_titles, full);
     }
 
     #[tokio::test]

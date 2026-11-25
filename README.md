@@ -107,7 +107,8 @@ day's header; a week that can start today and
 show the next three, five or seven days; keyboard-first, with `?` showing
 every key; a list mode that leaves empty days out; search that resolves a
 repeating event to one result; several accounts, with colours that stay
-local; reminders that mirror what your phone fires; the same meeting held on
+local; reminders that mirror what your phone fires; titles you keep on the
+calendar, busy, but out of the menu bar and the reminders; the same meeting held on
 two calendars drawn as one block, if you turn it on; and an interface scale
 for a screen whose own scaling never reaches the app.
 
