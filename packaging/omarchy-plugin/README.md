@@ -19,7 +19,9 @@ is five minutes; Join remains available until the meeting ends. Calendar
 selection and conference links continue to come from OmaCal.
 
 Settings changes refresh the widget immediately through IPC. The widget also
-checks the local feed every 15 seconds and when opened. All data comes from
+re-reads the local feed as soon as OmaCal replaces it (it watches the file;
+until a first feed exists it checks every 15 seconds instead) and when
+opened. All data comes from
 the feed OmaCal itself writes to
 `$XDG_STATE_HOME/omacal/upcoming.json` (default `~/.local/state/...`; see
 `src-tauri/src/upcoming.rs` for the contract). The widget never touches the

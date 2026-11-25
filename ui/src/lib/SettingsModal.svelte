@@ -1872,8 +1872,13 @@
         </div>
         <p class="hint">A meeting you are in, or can already join, shows either way.</p>
         <label class="lab" for="meeting-format">Meeting label format</label>
+        <!-- Back to the saved format, a refusal is about text no longer here. -->
         <input id="meeting-format" class="format-template" type="text" maxlength="256"
-               bind:value={meetingFormat} disabled={!settings || menubarBusy} />
+               bind:value={meetingFormat} disabled={!settings || menubarBusy}
+               oninput={(e) => {
+                 if (formatNote?.kind === 'error'
+                     && e.currentTarget.value === (settings?.menubarLabelFormat ?? DEFAULT_MEETING_FORMAT)) formatNote = null;
+               }} />
         <div class="inline">
           <!-- Disabled when there is nothing to save, which is the button
                saying so. Reset likewise: at the default it would write the
@@ -1884,11 +1889,11 @@
                     || (meetingFormat === DEFAULT_MEETING_FORMAT
                         && settings?.menubarLabelFormat === DEFAULT_MEETING_FORMAT)}
                   onclick={() => saveMeetingFormat(DEFAULT_MEETING_FORMAT)}>Reset format</button>
+          <!-- A refusal has its own line below, so this note never repeats one. -->
           {#if formatDirty}
             <span class="rownote unsaved" data-testid="menubar-format-dirty">Unsaved</span>
-          {:else if formatNote}
-            <span class="rownote" class:err={formatNote.kind === 'error'}
-                  data-testid="menubar-format-note">{formatNote.text}</span>
+          {:else if formatNote && formatNote.kind !== 'error'}
+            <span class="rownote" data-testid="menubar-format-note">{formatNote.text}</span>
           {/if}
         </div>
         <p class="hint">Reorder or omit placeholders: {'{title}'}, {'{time}'}, {'{end_time}'}, {'{countdown}'}, {'{calendar}'}. Add your own separators.</p>
