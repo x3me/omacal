@@ -339,9 +339,30 @@ Panel {
     }
   }
 
+  // The app rewrites the feed on startup, after every sync and after every
+  // local edit (upcoming.rs), so re-reading it on a timer mostly re-read the
+  // same bytes: a python3 start every 15 s, about 23 ms of CPU each, and a
+  // new feed still waited up to 15 s to reach the bar (#217). Watch the file
+  // instead. `preload: false` means this FileView never reads it, so
+  // read-feed.py stays the only reader, guards and all.
+  //
+  // The path is set only once a feed has been read. A watch set while the
+  // feed's folder does not exist yet (a fresh install, before the app's first
+  // sync) never fires, not even after the folder and the file appear; with
+  // the folder there, the file's creation does fire. After a good read the
+  // folder exists.
+  FileView {
+    path: root.feed !== null ? root.feedPath : ""
+    preload: false
+    watchChanges: true
+    printErrors: false
+    onFileChanged: feedFile.reload()
+  }
+
+  // While there is no feed nothing is watched, so look every 15 s as before.
   Timer {
     interval: 15000
-    running: true
+    running: root.feed === null
     repeat: true
     onTriggered: feedFile.reload()
   }
