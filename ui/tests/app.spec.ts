@@ -7801,6 +7801,33 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByLabel('Hide from reminders')).not.toBeChecked();
   });
 
+  test('a refused quiet list says why once, and not after the box is back to what is saved', async ({ page }) => {
+    // As the meeting label format: the reason has its own line while the box
+    // holds what was refused, and edited back to the saved list there is
+    // nothing refused left to explain.
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+
+    const titles = modal.getByLabel('Titles', { exact: true });
+    await titles.fill('Unavailable');
+    await modal.getByRole('button', { name: 'Save titles' }).click();
+    await expect(modal.getByTestId('quiet-note')).toHaveText('Saved');
+
+    const reason = modal.getByText('Keep each quiet title to 200 characters or fewer.');
+    await titles.fill(`Unavailable\n${'x'.repeat(201)}`);
+    await modal.getByRole('button', { name: 'Save titles' }).click();
+    await expect(reason).toHaveCount(1);
+    await expect(modal.getByTestId('quiet-dirty')).toHaveText('Unsaved');
+
+    await titles.fill(' Unavailable \n');
+    await expect(modal.getByTestId('quiet-dirty')).toHaveCount(0);
+    await expect(reason).toHaveCount(0);
+    await expect(modal.getByRole('alert')).toHaveCount(0);
+  });
+
   test("today's date can be asked for, and is remembered", async ({ page }) => {
     // Asked for 2026-09-04. One switch dresses two surfaces: the tray icon
     // *becomes* the date, because a tray host draws icons and nothing else,

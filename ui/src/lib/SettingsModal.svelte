@@ -1974,19 +1974,26 @@
         <h2 id="quiet-heading">Quiet events</h2>
         <p class="hint">Events with these titles stay on your calendar and in search; the menu bar and reminders leave them out. One title per line. Capitals, accents and surrounding spaces don't matter.</p>
         <label class="lab" for="quiet-titles">Titles</label>
+        <!-- Back to the saved list, a refusal is about text no longer here. -->
         <textarea id="quiet-titles" class="format-template" rows="3" spellcheck="false"
-                  placeholder="Unavailable" bind:value={quietText} disabled={!settings || menubarBusy}></textarea>
+                  placeholder="Unavailable" bind:value={quietText} disabled={!settings || menubarBusy}
+                  oninput={(e) => {
+                    const typed = e.currentTarget.value.split('\n').map((t) => t.trim()).filter((t) => t.length > 0);
+                    if (quietNote?.kind === 'error' && quietWhere === 'titles'
+                        && typed.join('\n') === (settings?.quietTitles ?? []).join('\n')) quietNote = null;
+                  }}></textarea>
         <div class="inline">
           <button type="button" disabled={!settings || menubarBusy || !quietDirty}
                   onclick={() => saveQuiet({ titles: quietList }, 'titles')}>Save titles</button>
           {#if quietDirty}
             <span class="rownote unsaved" data-testid="quiet-dirty">Unsaved</span>
-          {:else if quietNote && quietWhere === 'titles'}
-            <span class="rownote" class:err={quietNote.kind === 'error'} data-testid="quiet-note">{quietNote.text}</span>
+          {:else if quietNote && quietWhere === 'titles' && quietNote.kind !== 'error'}
+            <span class="rownote" data-testid="quiet-note">{quietNote.text}</span>
           {/if}
         </div>
         <!-- A refused list leaves the box as typed, and so still Unsaved: the
-             reason gets its own line, as the label format's does. -->
+             reason gets its own line, as the label format's does, and the
+             note beside Save titles never repeats it. -->
         {#if quietNote?.kind === 'error' && quietWhere === 'titles'}<p class="note err" role="alert">{quietNote.text}</p>{/if}
         <div class="inline">
           <label class="lab" for="quiet-match">Match</label>
