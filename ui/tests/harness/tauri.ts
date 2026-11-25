@@ -103,6 +103,10 @@ export type Harness = {
   /** Make the next `create_event` reject — what the duplicate-create guard
    *  spec uses to stand in for "Google succeeded, the local half did not". */
   failNextCreate(message: string): void;
+  /** Make the next `set_setting` for this key reject, as a write the store
+   *  could not make would: what the Settings specs use to reach a failed
+   *  save that no refusal can produce. */
+  failNextSetting(key: string, message: string): void;
   /** Make the next call to `set_calendar_selected` or `set_calendar_sync` reject —
    *  what a CalendarPopover spec uses to drive the failed-toggle path. */
   failNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendars_shown' | 'set_calendar_sync' | 'set_task_completed', message: string): void;
@@ -226,6 +230,7 @@ let nextId = 1;
 let failWeekOnce: string | null = null;
 let failUpdateOnce: string | null = null;
 let failCreateOnce: string | null = null;
+let failSettingOnce: { key: string; message: string } | null = null;
 let failCalendarOnce: { cmd: string; message: string } | null = null;
 /** Held search calls, oldest first — see `holdNextSearch`. Module level, like
  *  the calendar and event parks beside it: the harness object that releases
@@ -331,6 +336,9 @@ const harness: Harness = {
   },
   failNextCreate(message) {
     failCreateOnce = message;
+  },
+  failNextSetting(key, message) {
+    failSettingOnce = { key, message };
   },
   failNextUpdate(message) {
     failUpdateOnce = message;
@@ -1303,6 +1311,11 @@ export function installTauriStub(scenario: string): Harness {
       // would let a form which forgot its own guard pass every spec.
       case 'set_setting': {
         const { key, value } = args.setting as { key: string; value: any };
+        if (failSettingOnce?.key === key) {
+          const { message } = failSettingOnce;
+          failSettingOnce = null;
+          throw new Error(message);
+        }
         switch (key) {
           case 'syncIntervalMs':
             if ((value as number) < settings.minSyncIntervalMs) {
@@ -1351,6 +1364,16 @@ export function installTauriStub(scenario: string): Harness {
             settings = saveSettings({ ...settings, menubarEarlier: value.earlier,
               menubarTomorrow: value.tomorrow, menubarDaysAhead: value.daysAhead });
             return heldMenubar(key, { ...settings });
+          // `settings::format_menu_label`'s placeholder refusals, in its words.
+          case 'menubarLabelFormat': {
+            const known = ['title', 'time', 'end_time', 'countdown', 'calendar'];
+            for (const [, inner, close] of (value as string).matchAll(/\{([^}]*)(\}|$)/g)) {
+              if (close !== '}') throw new Error('Close each placeholder with }.');
+              if (!known.includes(inner)) throw new Error('Use {title}, {time}, {end_time}, {countdown}, or {calendar}.');
+            }
+            settings = saveSettings({ ...settings, menubarLabelFormat: value });
+            return heldMenubar(key, { ...settings });
+          }
           case 'menubarDateFormat':
             settings = saveSettings({ ...settings, menubarDateFormat: value.format, menubarDateCustom: value.custom });
             return { ...settings };

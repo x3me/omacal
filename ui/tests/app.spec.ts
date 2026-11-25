@@ -7597,6 +7597,53 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByTestId('menubar-format-dirty')).toHaveCount(0);
   });
 
+  /**
+   * A refusal is said once, on its own line, while the box still holds what
+   * was refused. Edited back to the saved format, there is nothing refused
+   * left to explain: the reason used to show twice then, once beside the
+   * buttons and once below, and stayed as an alert over a valid format.
+   */
+  test('a refused format says why once, and not after the box is back to what is saved', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+
+    const field = modal.getByLabel('Meeting label format');
+    const reason = modal.getByText('Use {title}, {time}, {end_time}, {countdown}, or {calendar}.');
+    await field.fill('{title} in {room}');
+    await modal.getByRole('button', { name: 'Save format' }).click();
+    await expect(modal.getByRole('alert')).toContainText('Use {title}, {time}, {end_time}, {countdown}, or {calendar}.');
+    await expect(reason).toHaveCount(1);
+    await expect(modal.getByTestId('menubar-format-dirty')).toHaveText('Unsaved');
+
+    await field.fill(DEFAULT_MEETING_FORMAT);
+    await expect(modal.getByTestId('menubar-format-dirty')).toHaveCount(0);
+    await expect(reason).toHaveCount(0);
+    await expect(modal.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('a Reset that fails over a saved format says why once', async ({ page }) => {
+    // Nothing unsaved in the box, so the note beside the buttons is free to
+    // speak; the failure still belongs to its own line alone.
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+
+    await modal.getByLabel('Meeting label format').fill('{title}');
+    await modal.getByRole('button', { name: 'Save format' }).click();
+    await expect(modal.getByTestId('menubar-format-note')).toHaveText('Saved');
+
+    await page.evaluate(() => window.__harness.failNextSetting('menubarLabelFormat', 'The database is busy.'));
+    await modal.getByRole('button', { name: 'Reset format' }).click();
+    await expect(modal.getByRole('alert')).toContainText('The database is busy.');
+    await expect(modal.getByText('The database is busy.')).toHaveCount(1);
+    await expect(modal.getByLabel('Meeting label format')).toHaveValue('{title}');
+  });
+
   test('Reset format is dead while the format already is the default', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();
