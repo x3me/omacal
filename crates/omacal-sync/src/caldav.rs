@@ -20,6 +20,7 @@
 use omacal_caldav::{CalDavClient, CalDavError, CalEvent, DiscoveredCalendar, IcsTime};
 use omacal_store::StoredEvent;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 
 use crate::SyncOutcome;
 
@@ -204,6 +205,90 @@ pub fn caldav_todo_to_stored(
     }
 }
 
+/// Before replacing a cached resource, recover its DATE identifiers for
+/// pre-migration rows. Within one resource distinct DATEs and their saved
+/// midnights have the same order, including across offset changes. Only
+/// pair complete sets: pruning can leave fewer rows than wire components.
+async fn recover_cached_dates(conn: &mut sqlx::SqliteConnection, calendar_id: i64) -> sqlx::Result<()> {
+    let resources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT google_id, raw_ics FROM events WHERE calendar_id=?1 AND raw_ics IS NOT NULL
+         AND google_id IN (SELECT e.recurring_event_id FROM caldav_recurrence_dates d
+             JOIN events e ON e.calendar_id=d.calendar_id AND e.google_id=d.gid
+             WHERE d.calendar_id=?1 AND d.recurrence_date IS NULL)",
+    ).bind(calendar_id).fetch_all(&mut *conn).await?;
+    for (uid, raw) in resources {
+        let Some(root) = omacal_caldav::parse(&raw) else { continue };
+        let events = omacal_caldav::events_in(&root);
+        if events.len() != root.components("VEVENT").count() || events.iter().any(|e| e.uid != uid)
+            || root.components("VEVENT").filter(|c| c.prop("RECURRENCE-ID").is_none()).count() != 1 {
+            continue;
+        }
+        let dates: Option<Vec<_>> = root.components("VEVENT").filter_map(|c| c.prop("RECURRENCE-ID"))
+            .map(|p| match omacal_caldav::parse_time(p) {
+                Some(IcsTime::Date(d)) => Some(d),
+                _ => None,
+            }).collect();
+        let Some(mut dates) = dates else { continue };
+        dates.sort_unstable();
+        if dates.windows(2).any(|pair| pair[0] == pair[1]) { continue; }
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT google_id FROM events WHERE calendar_id=? AND recurring_event_id=?
+             ORDER BY original_start_utc",
+        ).bind(calendar_id).bind(&uid).fetch_all(&mut *conn).await?;
+        if keys.len() != dates.len() { continue; }
+        for (key, date) in keys.iter().zip(dates) {
+            sqlx::query("UPDATE caldav_recurrence_dates SET recurrence_date=?
+                         WHERE calendar_id=? AND gid=? AND recurrence_date IS NULL")
+                .bind(date.to_string()).bind(calendar_id).bind(key).execute(&mut *conn).await?;
+        }
+    }
+    Ok(())
+}
+
+/// A delete trigger records a cancellation even if removing an override
+/// merely reinstated the original slot. Recheck orphan notices on subsequent
+/// reports too: the organizer may later remove an EXDATE without sending
+/// another detached event.
+async fn clear_reinstated_notices(
+    conn: &mut sqlx::SqliteConnection,
+    calendar_id: i64,
+    masters: &HashMap<String, CalEvent>,
+    cal_tz: &str,
+) -> sqlx::Result<()> {
+    let notices: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT ec.gid, ec.series_gid, d.gid IS NOT NULL, d.recurrence_date FROM event_changes ec
+         LEFT JOIN caldav_recurrence_dates d ON d.calendar_id=ec.calendar_id AND d.gid=ec.gid
+         WHERE ec.calendar_id = ?1 AND ec.series_gid IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM events e
+                           WHERE e.calendar_id = ec.calendar_id AND e.google_id = ec.gid)",
+    )
+    .bind(calendar_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (gid, series, date_id, date) in notices {
+        let Some(master) = masters.get(&series) else { continue };
+        // CalDAV keys are uid#<original-start-ms>. The notice's old_start_utc
+        // can be the moved time, so it cannot identify the original slot.
+        let Some((uid, timestamp)) = gid.rsplit_once('#') else { continue };
+        let Ok(slot) = timestamp.parse::<i64>() else { continue };
+        if uid != series { continue; }
+        // The organizer may have changed the master to a timed series
+        // between REPORTs. Its rule then names instants, even if the last
+        // detached component we saw used a DATE.
+        let reinstated = match date {
+            _ if !matches!(master.start, IcsTime::Date(_)) => master.includes_occurrence(slot, cal_tz),
+            Some(date) => date.parse().ok().is_some_and(|d| master.includes_date(d, cal_tz)),
+            None if date_id => master.includes_legacy_date_id(slot, cal_tz),
+            None => master.includes_occurrence(slot, cal_tz),
+        };
+        if reinstated {
+            sqlx::query("DELETE FROM event_changes WHERE calendar_id = ?1 AND gid = ?2")
+                .bind(calendar_id).bind(gid).execute(&mut *conn).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Syncs one collection: events when it holds them, tasks when it holds
 /// them, both behind one ctag probe. `collection_url` is the calendar row's
 /// `google_id` — the column holds "the provider's identifier", and for
@@ -246,7 +331,7 @@ pub async fn sync_caldav_calendar(
 
     // An unchanged ctag means nothing was edited — but it says nothing about
     // what the window has newly reached, so the day-advance check gets a say
-    // before the short-circuit. See `crate::window_advanced_a_day`.
+    // before the short-circuit. See `crate::window_needs_refetch`.
     let ctag = client.ctag(collection_url).await?;
     // `supports_events` gates the check, because the window write below is
     // inside that branch: a tasks-only collection never records one, so an
@@ -255,7 +340,7 @@ pub async fn sync_caldav_calendar(
     if ctag.is_some()
         && ctag == stored_ctag
         && !(supports_events
-            && crate::window_advanced_a_day(pool, calendar_id, window_end_ms).await)
+            && crate::window_needs_refetch(pool, calendar_id, window_start_ms, window_end_ms).await)
     {
         return Ok(SyncOutcome::default());
     }
@@ -267,24 +352,47 @@ pub async fn sync_caldav_calendar(
             .events_in_window(collection_url, window_start_ms, window_end_ms)
             .await?;
         let mut seen: Vec<String> = Vec::new();
+        let mut masters = HashMap::new();
+        let mut recurrence_ids = Vec::new();
         let mut rows: Vec<(StoredEvent, Option<(String, String)>)> = Vec::new();
         for res in &resources {
             let Some(root) = omacal_caldav::parse(&res.ics) else {
                 tracing::warn!(url = %res.url, "unparseable ICS resource; skipping");
                 continue;
             };
-            for (i, ev) in omacal_caldav::events_in(&root).into_iter().enumerate() {
+            let first = rows.len();
+            let events = omacal_caldav::events_in(&root);
+            for (i, ev) in events.iter().enumerate() {
                 let Some(stored) =
-                    caldav_to_stored(&ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
+                    caldav_to_stored(ev, calendar_id, &cal_tz, res.etag.as_deref(), &self_email)
                 else {
                     tracing::warn!(url = %res.url, "VEVENT with unusable times; skipping");
                     continue;
                 };
+                if let Some(rid) = &ev.recurrence_id {
+                    recurrence_ids.push((stored.google_id.clone(), match rid {
+                        IcsTime::Date(d) => Some(*d),
+                        _ => None,
+                    }));
+                }
                 seen.push(stored.google_id.clone());
                 // The master (first, by events_in's ordering) carries the
                 // resource pointer and raw bytes for the write path.
                 let src = (i == 0).then(|| (res.url.clone(), res.ics.clone()));
                 rows.push((stored, src));
+            }
+            // A REPORT returns the whole resource. Trust its exception list
+            // only if we read every component and they belong to one master.
+            let resource = &rows[first..];
+            if let (Some(((master, _), exceptions)), Some(event)) = (resource.split_first(), events.into_iter().next()) {
+                let uid = master.google_id.as_str();
+                if master.recurring_event_id.is_none()
+                    && exceptions.iter().all(|(e, _)| e.recurring_event_id.as_deref() == Some(uid))
+                    && root.components("VEVENT").count() == resource.len()
+                    && root.components("VEVENT").any(|c| c.prop("RECURRENCE-ID").is_none())
+                {
+                    masters.insert(master.google_id.clone(), event);
+                }
             }
         }
 
@@ -303,6 +411,20 @@ pub async fn sync_caldav_calendar(
         // is the baseline, not news (`forget_baseline_changes`).
         let first_sync = omacal_store::is_first_sync(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
 
+        recover_cached_dates(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
+        for (gid, date) in recurrence_ids {
+            if let Some(date) = date {
+                sqlx::query("INSERT INTO caldav_recurrence_dates(calendar_id,gid,recurrence_date)
+                             VALUES (?,?,?) ON CONFLICT(calendar_id,gid) DO UPDATE
+                             SET recurrence_date=excluded.recurrence_date")
+                    .bind(calendar_id).bind(gid).bind(date.to_string())
+                    .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+            } else {
+                // A DATE-TIME override can reuse a former DATE's numeric key.
+                sqlx::query("DELETE FROM caldav_recurrence_dates WHERE calendar_id=? AND gid=?")
+                    .bind(calendar_id).bind(gid).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+            }
+        }
         for (row, src) in &rows {
             let id = omacal_store::upsert_event(&mut *tx, row).await?;
             if let Some((href, ics)) = src {
@@ -317,22 +439,27 @@ pub async fn sync_caldav_calendar(
             outcome.upserted += 1;
         }
 
-        // Inferred deletions, bounded to what the query would have returned:
-        // anything alive in (or recurring into) the window that the server
-        // did not mention no longer exists.
-        //
-        // **Bounded at both ends, unlike the Google sweep** — see
-        // `reap::Reach` for why each provider reaches exactly as far as its
-        // own fetch asked, and no further.
+        // Reconcile the requested window and every complete resource it returned.
         let deleted = crate::reap::delete_unnamed(
             &mut tx,
             calendar_id,
             &seen,
-            crate::reap::Reach::Overlapping { start_ms: window_start_ms, end_ms: window_end_ms },
+            crate::reap::Reach::CalDav {
+                start_ms: window_start_ms,
+                end_ms: window_end_ms,
+                complete_resources: &masters.keys().map(String::as_str).collect::<Vec<_>>(),
+            },
         )
         .await
         .map_err(anyhow::Error::from)?;
         outcome.deleted += deleted as usize;
+
+        clear_reinstated_notices(&mut tx, calendar_id, &masters, &cal_tz)
+            .await.map_err(anyhow::Error::from)?;
+
+        let window_start_ms = omacal_store::history::retain_current_history(
+            &mut tx, calendar_id, window_start_ms, outcome.upserted > 0 || outcome.deleted > 0,
+        ).await.map_err(anyhow::Error::from)?;
 
         sqlx::query(
             "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
@@ -352,6 +479,10 @@ pub async fn sync_caldav_calendar(
         if first_sync {
             omacal_store::forget_baseline_changes(&mut tx, calendar_id).await.map_err(anyhow::Error::from)?;
         }
+        sqlx::query("DELETE FROM caldav_recurrence_dates AS d WHERE calendar_id=?
+                     AND NOT EXISTS (SELECT 1 FROM events e WHERE e.calendar_id=d.calendar_id AND e.google_id=d.gid)
+                     AND NOT EXISTS (SELECT 1 FROM event_changes ec WHERE ec.calendar_id=d.calendar_id AND ec.gid=d.gid)")
+            .bind(calendar_id).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
         tx.commit().await.map_err(anyhow::Error::from)?;
     }
 
@@ -729,19 +860,20 @@ mod tests {
     async fn a_collections_first_sync_is_a_baseline_and_later_moves_are_news() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        fn ics(moved_to: &str) -> String {
+        fn ics(original: &str, moved_to: &str) -> String {
+            // Exercise the wire order used by servers that send exceptions first.
             format!(
-                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
-                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                "BEGIN:VCALENDAR&#13;\nBEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:{original}&#13;\n\
+                 DTSTART:{moved_to}&#13;\nDURATION:PT1H&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
                  ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\n\
-                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nRECURRENCE-ID:20260810T060000Z&#13;\nDTSTART:{moved_to}&#13;\n\
-                 DTEND:20260811T090000Z&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
+                 BEGIN:VEVENT&#13;\nUID:s1&#13;\nDTSTART:20260803T060000Z&#13;\nDTEND:20260803T070000Z&#13;\n\
+                 RRULE:FREQ=WEEKLY&#13;\nSUMMARY:Standup&#13;\nORGANIZER:mailto:ana@x.com&#13;\n\
                  ATTENDEE;PARTSTAT=ACCEPTED:mailto:e@x&#13;\nEND:VEVENT&#13;\nEND:VCALENDAR&#13;\n")
         }
         fn multistatus(body: String) -> String {
             format!(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">{body}</d:multistatus>"#)
         }
-        async fn serve(server: &MockServer, ctag: &str, moved_to: &str) {
+        async fn serve(server: &MockServer, ctag: &str, original: &str, moved_to: &str) {
             server.reset().await;
             Mock::given(method("PROPFIND"))
                 .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
@@ -752,7 +884,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(format!(
                     "<d:response><d:href>/cal/s1.ics</d:href><d:propstat><d:prop><d:getetag>\"{ctag}\"</d:getetag>\
                      <c:calendar-data>{}</c:calendar-data></d:prop>\
-                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(moved_to)))))
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>", ics(original, moved_to)))))
                 .mount(server).await;
         }
         let server = MockServer::start().await;
@@ -768,16 +900,29 @@ mod tests {
         };
         let far = 4_102_444_800_000; // 2100
 
-        serve(&server, "c1", "20260811T080000Z").await;
+        serve(&server, "c1", "20260810T060000Z", "20260811T080000Z").await;
         sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
         let exceptions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE recurring_event_id IS NOT NULL")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(exceptions, 1, "the fixture's premise: the moved occurrence was stored");
         assert_eq!(ledger(pool.clone()).await, 0, "the first sync reports nothing");
 
-        serve(&server, "c2", "20260811T083000Z").await;
+        serve(&server, "c2", "20260810T060000Z", "20260811T083000Z").await;
         sync_caldav_calendar(&pool, &client, 1, &url, true, false, 0, far, 0).await.unwrap();
         assert_eq!(ledger(pool.clone()).await, 1, "a move after it is news");
+
+        // The organizer restores August 10. A different override still comes
+        // first, and the omitted override lies entirely before the REPORT window.
+        let old_gid: String = sqlx::query_scalar("SELECT gid FROM event_changes").fetch_one(&pool).await.unwrap();
+        let start = "2026-08-15T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        serve(&server, "c3", "20260817T060000Z", "20260818T080000Z").await;
+        let outcome = sync_caldav_calendar(&pool, &client, 1, &url, true, false, start, far, 0).await.unwrap();
+        assert_eq!((outcome.upserted, outcome.deleted), (2, 1));
+        let old_row: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = ?1")
+            .bind(&old_gid).fetch_one(&pool).await.unwrap();
+        let old_notice: i64 = sqlx::query_scalar("SELECT count(*) FROM event_changes WHERE gid = ?1")
+            .bind(&old_gid).fetch_one(&pool).await.unwrap();
+        assert_eq!((old_row, old_notice), (0, 0), "the original slot is reinstated and its notice clears");
     }
 
     #[tokio::test]
@@ -1054,4 +1199,115 @@ mod tests {
             }
         }
     }
+
+    /// Pause after the REPORT reaches the server, then shorten history before
+    /// its old response is applied. No scheduling sleep decides the ordering.
+    #[tokio::test]
+    async fn a_caldav_fetch_cannot_undo_a_history_shrink() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let seen = entered.clone();
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>new</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.notify_one();
+                ResponseTemplate::new(207).set_body_string(
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/old.ics</d:href><d:propstat><d:prop><c:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:old\r\nDTSTART:20000101T090000Z\r\nDTEND:20000101T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>")
+            }).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        const DAY: i64 = 86_400_000;
+        // The event ends one minute into the gap between fetch and shrink.
+        let event_end = "2000-01-01T10:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let now = event_end + 180 * DAY - 60_000;
+        let later = now + 120_000;
+        let floor = later - 180 * DAY;
+        // Stop polling the sync after REPORT is observed, commit the shorter
+        // span, then resume it: apply necessarily sees the committed change.
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        let fetched = sync_caldav_calendar(&pool, &client, 1, &collection,
+            true, false, -2_208_988_800_000, now + 365 * DAY, now);
+        tokio::pin!(fetched);
+        tokio::select! {
+            _ = entered.notified() => {},
+            result = &mut fetched => panic!("sync finished before shrink: {result:?}"),
+        }
+        omacal_store::history::set_span(&pool, 6, later).await.unwrap();
+        let outcome = fetched.await.unwrap();
+        assert_eq!(outcome.upserted, 1, "the old event really reached apply");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id = 'old'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "the in-flight REPORT must not restore old rows");
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_caldav_report_keeps_history_outside_the_saved_window() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        for verb in ["PROPFIND", "REPORT"] {
+            Mock::given(method(verb)).respond_with(ResponseTemplate::new(207)
+                .set_body_string(r#"<d:multistatus xmlns:d="DAV:"/>"#))
+                .expect(1).mount(&server).await;
+        }
+        let pool = super::super::tests::seeded_pool().await;
+        let now = 1_700_000_000_000;
+        let (start, end) = omacal_store::history::history_window(now, 6);
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months','6')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz, updated_at)
+                     VALUES (1,'cached',?1,?2,'UTC','UTC',0)")
+            .bind(start - 2).bind(start - 1).execute(&pool).await.unwrap();
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        sync_caldav_calendar(&pool, &client, 1, &format!("{}/cal/", server.uri()), true, false, start, end, now)
+            .await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = 'cached'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(cached, 1);
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(recorded, start);
+    }
+
+    /// A ctag describes server edits, not how much history was requested.
+    /// Widening must REPORT even when that tag has not changed; the same
+    /// window and a shorter one need no additional download.
+    #[tokio::test]
+    async fn wider_caldav_history_refetches_an_unchanged_collection() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:response><d:propstat><d:prop><cs:getctag>same</cs:getctag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#))
+            .mount(&server).await;
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<d:multistatus xmlns:d="DAV:"/>"#))
+            .expect(2).mount(&server).await;
+        let pool = super::super::tests::seeded_pool().await;
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let collection = format!("{}/cal/", server.uri());
+        const DAY: i64 = 86_400_000;
+        let now = 1_786_341_600_000;
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (1, 'same', ?1, ?2)")
+            .bind(now - 180 * DAY).bind(now + 365 * DAY).execute(&pool).await.unwrap();
+        for (start, reports) in [(now - 180 * DAY, 0), (now - 730 * DAY, 1),
+                                 (-2_208_988_800_000, 2), (now - 180 * DAY, 2)] {
+            sync_caldav_calendar(&pool, &client, 1, &collection, true, false,
+                start, now + 365 * DAY, now).await.unwrap();
+            let count = server.received_requests().await.unwrap().iter()
+                .filter(|r| r.method.as_str() == "REPORT").count();
+            assert_eq!(count, reports, "start {start}");
+        }
+    }
+
 }

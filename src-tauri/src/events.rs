@@ -4570,7 +4570,7 @@ mod tests {
     }
 
     fn state_with(pool: SqlitePool, demo: bool) -> AppState {
-        AppState { pool, demo, tokens: Default::default(), reauth: Default::default(), update: Default::default(), update_checked_at: Default::default(), system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default() }
+        AppState { pool, demo, tokens: Default::default(), reauth: Default::default(), update: Default::default(), update_checked_at: Default::default(), system_tz_change: Default::default(), quit_on_close: Default::default(), open_date: Default::default(), history_months: tokio::sync::Mutex::new(crate::settings::DEFAULT_HISTORY_MONTHS) }
     }
 
     /// "Demo mode must never write to the real database or reach Google",

@@ -17,9 +17,9 @@
   import { ICLOUD_BASE, listAccounts, signOut, subscribeWebcal, type Account } from './accounts';
   import {
     getSettings, setSetting, setDisplayTimezone, setWeatherLocation, listTimezones,
-    minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, APPEARANCE_OPTIONS,
-    WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings, type Appearance,
-    type StartOnLogin, type WeekViewDays, type WindowFrame,
+    minutesOf, msOfMinutes, DEFAULT_VIEW_OPTIONS, START_ON_LOGIN_OPTIONS, HISTORY_SPAN_OPTIONS,
+    APPEARANCE_OPTIONS, WINDOW_FRAME_OPTIONS, type DefaultViewChoice, type AppSettings,
+    type Appearance, type HistorySpan, type StartOnLogin, type WeekViewDays, type WindowFrame,
   } from './settings';
   import { formatClock, type TimeFormat } from './timefmt';
   import ThemePicker from './ThemePicker.svelte';
@@ -145,6 +145,7 @@
   let menubarBusy = $state(false);
   /** How far ahead the bar may name the next meeting (#167); the backend
    *  refuses any other span. */
+  const HISTORY_SPANS: ListChoice[] = HISTORY_SPAN_OPTIONS.map(([id, name]) => ({ id, name, color: null }));
   const LABEL_HORIZONS: ListChoice[] = [
     { id: 1, name: '1 hour', color: null }, { id: 4, name: '4 hours', color: null },
     { id: 12, name: '12 hours', color: null }, { id: 24, name: '24 hours', color: null },
@@ -1019,6 +1020,17 @@
     }
   }
 
+  async function saveHistorySpan(months: HistorySpan) {
+    note = null;
+    try {
+      settings = await setSetting('historySpan', months);
+      onsettingschange?.(settings);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
   async function saveStartOnLogin(mode: StartOnLogin) {
     note = null;
     try {
@@ -1182,6 +1194,20 @@
       <p class="hint">
         Not less than {floorMinutes} minute{floorMinutes === 1 ? '' : 's'} — Google's quota is
         finite, and a desktop app has no business polling faster.
+      </p>
+
+      <div class="row section-start">
+        <span class="lab" aria-hidden="true">Keep history</span>
+        <div class="inline">
+          <ListPicker compact noDot label="Keep history" choices={HISTORY_SPANS}
+            value={settings?.historySpan ?? 24} disabled={!settings}
+            onpick={(months) => saveHistorySpan((months ?? 24) as HistorySpan)} />
+        </div>
+      </div>
+      <p class="hint">
+        How far back events are fetched. A year ahead is kept either way.
+        A longer span downloads more of a calendar when it changes, which
+        takes longer on a large one, including after a CalDAV save.
       </p>
 
       <div class="row section-start">

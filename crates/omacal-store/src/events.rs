@@ -671,6 +671,11 @@ pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec
     Ok(rows.iter().map(row_to_event).collect())
 }
 
+/// Masters are not date-bounded here. A series' own start says nothing about
+/// when it still occurs, and a long history keeps every series that ever
+/// did. `omacal_core::recur::expand` skips a rule that has already ended, so
+/// a view of today does not re-expand those; an open-ended series still
+/// expands, because it still occurs.
 pub async fn events_in_window(
     pool: &SqlitePool,
     from_ms: i64,
@@ -685,9 +690,10 @@ pub async fn events_in_window(
            AND (e.recurrence IS NOT NULL
                 OR (e.start_utc < ?2 AND e.end_utc > ?1)
                 OR (e.recurring_event_id IS NOT NULL
-                    AND e.original_start_utc >= ?1
-                    AND e.original_start_utc < ?2))
-         ORDER BY e.start_utc"
+                    AND e.original_start_utc < ?2
+                    AND (e.original_start_utc >= ?1 OR {original_end} > ?1)))
+         ORDER BY e.start_utc",
+        original_end = crate::history::ORIGINAL_SLOT_END,
     );
     let rows = sqlx::query(&sql).bind(from_ms).bind(to_ms).fetch_all(pool).await?;
     Ok(rows.iter().map(row_to_event).collect())
@@ -1952,4 +1958,49 @@ mod tests {
         assert_eq!(account_email, "a@x",
             "must be account a's own email, not account b's merely sharing an id with cal_on_a");
     }
+    #[tokio::test]
+    async fn date_id_migration_recognizes_an_orphan_from_its_all_day_master() {
+        let pool = pool_migrated_below(21, 20).await;
+        let calendar = seed(&pool).await;
+        sqlx::query("UPDATE accounts SET provider='caldav'").execute(&pool).await.unwrap();
+        let mut master = ev(calendar, "series", 1_000, 2_000);
+        master.is_all_day = true;
+        upsert_event(&pool, &master).await.unwrap();
+        // The original DATE was moved to a timed DTSTART. The detached
+        // row is gone, and the notice describes the moved time.
+        sqlx::query("INSERT INTO event_changes(calendar_id,gid,series_gid,kind,is_all_day,old_start_utc,changed_at_ms)
+                     VALUES(?, 'series#1000', 'series', 'cancelled', 0, 3000, 0)")
+            .bind(calendar).execute(&pool).await.unwrap();
+        apply_migration(&pool, 21).await;
+        let gids: Vec<String> = sqlx::query_scalar("SELECT gid FROM caldav_recurrence_dates")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(gids, ["series#1000"]);
+    }
+
+    /// Exercise the new migration on the actual preceding schema, including
+    /// main's 0019, rather than replaying SQL over a fully migrated database.
+    #[tokio::test]
+    async fn history_migration_0020_preserves_existing_choices() {
+        for (has_calendar, chosen, expected) in [
+            (true, None, Some("6")), (false, None, None),
+            (true, Some("60"), Some("60")), (false, Some("0"), Some("0")),
+        ] {
+            let pool = pool_migrated_below(20, 19).await;
+            if has_calendar { seed(&pool).await; }
+            if let Some(value) = chosen {
+                sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months', ?1)")
+                    .bind(value).execute(&pool).await.unwrap();
+            }
+            apply_migration(&pool, 20).await;
+            let value: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key = 'history_span_months'"
+            ).fetch_optional(&pool).await.unwrap();
+            assert_eq!(value.as_deref(), expected);
+        }
+        let fresh = crate::connect_memory().await.unwrap();
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success AND version <= 20")
+            .fetch_one(&fresh).await.unwrap();
+        assert_eq!(versions, 20);
+    }
+
 }

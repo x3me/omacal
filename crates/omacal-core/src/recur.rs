@@ -109,14 +109,231 @@ fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
 /// How many civil days an all-day series' occurrences span, read off the
 /// master's own two dates in the series' zone, never off its length in
 /// milliseconds. At least one: an all-day event covers its day.
-fn all_day_span_days(series: &Series) -> u64 {
+fn all_day_span_days(start: i64, end: i64, tz: &str) -> u64 {
     let date = |ms: i64| {
-        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, series.dtstart_tz), "%Y-%m-%d").ok()
+        chrono::NaiveDate::parse_from_str(&date_in_zone(ms, tz), "%Y-%m-%d").ok()
     };
-    match (date(series.dtstart_ms), date(series.dtstart_ms + series.duration_ms)) {
+    match (date(start), date(end)) {
         (Some(first), Some(end)) => (end - first).num_days().max(1) as u64,
         _ => 1,
     }
+}
+
+/// The end of this particular all-day slot in the series' own calendar zone.
+pub fn all_day_slot_end(master_start: i64, master_end: i64, tz: &str, slot: i64) -> Option<i64> {
+    let date: chrono::NaiveDate = date_in_zone(slot, tz).parse().ok()?;
+    let days = all_day_span_days(master_start, master_end, tz);
+    let end = date.checked_add_days(chrono::Days::new(days))?;
+    Some(midnight_in_zone(end, tz.parse().unwrap_or(chrono_tz::UTC)))
+}
+
+const DAY_MS: i64 = 24 * 3_600_000;
+
+/// Whether every rule in `recurrence` has finished before `from_ms`, so
+/// expanding it cannot produce an occurrence in the window.
+///
+/// False — expand as usual — when any line is an `RDATE` (it can add a date
+/// the rule itself has passed), when any rule has no `UNTIL`, or when that
+/// `UNTIL` cannot be read. `COUNT` is not a date: a `BYxxx` rule can be far
+/// sparser than one occurrence per period, and guessing its last instant
+/// drops a series that is still running. rrule stops at the count itself.
+fn rule_ended_before(recurrence: &[String], _dtstart_ms: i64, from_ms: i64, duration_ms: i64) -> bool {
+    if recurrence.iter().any(|line| {
+        let t = line.trim();
+        t.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("RDATE"))
+    }) {
+        return false;
+    }
+    let horizon = from_ms.saturating_sub(duration_ms.max(0));
+    let mut saw_rule = false;
+    for line in recurrence {
+        let upper = line.to_ascii_uppercase();
+        if !upper.contains("RRULE") {
+            continue;
+        }
+        saw_rule = true;
+        // Two days of slack: a floating or date-only UNTIL is a local day,
+        // and the last zone on earth ends it well after UTC midnight.
+        if !upper.contains("UNTIL=") {
+            return false;
+        }
+        let until_ended = match until_ms(&upper) {
+            Some(until) => until.saturating_add(2 * DAY_MS) < horizon,
+            None => false,
+        };
+        if !until_ended {
+            return false;
+        }
+    }
+    saw_rule
+}
+
+fn until_ms(upper: &str) -> Option<i64> {
+    let token = upper.split([';', ':']).find_map(|part| part.strip_prefix("UNTIL="))?.trim();
+    if token.len() < 8 {
+        return None;
+    }
+    let y: i16 = token.get(0..4)?.parse().ok()?;
+    let m: i8 = token.get(4..6)?.parse().ok()?;
+    let d: i8 = token.get(6..8)?.parse().ok()?;
+    let date = jiff::civil::Date::new(y, m, d).ok()?;
+    let (hh, mm, ss) = if token.len() >= 15 && token.as_bytes().get(8) == Some(&b'T') {
+        (token.get(9..11)?.parse().ok()?, token.get(11..13)?.parse().ok()?, token.get(13..15)?.parse().ok()?)
+    } else {
+        (0, 0, 0)
+    };
+    let time = jiff::civil::Time::new(hh, mm, ss, 0).ok()?;
+    date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_millisecond())
+}
+
+fn rule_set(mut source: String, recurrence: &[String]) -> Result<RRuleSet, RecurError> {
+    for line in recurrence {
+        source.push('\n');
+        source.push_str(&with_iana_tzid(line.trim()));
+    }
+
+    RRuleSet::from_str(&source)
+        .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))
+}
+
+/// Older CalDAV ledgers kept only a UTC slot. When the installed timezone
+/// rules have changed, the bundled rules can still identify an exact midnight.
+pub fn legacy_date_id(slot_ms: i64, tz: &str) -> Option<chrono::NaiveDate> {
+    let zone = tz.parse().ok()?;
+    let date = to_chrono(slot_ms).ok()?.with_timezone(&zone).date_naive();
+    (midnight_in_zone(date, zone) == slot_ms).then_some(date)
+}
+
+/// BYSETPOS selects positions within one interval of the rule's frequency.
+fn position_period(rule: &rrule::RRule, civil: chrono::DateTime<Tz>) -> i64 {
+    use chrono::Datelike;
+    use rrule::Frequency::*;
+
+    match rule.get_freq() {
+        Yearly => i64::from(civil.year()),
+        Monthly => i64::from(civil.year()) * 12 + i64::from(civil.month0()),
+        Weekly => i64::from(civil.date_naive().week(rule.get_week_start()).first_day().num_days_from_ce()),
+        Daily => civil.timestamp().div_euclid(86_400),
+        Hourly => civil.timestamp().div_euclid(3600),
+        Minutely => civil.timestamp().div_euclid(60),
+        Secondly => civil.timestamp(),
+    }
+}
+
+/// Build the iterator in civil coordinates. Date-based rules retain the
+/// authored date and clock defaults. A subdaily interval starts ticking at
+/// the resolved DTSTART, including when a gap has advanced it.
+fn civil_rule_set(
+    text: &str,
+    start: jiff::civil::DateTime,
+    first_wall: jiff::civil::DateTime,
+    native_count: Option<u32>,
+) -> Option<RRuleSet> {
+    use rrule::Frequency::{Hourly, Minutely, Secondly};
+
+    let mut rule = text.parse::<rrule::RRule<rrule::Unvalidated>>().ok()?;
+    if let Some(n) = native_count { rule = rule.count(n); }
+    // Keep every selected time in the first subdaily period available for
+    // instant comparison, including explicit BYMINUTE/BYSECOND values.
+    let (defaults, seed) = match rule.get_freq() {
+        Hourly if start != first_wall => (first_wall, first_wall.date().at(first_wall.hour(), 0, 0, 0)),
+        Minutely if start != first_wall => (first_wall, first_wall.date().at(first_wall.hour(), first_wall.minute(), 0, 0)),
+        Secondly if start != first_wall => (first_wall, first_wall),
+        _ => (start, start),
+    };
+    let coordinate = |wall| to_chrono(jiff::tz::TimeZone::UTC.to_timestamp(wall).ok()?.as_millisecond()).ok();
+    Some(RRuleSet::new(coordinate(seed)?).rrule(rule.validate(coordinate(defaults)?).ok()?))
+}
+
+/// Test a CalDAV rule on the provider's clock. The recurrence iterator selects
+/// civil dates in UTC coordinates. Resolve them under the provider's zone
+/// before applying any count affected by a clock change (RFC 5545 EID 4271).
+pub fn civil_rule_starts_at(
+    start: jiff::civil::DateTime,
+    zone: &jiff::tz::TimeZone,
+    rule: &str,
+    count: Option<u32>,
+    slot: jiff::Timestamp,
+) -> bool {
+    let utc = jiff::tz::TimeZone::UTC;
+    let Ok(first) = zone.to_timestamp(start) else { return false };
+    let wall = zone.to_datetime(slot);
+    if slot < first || zone.to_timestamp(wall).ok() != Some(slot) {
+        return false;
+    }
+    let Ok(target) = utc.to_timestamp(wall) else { return false };
+    let fixed = zone.to_fixed_offset().is_ok();
+    let first_wall = zone.to_datetime(first);
+    // On a fixed clock rrule can stop generating a period as soon as COUNT runs out.
+    let Some(set) = civil_rule_set(rule, start, first_wall, count.filter(|_| fixed)) else { return false };
+    if fixed {
+        let Ok(target) = to_chrono(target.as_millisecond()) else { return false };
+        return !set.after(target).before(target).all(1).dates.is_empty();
+    }
+    let set = set.limit();
+    let Some(rule) = set.get_rrule().first() else { return false };
+    let resolve = |civil: chrono::DateTime<Tz>| {
+        let coordinate = jiff::Timestamp::from_millisecond(civil.timestamp_millis()).ok()?;
+        zone.to_timestamp(utc.to_datetime(coordinate)).ok()
+    };
+    let mut candidates = (&set).into_iter()
+        .take_while(|d| d.timestamp_millis() <= target.as_millisecond())
+        .peekable();
+
+    let mut remaining = count.map_or(usize::MAX, |n| n as usize);
+    let mut instants = std::collections::BTreeSet::new();
+    let Ok(first_coordinate) = utc.to_timestamp(first_wall) else { return false };
+    if first_wall != start && rule.get_freq() < rrule::Frequency::Hourly {
+        // A series starting at 02:30 in a gap starts at 03:30. Its 02:45
+        // candidate is later than DTSTART. A real 03:45 candidate, if the
+        // rule also emits one, identifies that same meeting. Collect both
+        // spellings in instant order before spending COUNT.
+        let mut through = first_coordinate;
+        while let Some(d) = candidates.next_if(|d| d.timestamp_millis() <= through.as_millisecond()) {
+            if let Some(instant) = resolve(d).filter(|&t| t >= first) {
+                let Ok(wall) = utc.to_timestamp(zone.to_datetime(instant)) else { return false };
+                // Include the ordinary wall time of every shifted candidate.
+                through = through.max(wall);
+                instants.insert(instant);
+            }
+        }
+        if instants.iter().take(remaining).any(|&instant| instant == slot) {
+            return true;
+        }
+        remaining = remaining.saturating_sub(instants.len());
+    }
+    // The first subdaily period may contain explicit minute or second
+    // positions before DTSTART's displayed clock time. Keep each position
+    // whose provider instant is at or after DTSTART, as the renderer does.
+    let candidates = candidates.filter(|d| {
+        d.timestamp_millis() >= first_coordinate.as_millisecond()
+            || resolve(*d).is_some_and(|instant| instant >= first)
+    });
+    if count.is_none() || rule.get_by_set_pos().len() < 2 {
+        // An earlier civil date cannot map to this slot under any provider
+        // offset. Avoid a zone lookup for each date in a long-running series.
+        let earliest = slot.as_millisecond() + i64::from(jiff::tz::Offset::MIN.seconds()) * 1000;
+        return candidates.take(remaining).any(|d| d.timestamp_millis() >= earliest && resolve(d) == Some(slot));
+    }
+
+    // rrule sorts and deduplicates selected positions within each period
+    // before consuming COUNT. A gap can change their order or make distinct
+    // wall times coincide, so do this part on the provider's actual instants.
+    let mut candidates = candidates.peekable();
+    while remaining > 0 {
+        let Some(candidate) = candidates.next() else { break };
+        let period = position_period(rule, candidate);
+        instants.clear();
+        instants.extend(resolve(candidate));
+        while let Some(next) = candidates.next_if(|d| position_period(rule, *d) == period) {
+            instants.extend(resolve(next));
+        }
+        if instants.iter().take(remaining).any(|&instant| instant == slot) {
+            return true;
+        }
+        remaining = remaining.saturating_sub(instants.len());
+    }
+    false
 }
 
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
@@ -149,15 +366,16 @@ pub fn expand(
         return Ok(Expansion { intervals, truncated: false });
     }
 
-    let mut source = String::with_capacity(128);
-    source.push_str(&dtstart);
-    for line in series.recurrence {
-        source.push('\n');
-        source.push_str(&with_iana_tzid(line.trim()));
+    // A long history keeps every series that ever occurred. Expanding each of
+    // them on a view of today is the cost that grows with the span, and a
+    // rule that has already ended cannot overlap the window. Open-ended
+    // series still expand — their own dates never say they stopped — and an
+    // RDATE can land after UNTIL, so that line is never skipped.
+    if rule_ended_before(series.recurrence, series.dtstart_ms, from_ms, series.duration_ms) {
+        return Ok(Expansion { intervals: Vec::new(), truncated: false });
     }
 
-    let set = RRuleSet::from_str(&source)
-        .map_err(|e| RecurError::InvalidRule(format!("{e}: {source}")))?;
+    let set = rule_set(dtstart, series.recurrence)?;
 
     // Widen the query by the event duration so an occurrence that started
     // before the window but is still running is not dropped.
@@ -167,7 +385,7 @@ pub fn expand(
         .before(to_chrono(to_ms)?)
         .all(limit);
 
-    let span_days = all_day_span_days(series);
+    let span_days = all_day_span_days(series.dtstart_ms, series.dtstart_ms.saturating_add(series.duration_ms), series.dtstart_tz);
     let intervals = result
         .dates
         .into_iter()
@@ -636,4 +854,141 @@ mod tests {
             assert_eq!(with_iana_tzid(kept), kept);
         }
     }
+
+    /// A long history keeps series that ended years ago. A view of today must
+    /// not expand them: the rule cannot produce an occurrence in the window.
+    #[test]
+    fn a_series_that_ended_before_the_window_expands_to_nothing() {
+        let day = 24 * 3_600_000;
+        // 1990-01-01T00:00:00Z.
+        let start = 631_152_000_000;
+        let until = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: 3_600_000,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;UNTIL=19901231T000000Z"]),
+        };
+        let now = 1_786_341_600_000; // 2026
+        let out = expand(&until, now, now + 7 * day, 512).unwrap();
+        assert!(out.intervals.is_empty());
+        assert!(!out.truncated, "an ended series is finished, not cut short");
+
+        let count = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: 3_600_000,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;COUNT=10"]),
+        };
+        assert!(expand(&count, now, now + 7 * day, 512).unwrap().intervals.is_empty());
+
+        // The same COUNT, asked while it is still running, is unaffected.
+        let during = expand(&count, start, start + 5 * day, 50).unwrap();
+        assert!(!during.intervals.is_empty());
+        assert_eq!(during.intervals.len(), 5);
+    }
+
+    /// `COUNT` with a `BYxxx` part is sparser than one occurrence per period.
+    /// Guessing the last instant from `FREQ` ends the series early and the
+    /// later occurrences vanish. rrule expands them; it stops at the count.
+    #[test]
+    fn a_sparse_count_rule_still_expands() {
+        fn utc(y: i16, m: i8, d: i8, hh: i8) -> i64 {
+            jiff::civil::date(y, m, d)
+                .at(hh, 0, 0, 0)
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .unwrap()
+                .timestamp()
+                .as_millisecond()
+        }
+
+        // Ten Mondays. A window over Mondays 6–10 is five occurrences; a
+        // one-day-per-count estimate would have ended the series in week 3.
+        let start = MON_0900_SOFIA;
+        let mondays = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=DAILY;BYDAY=MO;COUNT=10"]),
+        };
+        let from = start + 5 * 7 * DAY;
+        let to = start + 10 * 7 * DAY;
+        let out = expand(&mondays, from, to, 64).unwrap();
+        assert_eq!(out.intervals.len(), 5, "Mondays 6 through 10");
+        assert!(!out.truncated);
+
+        // Monthly on the 31st skips the short months, so the sixth lands in
+        // October, past a one-month-per-count estimate.
+        let start = utc(2026, 1, 31, 9);
+        let month_end = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=MONTHLY;BYMONTHDAY=31;COUNT=6"]),
+        };
+        let out = expand(&month_end, utc(2026, 10, 31, 0), utc(2026, 11, 1, 0), 32).unwrap();
+        assert_eq!(out.intervals.len(), 1, "31 October is the sixth 31st");
+
+        // Yearly on 29 February. The third leap day is eight years on, past
+        // an estimate of one year per count.
+        let start = utc(2024, 2, 29, 9);
+        let leap = Series {
+            dtstart_ms: start,
+            dtstart_tz: "UTC",
+            duration_ms: HOUR,
+            is_all_day: false,
+            recurrence: &weekly(&["RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=3"]),
+        };
+        let out = expand(&leap, utc(2032, 2, 29, 0), utc(2032, 3, 1, 0), 16).unwrap();
+        assert_eq!(out.intervals.len(), 1, "29 February 2032 is the third");
+    }
+
+    /// An RDATE can sit after UNTIL. Skipping on the rule alone would drop it.
+    #[test]
+    fn an_rdate_after_until_is_not_treated_as_ended() {
+        let lines = weekly(&[
+            "RRULE:FREQ=DAILY;UNTIL=19900102T000000Z",
+            "RDATE:20260810T090000Z",
+        ]);
+        assert!(
+            !rule_ended_before(&lines, 631_152_000_000, 1_786_341_600_000, 3_600_000),
+            "an RDATE is another way for the series to occur"
+        );
+    }
+
+    /// Server recurrence text is not necessarily ASCII, or even a valid date.
+    /// Both the shortcut and the public expansion path must reject it safely.
+    #[test]
+    fn malformed_until_never_panics() {
+        for token in ["202É0101", "20260É01", "2026010É", "20260101T0É0000Z",
+                      "20260101T000É00Z", "20260101T00000ÉZ", "2026", "",
+                      "YYYYMMDD", "20260230", "20261301", "20261231T256000Z"] {
+            let line = format!("RRULE:FREQ=DAILY;UNTIL={token}");
+            assert_eq!(until_ms(&line), None, "{line}");
+            let recurrence = vec![line];
+            let series = Series { dtstart_ms: MON_0900_SOFIA, dtstart_tz: "UTC",
+                duration_ms: HOUR, is_all_day: false, recurrence: &recurrence };
+            let _ = expand(&series, MON_0900_SOFIA, MON_0900_SOFIA + DAY, 32);
+        }
+    }
+
+    #[test]
+    fn until_must_be_its_own_rule_part() {
+        assert_eq!(until_ms("RRULE:FREQ=DAILY;X-UNTIL=20010101"), None);
+        assert_eq!(until_ms("RRULE:FREQ=DAILY;X-UNTIL=20010101;UNTIL=20261123"),
+                   until_ms("RRULE:UNTIL=20261123;FREQ=DAILY"));
+    }
+
+    #[test]
+    fn a_non_ascii_recurrence_prefix_never_panics() {
+        let recurrence = vec!["RRULÉ:FREQ=DAILY;COUNT=1".into()];
+        assert!(!rule_ended_before(&recurrence, MON_0900_SOFIA, MON_0900_SOFIA, HOUR));
+        let series = Series { dtstart_ms: MON_0900_SOFIA, dtstart_tz: "UTC",
+            duration_ms: HOUR, is_all_day: false, recurrence: &recurrence };
+        let _ = expand(&series, MON_0900_SOFIA, MON_0900_SOFIA + DAY, 32);
+    }
+
 }

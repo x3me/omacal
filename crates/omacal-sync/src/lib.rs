@@ -86,7 +86,45 @@ pub async fn window_advanced_a_day(
         };
     match stored {
         None => true,
-        Some(end) => end.div_euclid(DAY) < window_end_ms.div_euclid(DAY),
+        // `!=`, not `<`: an end that moves either way is a different window.
+        // Coming back still has to fetch what is in range now.
+        Some(end) => end.div_euclid(DAY) != window_end_ms.div_euclid(DAY),
+    }
+}
+
+/// Whether this calendar must take the full-window fetch rather than trust
+/// its cursor.
+///
+/// The end moving is [`window_advanced_a_day`]. The start moving *earlier*
+/// is the other half: a longer history reaches events the cursor will never
+/// mention, and the end — a year ahead, for every span — did not move. A
+/// start that moved later is not a reason to fetch. Those rows are already
+/// local, and shortening the span drops them itself.
+pub async fn window_needs_refetch(
+    pool: &SqlitePool,
+    calendar_id: i64,
+    window_start_ms: i64,
+    window_end_ms: i64,
+) -> bool {
+    if window_advanced_a_day(pool, calendar_id, window_end_ms).await {
+        return true;
+    }
+    const DAY: i64 = 24 * 3_600_000;
+    let stored: Option<i64> =
+        match sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = ?1")
+            .bind(calendar_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row.flatten(),
+            Err(e) => {
+                tracing::warn!(calendar_id, %e, "could not read the fetched window");
+                return false;
+            }
+        };
+    match stored {
+        None => true,
+        Some(start) => window_start_ms.div_euclid(DAY) < start.div_euclid(DAY),
     }
 }
 
@@ -126,10 +164,10 @@ pub async fn sync_calendar(
     // not set it would pull everything and still leave a row deleted upstream
     // sitting in the store. Only when a token was actually discarded: a first
     // sync has no token and no local rows for the sweep to find.
-    let dropped_for_window =
-        stored_token.is_some() && window_advanced_a_day(pool, calendar_id, window_end_ms).await;
+    let dropped_for_window = stored_token.is_some()
+        && window_needs_refetch(pool, calendar_id, window_start_ms, window_end_ms).await;
     if dropped_for_window {
-        tracing::info!(calendar_id, "window advanced a day; full fetch rather than incremental");
+        tracing::info!(calendar_id, "synced window changed; full fetch rather than incremental");
     }
     let mut token = if dropped_for_window { None } else { stored_token };
     let mut did_full_resync = dropped_for_window;
@@ -140,7 +178,7 @@ pub async fn sync_calendar(
         {
             Ok((next, changes)) => {
                 return apply(pool, calendar_id, changes, next.as_deref(),
-                             window_start_ms, window_end_ms, did_full_resync).await;
+                             window_start_ms, window_end_ms, token.is_some(), did_full_resync).await;
             }
             Err(ApiError::SyncTokenInvalid) if token.is_some() => {
                 tracing::warn!(calendar_id, "sync token rejected, falling back to full resync");
@@ -179,6 +217,7 @@ async fn apply(
     next_token: Option<&str>,
     window_start_ms: i64,
     window_end_ms: i64,
+    incremental: bool,
     did_full_resync: bool,
 ) -> anyhow::Result<SyncOutcome> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -261,6 +300,10 @@ async fn apply(
         }
     }
 
+    let window_start_ms = omacal_store::history::retain_current_history(
+        &mut tx, calendar_id, window_start_ms, outcome.upserted > 0 || outcome.deleted > 0,
+    ).await?;
+
     // COALESCE, not a plain assignment: a page can legitimately end without a
     // `nextSyncToken`, and overwriting a good token with NULL would silently
     // downgrade every later sync to a full window fetch.
@@ -269,13 +312,15 @@ async fn apply(
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (calendar_id) DO UPDATE SET
              sync_token = COALESCE(excluded.sync_token, sync_state.sync_token),
-             window_start = excluded.window_start,
+             window_start = CASE WHEN ?5 THEN max(COALESCE(sync_state.window_start, excluded.window_start),
+                                                  excluded.window_start) ELSE excluded.window_start END,
              window_end = excluded.window_end",
     )
     .bind(calendar_id)
     .bind(next_token)
     .bind(window_start_ms)
     .bind(window_end_ms)
+    .bind(incremental)
     .execute(&mut *tx)
     .await?;
     if first_sync {
@@ -356,7 +401,7 @@ mod tests {
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn seeded_pool() -> sqlx::SqlitePool {
+    pub(super) async fn seeded_pool() -> sqlx::SqlitePool {
         let pool = omacal_store::connect_memory().await.unwrap();
         sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
             .execute(&pool).await.unwrap();
@@ -507,6 +552,15 @@ mod tests {
 
         // The next day, once.
         assert!(window_advanced_a_day(&pool, 1, 11 * DAY).await);
+        // And a window that comes back is moved too.
+        assert!(window_advanced_a_day(&pool, 1, 9 * DAY).await);
+
+        // A longer history moves the *start* earlier without touching the
+        // end. The cursor will not mention those older events.
+        assert!(window_needs_refetch(&pool, 1, -DAY, 10 * DAY + 3_600_000).await);
+        // A shorter one does not. The rows that fell out are dropped locally.
+        assert!(!window_needs_refetch(&pool, 1, DAY, 10 * DAY + 3_600_000).await);
+        assert!(!window_needs_refetch(&pool, 1, 0, 10 * DAY + 3_600_000).await);
 
         // A feed records no window at all (migration 0017 made the columns
         // nullable); it fetches its file whole, so the answer is moot but must
@@ -1111,4 +1165,104 @@ mod tests {
             "the incremental query string changed — every stored sync token is now stale"
         );
     }
+
+    #[tokio::test]
+    async fn an_ordinary_google_sync_keeps_cached_history_on_a_migrated_install() {
+        let pool = seeded_pool().await;
+        let now = 1_700_000_000_000;
+        let (start, end) = omacal_store::history::history_window(now, 6);
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('history_span_months','6')")
+            .execute(&pool).await.unwrap();
+        omacal_store::upsert_event(&pool, &stored("cached", start - 2, start - 1)).await.unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/calendars/primary/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(one_event_body("token")))
+            .mount(&server).await;
+        let client = CalendarClient::new(server.uri(), "access");
+        sync_calendar(&pool, &client, 1, "primary", start, end).await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE google_id = 'cached'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(cached, 1);
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(recorded, start);
+    }
+
+    #[tokio::test]
+    async fn an_incremental_fetch_cannot_claim_to_have_refilled_pruned_history() {
+        let pool = seeded_pool().await;
+        let now = 1_786_341_600_000;
+        let (wide, end) = omacal_store::history::history_window(now, 24);
+        sqlx::query("INSERT INTO sync_state (calendar_id,sync_token,window_start,window_end)
+                     VALUES (1,'old',?1,?2)").bind(wide).bind(end).execute(&pool).await.unwrap();
+        let later = now + 120_000;
+        let (short, _) = omacal_store::history::history_window(later, 6);
+        omacal_store::history::set_span(&pool, 6, later).await.unwrap();
+        omacal_store::history::set_span(&pool, 24, later).await.unwrap();
+        // A token-based fetch started before either setting change. Only a
+        // full response can fill the gap the shrink deleted.
+        apply(&pool, 1, vec![], Some("new"), wide, end, true, false).await.unwrap();
+        let start: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id=1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(start, short);
+        assert!(window_needs_refetch(&pool, 1, wide, end).await);
+    }
+
+    /// A history change can commit after the HTTP fetch and before apply.
+    /// Feed that exact interleaving to the real transaction, including rows
+    /// that must survive the shorter span (a master and a moved exception).
+    #[tokio::test]
+    async fn a_google_fetch_cannot_undo_a_history_shrink() {
+        let pool = seeded_pool().await;
+        const DAY: i64 = 86_400_000;
+        // The event ends one minute into the gap between fetch and shrink.
+        let event_end = "2000-01-01T10:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let now = event_end + 180 * DAY - 60_000;
+        let later = now + 120_000;
+        let floor = later - 180 * DAY;
+        let old = stored("old", event_end - 3_600_000, event_end);
+        let recent = stored("recent", now, now + 3_600_000);
+        let mut master = old.clone();
+        master.google_id = "master".into();
+        master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        let mut exception = old.clone();
+        exception.google_id = "exception".into();
+        exception.recurring_event_id = Some("master".into());
+        exception.original_start_utc = Some(now);
+        omacal_store::history::set_span(&pool, 6, later).await.unwrap();
+        apply(&pool, 1, vec![old, recent, master, exception].into_iter()
+            .map(|r| Change::Upsert(Box::new(r))).collect(), Some("after"),
+            -2_208_988_800_000, now + 365 * DAY, false, true).await.unwrap();
+        let ids: Vec<String> = sqlx::query_scalar("SELECT google_id FROM events ORDER BY google_id")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(ids, ["exception", "master", "recent"]);
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert!(recorded >= floor, "the recorded start cannot move behind the shrink");
+    }
+    #[tokio::test]
+    async fn a_changed_old_google_event_stays_out_of_search_after_shrinking() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200)
+            .set_body_json(one_event_body("token"))).mount(&server).await;
+        let client = CalendarClient::new(server.uri(), "access");
+        let pool = seeded_pool().await;
+        let now = "2027-08-10T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let (wide, end) = omacal_store::history::history_window(now, 24);
+        let (short, _) = omacal_store::history::history_window(now, 6);
+        sync_calendar(&pool, &client, 1, "primary", wide, end).await.unwrap();
+        assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1);
+        omacal_store::history::set_span(&pool, 6, now).await.unwrap();
+        sync_calendar(&pool, &client, 1, "primary", short + 1000, end + 1000).await.unwrap();
+        assert!(omacal_store::search_events(&pool, "Standup").await.unwrap().is_empty());
+        assert!(server.received_requests().await.unwrap()[1].url.query().unwrap().contains("syncToken=token"));
+
+        omacal_store::history::set_span(&pool, 24, now).await.unwrap();
+        let fetch = || sync_calendar(&pool, &client, 1, "primary", wide, end);
+        assert!(fetch().await.unwrap().did_full_resync);
+        assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1);
+        assert_eq!(omacal_store::history::displayed_window(&pool, (wide, end)).await.unwrap(), (wide, end));
+        assert!(!fetch().await.unwrap().did_full_resync, "the restored range is now incremental");
+    }
+
 }

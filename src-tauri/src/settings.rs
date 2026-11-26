@@ -142,6 +142,12 @@ pub(crate) const COMBINE_IDENTICAL_EVENTS_KEY: &str = "combine_identical_events"
 const SHOW_DECLINED_EVENTS_KEY: &str = "show_declined_events";
 /// The saved calendar groups, one JSON array (see [`CalendarGroup`]).
 const CALENDAR_GROUPS_KEY: &str = "calendar_groups";
+pub(crate) use omacal_store::history::{
+    HISTORY_SPAN_KEY, HISTORY_SPANS, DEFAULT_HISTORY_MONTHS,
+};
+pub(crate) use omacal_store::history::history_window;
+#[cfg(test)]
+pub(crate) use omacal_store::history::SPAN_6_MONTHS;
 
 /// The boot fast-path beside the database: `main()` must export `TZ` before
 /// GTK and the webview initialise — both capture the zone at process start —
@@ -554,6 +560,11 @@ pub struct AppSettings {
     /// say what the minimum is in order to refuse a smaller one with a reason,
     /// and a second copy of the number in TypeScript is one that drifts.
     pub min_sync_interval_ms: i64,
+    /// How far back events are kept, in months. One of [`HISTORY_SPANS`]:
+    /// 6, 24 (two years), 60 (five years), or 0 for everything back to 1900.
+    /// Ahead is a year either way. Absent reads as two years; an install
+    /// that already has a calendar keeps six (migration 0020).
+    pub history_span: i64,
     /// Whether Day, Week and Month draw as a list rather than a grid — the
     /// filmstrip toggle (filmstrip spec §4).
     ///
@@ -1015,6 +1026,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // so a stray value keeps today's behaviour.
         keep_reminders_on_screen: read(pool, KEEP_REMINDERS_KEY).await.as_deref() == Some("1"),
         min_sync_interval_ms: crate::sync_loop::MIN_INTERVAL_MS,
+        history_span: history_months(pool).await,
         // **The grid is what a calendar looks like until somebody says
         // otherwise**, so the absent row reads as off — the opposite polarity
         // to `notifications_enabled` above, and for the opposite reason. A
@@ -1607,6 +1619,20 @@ async fn visible_hours(pool: &SqlitePool) -> (u8, u8) {
     }).unwrap_or((0, 24))
 }
 
+/// The stored span, or [`DEFAULT_HISTORY_MONTHS`] when the row is absent or
+/// not one of [`HISTORY_SPANS`]. A stray value must not widen anyone's sync.
+pub(crate) async fn history_months(pool: &SqlitePool) -> i64 {
+    read(pool, HISTORY_SPAN_KEY)
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|v| HISTORY_SPANS.contains(v))
+        .unwrap_or(DEFAULT_HISTORY_MONTHS)
+}
+
+/// What the user is told when a history span is not one of the four.
+pub(crate) const HISTORY_SPAN_UNOFFERED: &str =
+    "Choose 6 months, 2 years, 5 years, or everything.";
+
 /// Display grouping is opt-in and never changes the stored calendar events.
 pub(crate) async fn combine_identical_events(pool: &SqlitePool) -> bool {
     read(pool, COMBINE_IDENTICAL_EVENTS_KEY).await.as_deref() == Some("1")
@@ -1686,6 +1712,9 @@ pub enum Setting {
     /// Refused below the floor. `sync_loop::interval_ms` still clamps on the
     /// way *out*, because a row edited by hand never passed through here.
     SyncIntervalMs(i64),
+    /// One of [`HISTORY_SPANS`]. Anything else is refused, and a row that is
+    /// not one of them reads back as two years.
+    HistorySpan(i64),
     /// The convenience clock beside the real one; `None`/blank turns it off.
     /// Validated against jiff, as the display zone is. **No restart**, unlike
     /// the display zone (which keeps its own command for that reason):
@@ -1914,6 +1943,12 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
                 return Err(refused(INTERVAL_TOO_SHORT));
             }
             write(pool, SYNC_INTERVAL_KEY, &ms.to_string()).await?;
+        }
+        S::HistorySpan(months) => {
+            if !HISTORY_SPANS.contains(months) {
+                return Err(refused(HISTORY_SPAN_UNOFFERED));
+            }
+            omacal_store::history::set_span(pool, *months, crate::now_ms()).await?;
         }
         S::SecondTimezone(tz) => {
             let tz = validate_second_timezone(tz.clone()).map_err(SetError::Refused)?;
@@ -2176,8 +2211,21 @@ pub async fn set_setting(
     state: tauri::State<'_, AppState>,
     setting: Setting,
 ) -> Result<AppSettings, String> {
-    store(&state.pool, &setting).await.map_err(SetError::shown)?;
-    apply(&app, &state, &setting).await;
+    if let Setting::HistorySpan(months) = setting {
+        // Serialize the database commit and its runtime update. Two windows
+        // saving at once must leave both using the same span.
+        let mut current = state.history_months.lock().await;
+        store(&state.pool, &setting).await.map_err(SetError::shown)?;
+        let previous = std::mem::replace(&mut *current, months);
+        drop(current);
+        let now = crate::now_ms();
+        if history_window(now, months).0 < history_window(now, previous).0 {
+            crate::sync_loop::SyncRequest::WiderHistory.request(&app);
+        }
+    } else {
+        store(&state.pool, &setting).await.map_err(SetError::shown)?;
+        apply(&app, &state, &setting).await;
+    }
     Ok(read_settings(&state.pool).await)
 }
 
@@ -2200,6 +2248,7 @@ mod tests {
             serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{v}: {e}"))
         };
         assert!(matches!(read(json!({"key": "syncIntervalMs", "value": 120000})), Setting::SyncIntervalMs(120_000)));
+        assert!(matches!(read(json!({"key": "historySpan", "value": 60})), Setting::HistorySpan(60)));
         assert!(matches!(read(json!({"key": "showDeclinedEvents", "value": true})), Setting::ShowDeclinedEvents(true)));
         assert!(matches!(read(json!({"key": "secondTimezone", "value": null})), Setting::SecondTimezone(None)));
         assert!(matches!(read(json!({"key": "defaultCalendarId", "value": 4})), Setting::DefaultCalendarId(Some(4))));
@@ -2462,6 +2511,7 @@ mod tests {
         let s = read_settings(&pool().await).await;
         assert!(!s.show_declined_events, "declined meetings stay out of sight until asked for");
         assert_eq!(s.sync_interval_ms, crate::sync_loop::DEFAULT_INTERVAL_MS);
+        assert_eq!(s.history_span, DEFAULT_HISTORY_MONTHS, "a fresh install keeps two years");
         assert!(s.notifications_enabled, "reminders must be on until turned off");
         assert!(s.task_notifications_enabled, "and so must a task's own announcement (#137)");
         assert_eq!(s.min_sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
@@ -2642,6 +2692,233 @@ mod tests {
         assert_eq!(read(&p, AUTOSTART_KEY).await, None);
         assert_eq!(start_on_login(&p).await, StartOnLogin::Off);
         assert!(!read_settings(&p).await.start_on_login_asked);
+    }
+
+    /// The four spans the form offers, and nothing else. A stray row reads as
+    /// two years, the fresh-install default — a value this version did not
+    /// write lands on the default rather than on a wider sync.
+    #[tokio::test]
+    async fn history_span_is_one_of_the_offered_values_and_a_stray_reads_as_two_years() {
+        let p = pool().await;
+        assert_eq!(HISTORY_SPANS, [6, 24, 60, 0]);
+        assert_eq!(read_settings(&p).await.history_span, 24, "absent is two years");
+
+        for months in HISTORY_SPANS {
+            let s = set(&p, Setting::HistorySpan(months)).await.unwrap();
+            assert_eq!(s.history_span, months);
+            assert_eq!(read(&p, HISTORY_SPAN_KEY).await, Some(months.to_string()));
+        }
+
+        let err = set(&p, Setting::HistorySpan(12)).await.unwrap_err();
+        assert_eq!(err, HISTORY_SPAN_UNOFFERED);
+        assert_eq!(read_settings(&p).await.history_span, 0, "a refusal stores nothing");
+
+        write(&p, HISTORY_SPAN_KEY, "999").await.unwrap();
+        assert_eq!(read_settings(&p).await.history_span, 24, "a stray row is the default");
+        write(&p, HISTORY_SPAN_KEY, "forever").await.unwrap();
+        assert_eq!(read_settings(&p).await.history_span, 24);
+    }
+
+    /// Each span's window. Ahead is a year for all of them. Six months stays
+    /// 180 days, which is the window sync already kept; everything starts at
+    /// 1900 and does not slide, while its end still does.
+    #[test]
+    fn each_history_span_has_one_window() {
+        const DAY: i64 = 24 * 3_600_000;
+        let now = 1_786_341_600_000_i64; // Mon 10 Aug 2026 09:00 Europe/Sofia
+        assert_eq!(history_window(now, 6), (now - 180 * DAY, now + 365 * DAY));
+        assert_eq!(history_window(now, 24), (now - 2 * 365 * DAY, now + 365 * DAY));
+        assert_eq!(history_window(now, 60), (now - 5 * 365 * DAY, now + 365 * DAY));
+        let (from, to) = history_window(now, 0);
+        assert_eq!(to, now + 365 * DAY, "ahead stays a year");
+        assert_eq!(omacal_sync::to_rfc3339(from), "1900-01-01T00:00:00Z");
+        assert_eq!(history_window(now, 0).0, history_window(now + 400 * DAY, 0).0, "the start does not slide");
+        assert_ne!(history_window(now, 0).1, history_window(now + 2 * DAY, 0).1, "the end still does");
+        assert_eq!(history_window(now, 999), history_window(now, 24), "a stray span is two years");
+        assert!(history_window(now, 6).0 < now && now < history_window(now, 6).1);
+    }
+
+    async fn shrink_calendar_and_feed() -> (SqlitePool, i64) {
+        const DAY: i64 = 86_400_000;
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at, provider)
+                     VALUES ('s','a',0,'google'), ('feed','b',0,'webcal')")
+            .execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                     VALUES (1,'primary','Work','UTC','owner'), (2,'feed','Feed','UTC','reader')")
+            .execute(&p).await.unwrap();
+        let edge = history_window(crate::now_ms(), 6).0.div_euclid(DAY) * DAY;
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc,
+                                         recurrence, recurring_event_id, original_start_utc,
+                                         status, start_tz, end_tz, updated_at) VALUES
+            (1,'old',?1,?1,NULL,NULL,NULL,'confirmed','UTC','UTC',0),
+            (2,'old',?1,?1,NULL,NULL,NULL,'confirmed','UTC','UTC',0),
+            (1,'series',?1,?2,'RRULE:FREQ=WEEKLY',NULL,NULL,'confirmed','UTC','UTC',0),
+            (1,'cancelled',?3,?3,NULL,'series',?3,'cancelled','UTC','UTC',0),
+            (1,'expired',?1,?1,NULL,'series',?1,'cancelled','UTC','UTC',0)")
+            .bind(edge - 8 * DAY).bind(edge - 5 * DAY).bind(edge - DAY)
+            .execute(&p).await.unwrap();
+
+        set(&p, Setting::HistorySpan(6)).await.unwrap();
+        (p, edge)
+    }
+
+    #[tokio::test]
+    async fn history_shrink_preserves_webcal_history() {
+        let (p, _) = shrink_calendar_and_feed().await;
+        set(&p, Setting::HistorySpan(24)).await.unwrap();
+        let calendars: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM events WHERE google_id = 'old'")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(calendars, [2], "only the windowed calendar should lose its old event");
+    }
+
+    #[tokio::test]
+    async fn history_shrink_does_not_report_local_removals_as_meeting_changes() {
+        let (p, _) = shrink_calendar_and_feed().await;
+        let changes: Vec<String> = sqlx::query_scalar("SELECT gid FROM event_changes")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(changes, ["cancelled"], "only the real, retained cancellation is news");
+    }
+
+    #[tokio::test]
+    async fn history_shrink_keeps_a_cancelled_multiday_slot_off_the_grid() {
+        const DAY: i64 = 86_400_000;
+        let (p, edge) = shrink_calendar_and_feed().await;
+        let cancellations: Vec<String> = sqlx::query_scalar("SELECT google_id FROM events WHERE status = 'cancelled'")
+            .fetch_all(&p).await.unwrap();
+        assert_eq!(cancellations, ["cancelled"], "only the overlapping slot still matters");
+        let rows = omacal_store::events_in_window(&p, edge, edge + DAY).await.unwrap();
+        let day = |events: &[omacal_store::StoredEvent]| crate::commands::assemble_days(events, edge, 1, "UTC");
+        assert!(day(&rows).days[0].events.is_empty(), "the cancelled occurrence stays off the grid");
+        let master = rows.iter().find(|row| row.google_id == "series").unwrap();
+        assert_eq!(day(std::slice::from_ref(master)).days[0].events.len(), 1, "the slot would otherwise appear");
+
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_all_day_slot_survives_until_its_own_local_midnight() {
+        let p = pool().await;
+        let instant = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let master = instant("2026-03-28T23:00:00Z"); // Berlin spring-forward Sunday
+        let end = instant("2026-03-29T22:00:00Z");
+        let autumn = instant("2026-10-24T22:00:00Z");
+        let midnight = instant("2026-10-25T23:00:00Z");
+        let edge = midnight - 30 * 60_000;
+        sqlx::query("INSERT INTO accounts (google_sub,email,created_at) VALUES ('s','e',0);
+                     INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                     VALUES (1,'p','P','Europe/Berlin','owner')").execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id,google_id,start_utc,end_utc,start_tz,end_tz,
+                     is_all_day,updated_at,recurrence,recurring_event_id,original_start_utc,status) VALUES
+                     (1,'master',?1,?2,'Europe/Berlin','Europe/Berlin',1,0,'RRULE:FREQ=WEEKLY',NULL,NULL,'confirmed'),
+                     (1,'cancel',?3,?3,'Europe/Berlin','Europe/Berlin',1,0,NULL,'master',?3,'cancelled')")
+            .bind(master).bind(end).bind(autumn).execute(&p).await.unwrap();
+        for (cutoff, expected) in [(edge, true), (midnight, false)] {
+            let mut tx = p.begin().await.unwrap();
+            omacal_store::history::forget_events_ending_before(&mut tx, None, cutoff).await.unwrap();
+            tx.commit().await.unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE google_id='cancel'")
+                .fetch_one(&p).await.unwrap();
+            assert_eq!(count == 1, expected, "storage at {cutoff}");
+            let rows = omacal_store::events_in_window(&p, cutoff, midnight + 1).await.unwrap();
+            assert_eq!(crate::commands::suppressed_slots(&rows).contains(&(1, "master", autumn)), expected,
+                       "the view suppresses the occurrence through its whole civil day");
+            if expected {
+                let grid = |events: &[omacal_store::StoredEvent]| {
+                    crate::commands::assemble_days(events, autumn, 1, "Europe/Berlin")
+                };
+                let master = rows.iter().find(|row| row.google_id == "master").unwrap();
+                assert_eq!(grid(std::slice::from_ref(master)).all_day_events.len(), 1);
+                assert!(grid(&rows).all_day_events.is_empty(), "the cancelled Sunday stays off the grid");
+            }
+        }
+    }
+
+    /// Shortening the span drops one-off rows that end before the new window,
+    /// and leaves series masters and exceptions whose occurrence is still
+    /// inside it. A longer span deletes nothing: those rows are what the next
+    /// fetch is for.
+    #[tokio::test]
+    async fn a_shorter_span_drops_what_now_falls_outside_it() {
+        let p = pool().await;
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','e@x',0)")
+            .execute(&p).await.unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+             VALUES (1, 'primary', 'Work', 'UTC', 'owner')",
+        )
+        .execute(&p).await.unwrap();
+
+        let now = crate::now_ms();
+        let edge = history_window(now, SPAN_6_MONTHS).0;
+        let day = 24 * 3_600_000;
+        let insert = |id: &str, start: i64, end: i64, recurrence: Option<&str>, master: Option<&str>, original: Option<i64>| {
+            let id = id.to_string();
+            let recurrence = recurrence.map(str::to_string);
+            let master = master.map(str::to_string);
+            let p = p.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz,
+                                         updated_at, recurrence, recurring_event_id, original_start_utc)
+                     VALUES (1, ?1, ?2, ?3, 'UTC', 'UTC', 0, ?4, ?5, ?6)",
+                )
+                .bind(&id)
+                .bind(start)
+                .bind(end)
+                .bind(recurrence)
+                .bind(master)
+                .bind(original)
+                .execute(&p)
+                .await
+                .unwrap();
+            }
+        };
+        insert("old", edge - 3 * day, edge - day, None, None, None).await;
+        insert("recent", edge + day, edge + 2 * day, None, None, None).await;
+        insert("series", edge - 10 * day, edge - 9 * day, Some("RRULE:FREQ=DAILY"), None, None).await;
+        // Moved out of the window, but its original slot is still inside:
+        // dropping it would let the master paint a ghost there.
+        insert("kept-exception", edge - 3 * day, edge - day, None, Some("series"), Some(edge + day)).await;
+        insert("old-exception", edge - 4 * day, edge - 2 * day, None, Some("series"), Some(edge - 3 * day)).await;
+        insert("shown-exception", edge + day, edge + 2 * day, None, Some("series"), Some(edge - 5 * day)).await;
+
+        let ancient = history_window(now, 0).0;
+        sqlx::query(
+            "INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+             VALUES (1, 'ctag', ?1, ?2)",
+        )
+        .bind(ancient)
+        .bind(now + 365 * day)
+        .execute(&p)
+        .await
+        .unwrap();
+
+        // Wider than the fresh default: nothing to drop.
+        set(&p, Setting::HistorySpan(0)).await.unwrap();
+        let ids = || async {
+            sqlx::query_scalar::<_, String>("SELECT google_id FROM events ORDER BY google_id")
+                .fetch_all(&p)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            ids().await,
+            ["kept-exception", "old", "old-exception", "recent", "series", "shown-exception"],
+            "lengthening the span deletes nothing"
+        );
+
+        set(&p, Setting::HistorySpan(SPAN_6_MONTHS)).await.unwrap();
+        assert_eq!(
+            ids().await,
+            ["kept-exception", "recent", "series", "shown-exception"],
+            "one-offs and exceptions that fall entirely outside go; masters and in-window exceptions stay"
+        );
+        let recorded: i64 = sqlx::query_scalar("SELECT window_start FROM sync_state WHERE calendar_id = 1")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        let edge_now = history_window(crate::now_ms(), SPAN_6_MONTHS).0;
+        assert!(recorded >= edge - day && recorded <= edge_now + day, "the recorded start moved forward: {recorded}");
     }
 
     /// The two questions the mode answers, which are deliberately not the

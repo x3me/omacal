@@ -377,6 +377,30 @@ test.describe('App', () => {
     await expect(page.locator('.err')).toContainText('could not reach Google');
   });
 
+  test('partial sync refreshes Year while keeping the failed-account message visible', async ({ page }) => {
+    await page.goto(app());
+    const yearButton = page.getByRole('button', { name: 'Year', exact: true });
+    await expect(yearButton).toBeVisible();
+    const year = new Date(APP_NOW).getUTCFullYear();
+    const months = Array.from({ length: 12 }, (_, index) => ({
+      month: index + 1, lead_blanks: 0,
+      days: [{ start_ms: Date.UTC(year, index, 1), day: 1, has_all_day: false, unsynced: true }],
+    }));
+    await page.evaluate((year) => window.__harness.setResponseData({ year }), { year, months });
+    await yearButton.click();
+    await expect(page.locator('.yday.unsynced')).toHaveCount(12);
+    for (const month of months) month.days[0].unsynced = false;
+    await page.evaluate(async (year) => {
+      window.__harness.setResponseData({ year });
+      await window.__harness.emit('sync-failed', { message: 'Other calendar failed' });
+    }, { year, months });
+    await expect(page.locator('.yday.unsynced')).toHaveCount(0);
+    await expect(page.locator('.yday')).toHaveCount(12);
+    await expect(page.locator('.err')).toContainText('Other calendar failed');
+    await page.evaluate(() => window.__harness.emit('sync-finished', {}));
+    await expect(page.locator('.err')).toHaveCount(0);
+  });
+
   // An account whose refresh token died gets its own surface: a standing
   // banner naming the account, with the one button that fixes it. The generic
   // "it will keep trying" toast would be a lie here — the backend has stopped
@@ -4630,24 +4654,33 @@ test.describe('App', () => {
    *  calendars, the invitations and the tasks into a window nobody could
    *  see. Now a sync that finishes while hidden marks it stale, and the
    *  reload runs once, when the window is shown. */
-  test('a sync that finishes while the window is hidden reloads when it is shown', async ({ page }) => {
-    await writable(page);
-    const setHidden = (hidden: boolean) => page.evaluate((h) => {
-      Object.defineProperty(document, 'hidden', { value: h, configurable: true });
-      Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
-      document.dispatchEvent(new Event('visibilitychange'));
-    }, hidden);
-    const weeks = async () => (await callsTo(page, 'get_week')).length;
+  for (const thenFails of [false, true]) {
+    test(`a sync that finishes while the window is hidden reloads when it is shown${thenFails ? ' after a later failure' : ''}`, async ({ page }) => {
+      await writable(page);
+      const setHidden = (hidden: boolean) => page.evaluate((h) => {
+        Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+        Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      }, hidden);
+      const weeks = async () => (await callsTo(page, 'get_week')).length;
 
-    await setHidden(true);
-    const before = await weeks();
-    await page.evaluate(() => window.__harness.emit('sync-finished', null));
-    await page.waitForTimeout(300);
-    expect(await weeks(), 'no reload into a hidden window').toBe(before);
+      await setHidden(true);
+      const before = await weeks();
+      await page.evaluate(() => window.__harness.emit('sync-finished', null));
+      await page.waitForTimeout(300);
+      expect(await weeks(), 'no reload into a hidden window').toBe(before);
 
-    await setHidden(false);
-    await expect.poll(weeks).toBeGreaterThan(before);
-  });
+      const calendarReads = () => callsTo(page, 'get_calendars').then(calls => calls.length);
+      const beforeCalendars = await calendarReads();
+      if (thenFails) {
+        await page.evaluate(() => window.__harness.emit('sync-failed', { message: 'Other account failed' }));
+      }
+      await setHidden(false);
+      await expect.poll(calendarReads).toBeGreaterThan(beforeCalendars);
+      if (thenFails) await expect(page.locator('.err')).toContainText('Other account failed');
+      await expect.poll(weeks).toBeGreaterThan(before);
+    });
+  }
 
   test('a query that matches nothing says so', async ({ page }) => {
     await writable(page);
@@ -7455,6 +7488,36 @@ test.describe("App: showing today's date", () => {
 
   /** #167: how far ahead the bar names the next meeting. A day unless
    *  chosen, saved with the other bar preferences. */
+  test('Keep history uses the offered spans and remembers Everything as zero', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    const picker = modal.getByRole('combobox', { name: 'Keep history' });
+    await expect(picker).toHaveText(/2 years/);
+    expect(await picker.locator('.name').evaluate(el => el.clientWidth >= el.scrollWidth),
+      'the chosen span must be readable, not squeezed to an arrow').toBe(true);
+    expect(await picker.evaluate(el => el.tagName)).not.toBe('SELECT');
+    for (const [label, value] of [['6 months', 6], ['5 years', 60], ['Everything', 0]] as const) {
+      await picker.click();
+      const list = page.getByRole('listbox', { name: 'Keep history' });
+      const fieldBox = (await picker.boundingBox())!;
+      const listBox = (await list.boundingBox())!;
+      expect(Math.abs(listBox.x - fieldBox.x), 'the popup stays beside its field inside Settings').toBeLessThan(3);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeGreaterThanOrEqual(0);
+      expect(listBox.y - fieldBox.y - fieldBox.height).toBeLessThan(12);
+      await expect(list.getByRole('option')).toHaveText([/6 months/, /2 years/, /5 years/, /Everything/]);
+      await list.getByRole('option', { name: label, exact: true }).click();
+      await expect(picker).toHaveText(new RegExp(label));
+      const calls = await page.evaluate(() => window.__harness.settingValues('historySpan'));
+      expect(calls[calls.length - 1]).toBe(value);
+    }
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await expect(picker).toHaveText(/Everything/);
+  });
+
   test('the bar names the next meeting only as far ahead as chosen', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();

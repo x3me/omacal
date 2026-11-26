@@ -135,30 +135,41 @@ pub fn spawn(app: AppHandle) {
     });
 }
 
-/// Nudges the ticker to reconsider immediately — used on window focus.
-///
-/// Goes through the same due-check as the ticker, on a much shorter interval:
-/// a focus is a request for fresh data, but it is not a licence to sync once
-/// per alt-tab.
-pub fn request_now(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let (pool, demo) = {
-            let state = app.state::<crate::AppState>();
-            (state.pool.clone(), state.demo)
-        };
+pub enum SyncRequest {
+    Focus,
+    WiderHistory,
+}
+
+impl SyncRequest {
+    async fn should_start(self, pool: &SqlitePool, demo: bool) -> bool {
         if !may_sync(demo) {
-            return;
+            return false;
         }
-
-        let last = crate::status::last_sync_ms(&pool).await.ok().flatten();
-        // A sync already running answers what this one would ask.
-        if !focus_should_sync(demo, last, crate::now_ms()) || crate::sync_turn().try_lock().is_err() {
-            return;
+        match self {
+            // A recent or running sync covered the old window. The new
+            // pass waits its turn in sync_all and reads the wider setting.
+            Self::WiderHistory => true,
+            Self::Focus => {
+                let last = crate::status::last_sync_ms(pool).await.ok().flatten();
+                focus_should_sync(demo, last, crate::now_ms()) && crate::sync_turn().try_lock().is_ok()
+            }
         }
+    }
 
-        sync_and_report(&app).await;
-    });
+    pub fn request(self, app: &AppHandle) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<crate::AppState>();
+            if self.should_start(&state.pool, state.demo).await {
+                sync_and_report(&app).await;
+            }
+        });
+    }
+}
+
+/// Window focus is throttled to avoid starting one sync per alt-tab.
+pub fn request_now(app: &AppHandle) {
+    SyncRequest::Focus.request(app);
 }
 
 #[cfg(test)]
@@ -166,6 +177,20 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_785_715_200_000;
+
+    #[tokio::test]
+    async fn wider_history_starts_a_pass_even_after_a_recent_sync_or_during_one() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        crate::status::record_sync(&pool, crate::now_ms()).await.unwrap();
+        assert!(!SyncRequest::Focus.should_start(&pool, false).await);
+        assert!(SyncRequest::WiderHistory.should_start(&pool, false).await);
+
+        crate::status::record_sync(&pool, 0).await.unwrap();
+        let _running = crate::sync_turn().lock().await;
+        assert!(!SyncRequest::Focus.should_start(&pool, false).await);
+        assert!(SyncRequest::WiderHistory.should_start(&pool, false).await);
+        assert!(!SyncRequest::WiderHistory.should_start(&pool, true).await);
+    }
 
     #[test]
     fn a_never_synced_store_is_due_immediately() {

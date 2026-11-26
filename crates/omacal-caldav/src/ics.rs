@@ -372,6 +372,127 @@ pub struct CalEvent {
     pub class: Option<String>,
 }
 
+/// Check UNTIL against the real instant. Apply COUNT after resolving positions.
+fn rule_at_slot(mut rule: Property, start: &IcsTime, slot_ms: i64, zone: &str) -> Option<(String, Option<u32>)> {
+    let value = std::mem::take(&mut rule.value);
+    let mut fields = Vec::new();
+    let mut bounded = false;
+    let mut count = None;
+    // The recurrence parser used by the renderer ignores empty separators.
+    for field in value.split(';').filter(|field| !field.is_empty()) {
+        let (key, value) = field.split_once('=')?;
+        if key.eq_ignore_ascii_case("COUNT") {
+            if bounded || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
+            bounded = true;
+            count = Some(value.parse().ok()?);
+        } else if key.eq_ignore_ascii_case("UNTIL") {
+            if bounded { return None; }
+            bounded = true;
+            let wall = value.strip_suffix('Z').unwrap_or(value);
+            if value.len() != 8 && (wall.len() != 15 || wall.as_bytes()[8] != b'T') {
+                return None;
+            }
+            rule.value = value.to_owned();
+            let until = parse_time(&rule)?;
+            match (&until, start) {
+                (_, IcsTime::Date(_)) | (IcsTime::Utc(_), _)
+                    | (IcsTime::Floating(_), IcsTime::Floating(_)) => {}
+                _ => return None,
+            }
+            if slot_ms > resolve(&until, zone)?.0 { return None; }
+        } else {
+            fields.push(field);
+        }
+    }
+    Some((format!("RRULE:{}", fields.join(";")), count))
+}
+
+/// Does this instant identify a DATE under the installed rules?
+fn date_for_exact_id(slot_ms: i64, zone: &str) -> Option<Date> {
+    let date = Timestamp::from_millisecond(slot_ms).ok()?.in_tz(zone).ok()?.date();
+    let slot = IcsTime::Date(date);
+    if resolve(&slot, zone)?.0 != slot_ms {
+        return None;
+    }
+    Some(date)
+}
+
+impl CalEvent {
+    /// Check the original DATE from the wire using the calendar's current
+    /// rules for the whole recurrence set, including RDATE, EXDATE and UNTIL.
+    pub fn includes_date(&self, date: Date, zone: &str) -> bool {
+        let Some((ms, ..)) = resolve(&IcsTime::Date(date), zone) else { return false };
+        let local = Timestamp::from_millisecond(ms).and_then(|ts| ts.in_tz(zone));
+        matches!(self.start, IcsTime::Date(_)) && local.is_ok_and(|dt| dt.date() == date)
+            && self.includes_occurrence(ms, zone)
+    }
+
+    pub fn includes_legacy_date_id(&self, slot: i64, zone: &str) -> bool {
+        // Prefer today's exact ID. An EXDATE or expired bound at that ID
+        // must not be bypassed by looking up another date.
+        if !matches!(self.start, IcsTime::Date(_)) || date_for_exact_id(slot, zone).is_some() {
+            return self.includes_occurrence(slot, zone);
+        }
+        let old = omacal_core::recur::legacy_date_id(slot, zone);
+        match old.and_then(|d| d.to_string().parse().ok()) {
+            Some(date) => self.includes_date(date, zone),
+            None => self.includes_occurrence(slot, zone),
+        }
+    }
+
+    /// A missing override is reinstated only if the returned master still
+    /// supplies its original slot. Resolve explicit dates like RECURRENCE-ID,
+    /// including floating times in the collection's zone.
+    pub fn includes_occurrence(&self, slot_ms: i64, cal_tz: &str) -> bool {
+        use jiff::tz::TimeZone;
+
+        let Some((start, zone, _)) = resolve(&self.start, cal_tz) else { return false };
+        if self.status == "cancelled" {
+            return false;
+        }
+        let mut included = start == slot_ms;
+        let mut rules = Vec::new();
+        for line in &self.recurrence {
+            let Some(mut prop) = parse_line(line) else { return false };
+            if prop.name == "RRULE" {
+                rules.extend(rule_at_slot(prop, &self.start, slot_ms, &zone));
+                continue;
+            }
+            let dates = std::mem::take(&mut prop.value);
+            for date in dates.split(',') {
+                prop.value = date.to_owned();
+                let instant = parse_time(&prop).and_then(|time| resolve(&time, cal_tz));
+                match (prop.name.as_str(), instant) {
+                    ("EXDATE", None) => return false,
+                    ("EXDATE", Some((ms, ..))) if ms == slot_ms => return false,
+                    ("RDATE", Some((ms, ..))) if ms == slot_ms => included = true,
+                    _ => {}
+                }
+            }
+        }
+        if included || rules.is_empty() {
+            return included;
+        }
+        let Ok(slot) = Timestamp::from_millisecond(slot_ms) else { return false };
+        let (anchor, timezone, target) = match &self.start {
+            IcsTime::Date(first) => {
+                let Some(date) = date_for_exact_id(slot_ms, &zone) else { return false };
+                let utc = TimeZone::UTC;
+                let Ok(target) = utc.to_timestamp(date.at(0, 0, 0, 0)) else { return false };
+                (first.at(0, 0, 0, 0), utc, target)
+            }
+            IcsTime::Utc(ts) => (TimeZone::UTC.to_datetime(*ts), TimeZone::UTC, slot),
+            IcsTime::Floating(dt) | IcsTime::Zoned { dt, .. } => {
+                let Ok(timezone) = TimeZone::get(&zone) else { return false };
+                (*dt, timezone, slot)
+            }
+        };
+        rules.iter().any(|(rule, count)| {
+            omacal_core::recur::civil_rule_starts_at(anchor, &timezone, rule, *count, target)
+        })
+    }
+}
+
 /// One invitee off an `ATTENDEE` line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalAttendee {
@@ -2082,6 +2203,215 @@ mod tests {
     use super::*;
 
     const SIMPLE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:abc-1\r\nSUMMARY:Standup\\, daily\r\nDTSTART;TZID=Europe/Sofia:20260817T093000\r\nDTEND;TZID=Europe/Sofia:20260817T094500\r\nSTATUS:CONFIRMED\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn only_an_active_original_slot_is_reinstated() {
+        let timed = concat!(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:series\nDTSTART:20260817T091500\n",
+            "RRULE:FREQ=DAILY;COUNT=3\nRDATE:20260824T091500\n",
+            "EXDATE:20260817T091500,20260819T091500\nEND:VEVENT\nEND:VCALENDAR",
+        );
+        let mut event = events_in(&parse(timed).unwrap()).remove(0);
+        let zone = "Europe/Sofia";
+        let slot = |day| jiff::civil::date(2026, 8, day).at(9, 15, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        assert!(!event.includes_occurrence(slot(17), zone)); // excluded DTSTART
+        assert!(event.includes_occurrence(slot(18), zone));
+        assert!(!event.includes_occurrence(slot(19), zone)); // floating EXDATE
+        assert!(!event.includes_occurrence(slot(20), zone)); // COUNT elapsed
+        assert!(event.includes_occurrence(slot(24), zone)); // explicit addition
+        event.status = "cancelled".into();
+        assert!(!event.includes_occurrence(slot(18), zone));
+    }
+
+    #[test]
+    fn timed_reinstatement_uses_the_providers_wall_clock_at_each_slot() {
+        let zone = "America/Havana";
+        let midnight = jiff::civil::date(2026, 12, 2).at(0, 0, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        let mut results = Vec::new();
+        for time in ["230000", "000000"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:20261030T{time}\nRRULE:FREQ=DAILY;COUNT=40\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            results.push(event.includes_occurrence(midnight, "UTC"));
+        }
+        assert_eq!(results, [false, true]);
+    }
+
+    #[test]
+    fn timed_reinstatement_counts_the_shifted_gap_and_matches_the_first_fold_instant() {
+        let ms = |utc: &str| utc.parse::<Timestamp>().unwrap().as_millisecond();
+        let event = |start: &str, bound: &str| {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID=America/New_York:{start}\nRRULE:FREQ=DAILY;{bound}\nEND:VEVENT\nEND:VCALENDAR");
+            events_in(&parse(&raw).unwrap()).remove(0)
+        };
+        let spring = event("20260307T023000", "COUNT=2");
+        assert!(spring.includes_occurrence(ms("2026-03-08T07:30:00Z"), "UTC"));
+        assert!(!spring.includes_occurrence(ms("2026-03-09T06:30:00Z"), "UTC"));
+        assert!(!spring.includes_occurrence(ms("2026-03-10T06:30:00Z"), "UTC"));
+        let autumn = event("20261031T013000", "COUNT=2");
+        assert!(autumn.includes_occurrence(ms("2026-11-01T05:30:00Z"), "UTC"));
+        assert!(!autumn.includes_occurrence(ms("2026-11-01T06:30:00Z"), "UTC"));
+        let slot = ms("2026-11-02T06:30:00Z");
+        assert!(event("20261031T013000", "UNTIL=20261102T063000Z").includes_occurrence(slot, "UTC"));
+        assert!(!event("20261031T013000", "UNTIL=20261102T062959Z").includes_occurrence(slot, "UTC"));
+    }
+
+    #[test]
+    fn empty_rule_fields_preserve_the_bound_and_invalid_fields_still_fail() {
+        let start = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART:20260307T023000Z";
+        let slot = "2026-03-09T02:30:00Z".parse::<Timestamp>().unwrap().as_millisecond();
+        for (rule, included) in [
+            ("FREQ=DAILY;;COUNT=3;;", true),
+            ("FREQ=DAILY;COUNT=2;", false),
+            ("FREQ=DAILY;COUNT=3;invalid;", false),
+            ("FREQ=DAILY;COUNT=3;COUNT=4;", false),
+            ("FREQ=DAILY;UNTIL=20260309T022959Z;", false),
+        ] {
+            let raw = format!("{start}\nRRULE:{rule}\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            assert_eq!(event.includes_occurrence(slot, "UTC"), included, "{rule}");
+        }
+    }
+
+    #[test]
+    fn a_gap_start_counts_later_instants_and_skips_the_second_copy_of_dtstart() {
+        // Lord Howe jumps from 02:00 to 02:30. A start at 02:10 becomes
+        // 02:40. The authored 02:20 is later, 02:30 is earlier, and 02:40
+        // is the start again. Only 02:10 and 02:20 consume COUNT that day.
+        for positions in ["", ";BYSETPOS=1,2,3,4"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID=Australia/Lord_Howe:20261004T021000\n\
+                RRULE:FREQ=DAILY;BYHOUR=2;BYMINUTE=10,20,30,40{positions};COUNT=3\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            for (slot, included) in [
+                ("2026-10-03T15:30:00Z", false),
+                ("2026-10-03T15:40:00Z", true),
+                ("2026-10-03T15:50:00Z", true),
+                ("2026-10-04T15:10:00Z", true),
+                ("2026-10-04T15:20:00Z", false),
+            ] {
+                let ms = slot.parse::<Timestamp>().unwrap().as_millisecond();
+                assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{positions} {slot}");
+            }
+        }
+    }
+
+    #[test]
+    fn subdaily_gap_start_membership_agrees_with_the_calendar_expansion() {
+        for (zone, start, rules) in [
+            ("Australia/Lord_Howe", "20261004T021500", &[
+                "FREQ=HOURLY;COUNT=2", "FREQ=HOURLY;BYMINUTE=15,45;COUNT=3",
+                "FREQ=HOURLY;BYMINUTE=15;COUNT=2",
+                "FREQ=HOURLY;BYMINUTE=15,45;BYSETPOS=1,2;COUNT=3",
+            ][..]),
+            ("America/New_York", "20260308T023000", &[
+                "FREQ=HOURLY;BYHOUR=2;BYMINUTE=30,45;COUNT=2",
+                "FREQ=MINUTELY;INTERVAL=17;COUNT=3",
+                "FREQ=SECONDLY;INTERVAL=17;COUNT=3",
+            ][..]),
+        ] {
+            for rule in rules {
+                let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:{start}\nRRULE:{rule}\nEND:VEVENT\nEND:VCALENDAR");
+                let event = events_in(&parse(&raw).unwrap()).remove(0);
+                let (first, ..) = resolve(&event.start, zone).unwrap();
+                let series = omacal_core::Series {
+                    dtstart_ms: first, dtstart_tz: zone, recurrence: &event.recurrence,
+                    duration_ms: 1_000, is_all_day: false,
+                };
+                let end = first + 86_400_000;
+                let expanded = omacal_core::expand(&series, first, end, 16).unwrap();
+                let mut starts: std::collections::BTreeSet<_> =
+                    expanded.intervals.iter().map(|i| i.start_ms).collect();
+                starts.insert(first);
+                let nearby = (first..first + 2 * 3_600_000).step_by(60_000);
+                for slot in nearby.chain(starts.iter().flat_map(|&ms| [ms - 1_000, ms, ms + 1_000])) {
+                    assert_eq!(event.includes_occurrence(slot, zone), starts.contains(&slot), "{zone} {rule} at {slot}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timed_reinstatement_uses_the_actual_gap_width_and_inclusive_until() {
+        // Lord Howe skips 02:00 through 02:29:59 on October 4. Both the
+        // missing local time and its shifted counterpart can be scheduled.
+        let zone = "Australia/Lord_Howe";
+        for (time, slot, included) in [
+            ("020000", "2026-10-03T15:30:00Z", true),  // start of gap -> 02:30
+            ("021500", "2026-10-03T15:45:00Z", true),  // 02:15 -> 02:45
+            ("024500", "2026-10-03T15:45:00Z", true),  // actual 02:45
+            ("021500", "2026-10-03T16:15:00Z", false), // 03:15
+            ("023000", "2026-10-03T16:00:00Z", false), // end of gap is real
+        ] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;TZID={zone}:20261003T{time}\n\
+                RRULE:FREQ=DAILY;UNTIL=20261003T154500Z;\nEND:VEVENT\nEND:VCALENDAR");
+            let mut event = events_in(&parse(&raw).unwrap()).remove(0);
+            let ms = slot.parse::<Timestamp>().unwrap().as_millisecond();
+            assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{time} at {slot}");
+            event.recurrence = vec!["RRULE:FREQ=DAILY;COUNT=2".into()];
+            assert_eq!(event.includes_occurrence(ms, "UTC"), included, "{time} at {slot}");
+        }
+    }
+
+    #[test]
+    fn all_day_reinstatement_matches_the_calendar_date_across_dst() {
+        let raw = concat!(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:series\nDTSTART;VALUE=DATE:20261024\n",
+            "RRULE:FREQ=DAILY;COUNT=4\nEXDATE;VALUE=DATE:20261025\nEND:VEVENT\nEND:VCALENDAR",
+        );
+        let event = events_in(&parse(raw).unwrap()).remove(0);
+        let zone = "Europe/Berlin";
+        let midnight = |day| jiff::civil::date(2026, 10, day).at(0, 0, 0, 0)
+            .in_tz(zone).unwrap().timestamp().as_millisecond();
+        assert!(!event.includes_occurrence(midnight(25), zone));
+        assert!(event.includes_occurrence(midnight(26), zone));
+        assert!(!event.includes_occurrence(midnight(26) + 3_600_000, zone));
+    }
+
+    #[test]
+    fn all_day_reinstatement_on_a_skipped_midnight() {
+        // In Havana March 8 starts at 01:00, which is 05:00 UTC.
+        let slot = "2026-03-08T05:00:00Z".parse::<Timestamp>().unwrap().as_millisecond();
+        for (rule, included) in [
+            ("COUNT=2", true), ("UNTIL=20260308", true),
+            ("UNTIL=20260308T235959", true), ("UNTIL=20260308T050000Z", true),
+            ("UNTIL=20260308T045959Z", false),
+        ] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:20260307\n\
+                               RRULE:FREQ=DAILY;{rule}\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            assert_eq!(event.includes_occurrence(slot, "America/Havana"), included, "{rule}");
+            assert!(!event.includes_occurrence(slot + 3_600_000, "America/Havana"), "{rule}");
+            assert!(!event.includes_occurrence(slot + 23 * 3_600_000, "America/Havana"), "{rule}");
+        }
+    }
+
+    #[test]
+    fn all_day_reinstatement_matches_the_stored_date_id() {
+        for (zone, start, slot) in [
+            ("America/Havana", "20261201", jiff::civil::date(2026, 12, 2)),
+            ("America/Toronto", "19190330", jiff::civil::date(1919, 3, 31)),
+        ] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:{start}\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR");
+            let event = events_in(&parse(&raw).unwrap()).remove(0);
+            let (id, ..) = resolve(&IcsTime::Date(slot), zone).unwrap();
+            assert!(event.includes_occurrence(id, zone), "{zone}");
+            assert!(!event.includes_occurrence(id + 1, zone), "{zone}");
+        }
+    }
+
+    #[test]
+    fn all_day_reinstatement_rejects_a_malformed_until() {
+        let zone = "America/Havana";
+        let (slot, ..) = resolve(&IcsTime::Date(jiff::civil::date(2026, 3, 8)), zone).unwrap();
+        for until in ["20260308T060000+0200", "20260309T235959TYPO", "20260309T2359599Z"] {
+            let raw = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:s\nDTSTART;VALUE=DATE:20260307\nRRULE:FREQ=DAILY;UNTIL={until}\nEND:VEVENT\nEND:VCALENDAR");
+            let mut event = events_in(&parse(&raw).unwrap()).remove(0);
+            assert!(!event.includes_occurrence(slot, zone), "{until}");
+            event.recurrence.push("RDATE;VALUE=DATE:20260308".into());
+            assert!(event.includes_occurrence(slot, zone), "independent RDATE");
+        }
+    }
 
     #[test]
     fn a_simple_vevent_parses_completely() {

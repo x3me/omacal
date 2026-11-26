@@ -801,3 +801,154 @@ async fn the_calendar_list_follows_collections_made_and_deleted_after_connecting
     assert_eq!(out.removed, 1);
     assert_eq!(names(pool.clone()).await, vec![("bernard".into(), 0, 1), ("work".into(), 1, 0)]);
 }
+
+#[tokio::test]
+#[ignore = "needs a live Radicale"]
+async fn an_unrelated_edit_does_not_restore_a_pruned_occurrence() {
+    let base = base_url();
+    let user = format!("omacal-retention-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    let client = CalDavClient::new(&base, &user, "pw").unwrap();
+    let url = format!("{base}/{user}/work/");
+    let series = SERIES.replace("202608", "202508").replace(";COUNT=10", "");
+    client.put(&format!("{url}series.ics"), &series, None).await.unwrap();
+
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query("INSERT INTO accounts (google_sub,email,created_at,provider)
+                 VALUES ('caldav:work','work@example.test',0,'caldav')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                 VALUES (1,?,'Work','Europe/Sofia','owner')")
+        .bind(&url).execute(&pool).await.unwrap();
+    let now = 1_786_341_600_000;
+    let (wide, end) = omacal_store::history::history_window(now, 24);
+    let (short, _) = omacal_store::history::history_window(now, 6);
+    let sync = |start, end, tick| omacal_sync::caldav::sync_caldav_calendar(
+        &pool, &client, 1, &url, true, false, start, end, tick,
+    );
+    let moved = || omacal_store::search_events(&pool, "Standup (moved)");
+    sync(wide, end, now).await.unwrap();
+    assert_eq!(moved().await.unwrap().len(), 1);
+    omacal_store::history::set_span(&pool, 6, now).await.unwrap();
+    assert!(moved().await.unwrap().is_empty());
+    client.put(&format!("{url}unrelated.ics"), EVENT, None).await.unwrap();
+    sync(short + 1000, end + 1000, now + 1000).await.unwrap();
+    assert!(moved().await.unwrap().is_empty());
+    assert_eq!(omacal_store::search_events(&pool, "Standup").await.unwrap().len(), 1, "the master stays");
+    assert_eq!(omacal_store::search_events(&pool, "Board sync").await.unwrap().len(), 1);
+    omacal_store::history::set_span(&pool, 24, now + 2000).await.unwrap();
+    sync(wide + 2000, end + 2000, now + 2000).await.unwrap();
+    assert_eq!(moved().await.unwrap().len(), 1, "widening restores the older occurrence");
+}
+
+#[tokio::test]
+#[ignore = "needs a live Radicale"]
+async fn reinstating_an_overlapping_occurrence_removes_its_cancellation() {
+    let base = base_url();
+    let user = format!("omacal-reinstate-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    let client = CalDavClient::new(&base, &user, "pw").unwrap();
+    let url = format!("{base}/{user}/work/");
+    let href = format!("{url}series.ics");
+    let master = concat!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:edge-series\r\n",
+        "DTSTAMP:20260801T000000Z\r\nDTSTART:20260803T100000Z\r\nDTEND:20260806T100000Z\r\n",
+        "SUMMARY:Restored meeting\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\n",
+    );
+    let cancellation = concat!(
+        "BEGIN:VEVENT\r\nUID:edge-series\r\nDTSTAMP:20260801T000000Z\r\n",
+        "RECURRENCE-ID:20260810T100000Z\r\nDTSTART:20260810T100000Z\r\nDTEND:20260810T100100Z\r\n",
+        "STATUS:CANCELLED\r\nSUMMARY:Cancelled meeting\r\nEND:VEVENT\r\n",
+    );
+    let original = format!("{master}END:VCALENDAR");
+    client.put(&href, &original, None).await.unwrap();
+
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query("INSERT INTO accounts (google_sub,email,created_at,provider)
+                 VALUES ('caldav:work','work@example.test',0,'caldav')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO calendars (account_id,google_id,summary,timezone,access_role)
+                 VALUES (1,?,'Work','UTC','owner')")
+        .bind(&url).execute(&pool).await.unwrap();
+    let edge = "2026-08-11T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    let day = 86_400_000;
+    let now = edge + 180 * day;
+    let (wide, end) = omacal_store::history::history_window(now, 24);
+    let sync = |start| omacal_sync::caldav::sync_caldav_calendar(
+        &pool, &client, 1, &url, true, false, start, end, now,
+    );
+    let etag = || sqlx::query_scalar::<_, String>("SELECT etag FROM events WHERE google_id = 'edge-series'")
+        .fetch_one(&pool);
+    let notices = || sqlx::query_scalar::<_, i64>("SELECT count(*) FROM event_changes WHERE series_gid = 'edge-series'")
+        .fetch_one(&pool);
+
+    sync(wide).await.unwrap();
+    client.put(&href, &format!("{master}{cancellation}END:VCALENDAR"), Some(&etag().await.unwrap()))
+        .await.unwrap();
+    sync(wide).await.unwrap();
+    omacal_store::history::set_span(&pool, 6, now).await.unwrap();
+    let events = omacal_store::events_in_window(&pool, edge, edge + day).await.unwrap();
+    assert!(events.iter().any(|e| e.status == "cancelled"));
+    assert_eq!(notices().await.unwrap(), 1);
+
+    client.put(&href, &original, Some(&etag().await.unwrap())).await.unwrap();
+    let result = sync(edge).await.unwrap();
+    assert_eq!(result.upserted, 1, "Radicale returned just the reinstated master");
+    let events = omacal_store::events_in_window(&pool, edge, edge + day).await.unwrap();
+    assert_eq!(events.len(), 1, "no stale exception suppresses the occurrence");
+    assert_eq!(events[0].google_id, "edge-series");
+    assert_eq!(notices().await.unwrap(), 0, "the cancellation notice also disappears");
+}
+
+#[tokio::test]
+#[ignore = "needs a live Radicale"]
+async fn cancelling_a_moved_meeting_preserves_the_guests_notice() {
+    let base = base_url();
+    let user = format!("omacal-exdate-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    let reader = CalDavClient::new(&base, &user, "pw").unwrap();
+    let organizer = CalDavClient::new(&base, &user, "pw").unwrap();
+    let url = format!("{base}/{user}/work/");
+    let href = format!("{url}series.ics");
+    let series = SERIES.replace("DTSTAMP:", concat!(
+        "ORGANIZER:mailto:organizer@example.test\r\n",
+        "ATTENDEE;PARTSTAT=ACCEPTED:mailto:guest@example.test\r\nDTSTAMP:",
+    ));
+    organizer.put(&href, &series, None).await.unwrap();
+    let pool = omacal_store::connect_memory().await.unwrap();
+    sqlx::query("INSERT INTO accounts(google_sub,email,created_at,provider)
+                 VALUES ('account','guest@example.test',0,'caldav')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO calendars(account_id,google_id,summary,timezone,access_role)
+                 VALUES (1,?,'Work','Europe/Sofia','owner')")
+        .bind(&url).execute(&pool).await.unwrap();
+    let now = "2026-08-16T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    let sync = || omacal_sync::caldav::sync_caldav_calendar(
+        &pool, &reader, 1, &url, true, false, WINDOW_START, WINDOW_END, now,
+    );
+    assert_eq!(sync().await.unwrap().upserted, 2);
+    assert!(omacal_store::changed_meetings(&pool, now).await.unwrap().is_empty());
+    let events = omacal_store::events_in_window(&pool, WINDOW_START, WINDOW_END).await.unwrap();
+    let moved = events.iter().find(|e| e.recurring_event_id.is_some()).unwrap();
+    let slot = omacal_caldav::WriteTime::Zoned {
+        dt: jiff::civil::date(2026, 8, 19).at(9, 15, 0, 0),
+        tzid: "Europe/Sofia".into(),
+    };
+    let cancelled = omacal_caldav::exclude_occurrence(&series, "e2e-series", &slot).unwrap();
+    organizer.put(&href, &cancelled, moved.etag.as_deref()).await.unwrap();
+    let result = sync().await.unwrap();
+    assert_eq!((result.upserted, result.deleted), (1, 1));
+    let changes = omacal_store::changed_meetings(&pool, now).await.unwrap();
+    assert_eq!(changes.len(), 1, "the guest sees the cancellation");
+    assert_eq!(changes[0].gid, moved.google_id);
+    assert_eq!(changes[0].kind, "cancelled");
+
+    // Removing the exclusion later reinstates the slot without a detached row.
+    let restored = cancelled.replace("EXDATE;TZID=Europe/Sofia:20260819T091500\r\n", "");
+    assert_ne!(restored, cancelled);
+    let etag: String = sqlx::query_scalar("SELECT etag FROM events WHERE google_id = 'e2e-series'")
+        .fetch_one(&pool).await.unwrap();
+    organizer.put(&href, &restored, Some(&etag)).await.unwrap();
+    sync().await.unwrap();
+    assert!(omacal_store::changed_meetings(&pool, now).await.unwrap().is_empty());
+}

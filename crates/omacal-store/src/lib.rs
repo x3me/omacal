@@ -9,6 +9,7 @@ pub mod changes;
 pub mod contacts;
 pub mod declines;
 pub mod events;
+pub mod history;
 pub mod invites;
 pub mod reminders;
 pub mod tasks;
@@ -44,14 +45,14 @@ pub use events::{
 /// The SQL name of the accent fold: `fold_ci(text)`.
 const FOLD_CI: &[u8] = b"fold_ci\0";
 
-/// Register `fold_ci` on one connection.
+/// Register the search and recurrence SQL functions on one connection.
 ///
 /// **Per connection, so every one gets it.** A SQLite scalar function lives on
 /// the connection that registered it and the pool opens several; `sqlx` has no
 /// `create_function`, so this drops to the raw handle — the same door `sqlx`
 /// itself uses for its `regexp`. `SQLITE_DETERMINISTIC` says the same input
 /// always folds the same way.
-async fn register_fold_ci(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+async fn register_sql_functions(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     // FFI on the raw handle is only sound while the connection's background
     // thread is parked, which is exactly what `lock_handle` buys.
     let mut handle = conn.lock_handle().await?;
@@ -75,7 +76,42 @@ async fn register_fold_ci(conn: &mut SqliteConnection) -> Result<(), sqlx::Error
             "sqlite3_create_function_v2(fold_ci) failed with code {code}"
         )));
     }
+    let code = unsafe {
+        ffi::sqlite3_create_function_v2(
+            handle.as_raw_handle().as_ptr(), c"all_day_slot_end".as_ptr(), 4,
+            ffi::SQLITE_UTF8 | ffi::SQLITE_DETERMINISTIC, std::ptr::null_mut(),
+            Some(all_day_slot_end_sql), None, None, None,
+        )
+    };
+    if code != ffi::SQLITE_OK {
+        return Err(sqlx::Error::Protocol(format!("register all_day_slot_end failed with code {code}")));
+    }
     Ok(())
+}
+
+/// SQLite provides exactly the four arguments registered above, valid for
+/// the lifetime of this call. NULL falls back to the original slot in SQL.
+unsafe extern "C" fn all_day_slot_end_sql(
+    ctx: *mut ffi::sqlite3_context, argc: c_int, argv: *mut *mut ffi::sqlite3_value,
+) {
+    if argc != 4 {
+        ffi::sqlite3_result_error_code(ctx, ffi::SQLITE_CONSTRAINT_FUNCTION);
+        return;
+    }
+    let args = std::slice::from_raw_parts(argv, 4);
+    let zone = ffi::sqlite3_value_text(args[2]);
+    if zone.is_null() {
+        ffi::sqlite3_result_null(ctx);
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(zone, ffi::sqlite3_value_bytes(args[2]) as usize);
+    let get = |i: usize| ffi::sqlite3_value_int64(args[i]);
+    let end = std::str::from_utf8(bytes).ok().and_then(|tz|
+        omacal_core::recur::all_day_slot_end(get(0), get(1), tz, get(3)));
+    match end {
+        Some(end) => ffi::sqlite3_result_int64(ctx, end),
+        None => ffi::sqlite3_result_null(ctx),
+    }
 }
 
 /// The `fold_ci` callback: hand the one argument to [`omacal_core::fold`].
@@ -121,7 +157,7 @@ unsafe extern "C" fn fold_ci_sql(
 fn pool_with_fold() -> SqlitePoolOptions {
     SqlitePoolOptions::new().after_connect(|conn, _meta| {
         Box::pin(async move {
-            register_fold_ci(conn).await?;
+            register_sql_functions(conn).await?;
             Ok(())
         })
     })

@@ -245,6 +245,9 @@
   }
   let signingIn = $state(false);
   let error = $state<string | null>(null);
+  // A partial sync can commit fresh rows and still fail on another account.
+  // Reloading those rows must leave the sync error visible.
+  let syncError = $state<string | null>(null);
   /** A write the server refused, or took but could not be recorded: news
    *  about something the user did. Apart from `error` because a load clears
    *  `error` (a stale "could not load" has no business outliving the next
@@ -934,6 +937,9 @@
    *  same SettingsModal as the menu item. */
   let settingsOpen = $state(false);
   let combineIdenticalEvents = false;
+  /** Months of history the year views hatch against. Two years until the
+   *  settings arrive, which is what a fresh install keeps. */
+  let historySpan = 24;
   /** Whether declined meetings are drawn; the backend leaves them out of the
    *  payloads otherwise, so a change is a reload. */
   let showDeclinedEvents = false;
@@ -990,6 +996,7 @@
         combineIdenticalEvents = s.combineIdenticalEvents;
         showDeclinedEvents = s.showDeclinedEvents;
         calendarGroups = s.calendarGroups;
+        historySpan = s.historySpan;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
         setClockFormat(s.timeFormat);
@@ -1322,7 +1329,9 @@
 
   $effect(() => {
     const un = listen<{ message?: string }>('sync-failed', (e) => {
-      error = e.payload?.message ?? 'Sync failed.';
+      syncError = e.payload?.message ?? 'Sync failed.';
+      if (document.hidden) pendingSyncRefresh ??= 'grid';
+      else void reload();
       // The same cycle may also have marked an account as needing re-consent,
       // and that state rides on `status` (`needs_reauth`), not on the event —
       // without this refetch the reconnect prompt waits for the next
@@ -1348,12 +1357,14 @@
    *  when it is shown. Closing the window only hides it, so every background
    *  sync reloaded the week, the calendars, the invitations and the tasks
    *  into a window nobody could see. */
-  let staleWhileHidden = false;
+  let pendingSyncRefresh: 'grid' | 'all' | null = null;
   $effect(() => {
     const shown = () => {
-      if (document.hidden || !staleWhileHidden) return;
-      staleWhileHidden = false;
-      void afterSync();
+      if (document.hidden || !pendingSyncRefresh) return;
+      const refresh = pendingSyncRefresh;
+      pendingSyncRefresh = null;
+      if (refresh === 'all') void afterSync();
+      else void reload();
     };
     document.addEventListener('visibilitychange', shown);
     return () => document.removeEventListener('visibilitychange', shown);
@@ -1361,7 +1372,8 @@
 
   $effect(() => {
     const un = listen('sync-finished', async () => {
-      if (document.hidden) { staleWhileHidden = true; return; }
+      syncError = null;
+      if (document.hidden) { pendingSyncRefresh = 'all'; return; }
       await afterSync();
     });
     return () => { un.then((f) => f()); };
@@ -1423,13 +1435,12 @@
 
   async function handleSync() {
     if (busy || syncing) return;
-    busy = true; error = null;
+    busy = true; error = null; syncError = null;
     try {
-      await syncCalendar();
+      await syncCalendar().catch((e) => { syncError = String(e); });
       await refreshStatus();
       await reload();
-    } catch (e) { error = String(e); }
-    finally { busy = false; }
+    } finally { busy = false; }
   }
 
   function goToday() {
@@ -2728,9 +2739,9 @@
     {showWeekNumbers} weekPanned={weekPanDays % 7 !== 0}
     weekNumberStartMs={hideWeekends() ? weekdayOnOrAfter(pannedWeekStartMs) : pannedWeekStartMs}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
-    {busy} error={writeError ?? error} {calendars} {view} {listMode}
+    {busy} error={writeError ?? error ?? syncError} {calendars} {view} {listMode}
     errorAction={retry && retry.forError === (writeError ?? error) ? retry : null}
-    onDismissError={() => { writeError = null; error = null; retry = null; }}
+    onDismissError={() => { writeError = null; error = null; syncError = null; retry = null; }}
     onToggleList={toggleList}
     groups={calendarGroups}
     onapplygroup={applyGroup}
@@ -2746,8 +2757,10 @@
       applyAppearance(s);
     }}
     onsettingschange={(s) => {
-      if (combineIdenticalEvents !== s.combineIdenticalEvents || showDeclinedEvents !== s.showDeclinedEvents) {
+      if (combineIdenticalEvents !== s.combineIdenticalEvents ||
+          historySpan !== s.historySpan || showDeclinedEvents !== s.showDeclinedEvents) {
         combineIdenticalEvents = s.combineIdenticalEvents;
+        historySpan = s.historySpan;
         showDeclinedEvents = s.showDeclinedEvents;
         void reload();
       }

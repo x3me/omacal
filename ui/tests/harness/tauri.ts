@@ -16,7 +16,7 @@ import type { PendingInvite, DeclineNotice, ChangeNotice } from '../../src/lib/i
 import type { EventDetail } from '../../src/lib/eventdetail';
 import type { TimeFormat } from '../../src/lib/timefmt';
 import type { WeekStartDay } from '../../src/lib/weekstart';
-import type { Appearance, StartOnLogin, WeekViewDays, WindowFrame } from '../../src/lib/settings';
+import type { Appearance, HistorySpan, StartOnLogin, WeekViewDays, WindowFrame } from '../../src/lib/settings';
 import type { View } from '../../src/lib/views';
 import type { TaskSort } from '../../src/lib/tasks';
 import type { EventCornerStyle } from '../../src/lib/appearance';
@@ -245,7 +245,7 @@ let parkedSync: {resolve: () => void; reject: (error: string) => void} | null = 
 /** A held `update_event` / `delete_event_cmd`, and the flag that arms one. */
 let holdWriteOnce: 'update_event' | 'delete_event_cmd' | 'create_event' | null = null;
 let parkedWrite: { resolve: (answer?: EventDetail) => void; reject: (message: string) => void } | null = null;
-type ResponseData = {week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
+type ResponseData = {year?: YearPayload; week?: WeekPayload; month?: MonthPayload; invites?: PendingInvite[]; declines?: DeclineNotice[]; changes?: ChangeNotice[];
   /** The calendar list as the store holds it after a sync — set it, then emit
    *  `sync-finished`, to stand in for collections made or deleted elsewhere. */
   calendars?: Calendar[]};
@@ -761,6 +761,7 @@ type StubSettings = {
   taskNotificationsEnabled: boolean;
   keepRemindersOnScreen: boolean;
   minSyncIntervalMs: number;
+  historySpan: HistorySpan;
   listMode: boolean;
   combineIdenticalEvents: boolean;
   showDeclinedEvents: boolean;
@@ -851,6 +852,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   taskNotificationsEnabled: true,
   keepRemindersOnScreen: false,
   minSyncIntervalMs: 60_000,
+  // Two years: the fresh-install default. Six months is what an install
+  // already in use keeps, written by the migration rather than read here.
+  historySpan: 24,
   // The backend's own shipped default (fallback spec §3).
   fallbackReminderMinutes: [60, 10],
   defaultCalendarId: null,
@@ -1188,7 +1192,7 @@ export function installTauriStub(scenario: string): Harness {
       case 'get_month':
         return getMonth();
       case 'get_year':
-        return getYearStub(args.year);
+        return structuredClone(responseData.year ?? getYearStub(args.year));
       case 'get_big_year':
         return getBigYearStub(args.year);
       // App's own effect fetches calendars alongside status on mount. None of
@@ -1326,6 +1330,11 @@ export function installTauriStub(scenario: string): Harness {
           throw new Error(message);
         }
         switch (key) {
+          case 'historySpan':
+            if (![6, 24, 60, 0].includes(value)) {
+              throw new Error('Choose 6 months, 2 years, 5 years, or everything.');
+            }
+            break;
           case 'syncIntervalMs':
             if ((value as number) < settings.minSyncIntervalMs) {
               throw new Error(
