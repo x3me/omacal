@@ -25,6 +25,10 @@ pub struct TaskVm {
     /// is a question about this, and a server that set STATUS without
     /// COMPLETED leaves it empty.
     pub completed_ms: Option<i64>,
+    /// The task's own status (#222): `needs-action`, `in-process`,
+    /// `completed` or `cancelled`. The pane crosses a cancelled task out and
+    /// labels one in progress.
+    pub status: String,
     pub calendar: String,
     pub color: Option<String>,
     pub priority: i64,
@@ -92,6 +96,7 @@ pub(crate) fn to_vm(row: &omacal_store::TaskRow, demo: bool) -> TaskVm {
         due_all_day: row.task.due_all_day,
         completed: row.task.status == "completed",
         completed_ms: row.task.completed_utc,
+        status: row.task.status.clone(),
         calendar: row.calendar_summary.clone(),
         color: row.color_hex.clone(),
         priority: row.task.priority,
@@ -102,7 +107,9 @@ pub(crate) fn to_vm(row: &omacal_store::TaskRow, demo: bool) -> TaskVm {
 #[tauri::command]
 pub async fn list_tasks(state: tauri::State<'_, AppState>) -> Result<Vec<TaskVm>, String> {
     let since = crate::now_ms() - DONE_WINDOW_MS;
-    let rows = omacal_store::tasks_for_ui(&state.pool, since)
+    // Cancelled tasks too (#222): the pane shows them crossed out until a
+    // week past their due date.
+    let rows = omacal_store::tasks_including_cancelled(&state.pool, since)
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(rows.iter().map(|r| to_vm(r, state.demo)).collect())
@@ -158,20 +165,54 @@ pub async fn set_task_completed(
     list_tasks(state).await
 }
 
+/// Sets a task's status (#222): `needs-action`, `in-process`, `completed`
+/// or `cancelled`. The server first, then the store, as completing does.
+#[tauri::command]
+pub async fn set_task_status(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    status: String,
+) -> Result<Vec<TaskVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    set_status_impl(&state, id, &status).await.map_err(|e| crate::errors::user_facing(&e))?;
+    list_tasks(state).await
+}
+
+/// `set_task_status` without the Tauri wrapper, for the socket.
+pub(crate) async fn status_body(state: &AppState, id: i64, status: &str) -> Result<Vec<TaskVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    set_status_impl(state, id, status)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    Ok(list_body(state).await)
+}
+
 async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Result<()> {
+    set_status_impl(state, id, if on { "completed" } else { "needs-action" }).await
+}
+
+async fn set_status_impl(state: &AppState, id: i64, status: &str) -> anyhow::Result<()> {
+    if !matches!(status, "needs-action" | "in-process" | "completed" | "cancelled") {
+        anyhow::bail!(TASK_STATUS_UNKNOWN);
+    }
     let task = omacal_store::task_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     let raw = task.raw_ics.as_deref().ok_or_else(|| anyhow::anyhow!("task has no resource"))?;
-    // Completing is refused, reopening is not: a series someone completed
-    // elsewhere is exactly what reopening it here restores.
-    if on && omacal_caldav::todo_repeats(raw, &task.uid) {
-        anyhow::bail!(TASK_REPEATS);
+    // Completing or cancelling a series ends it for every client, so both
+    // are refused. Reopening and "in progress" end nothing: a series
+    // someone completed elsewhere is exactly what reopening it restores.
+    if omacal_caldav::todo_repeats(raw, &task.uid) {
+        match status {
+            "completed" => anyhow::bail!(TASK_REPEATS),
+            "cancelled" => anyhow::bail!(TASK_REPEATS_CANCEL),
+            _ => {}
+        }
     }
     let home = task_home(state, task.calendar_id).await?;
 
     let now = jiff::Timestamp::from_millisecond(crate::now_ms())?;
-    let patched = omacal_caldav::patch_todo_status(raw, &task.uid, on, now)
+    let patched = omacal_caldav::patch_todo_state(raw, &task.uid, status, now)
         .ok_or_else(|| anyhow::anyhow!("could not rewrite the task's resource"))?;
 
     let new_etag = match &home {
@@ -187,8 +228,8 @@ async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Resu
     omacal_store::mark_task_status(
         &state.pool,
         id,
-        if on { "completed" } else { "needs-action" },
-        on.then_some(now_ms),
+        status,
+        (status == "completed").then_some(now_ms),
         new_etag.as_deref(),
         Some(&patched),
         now_ms,
@@ -513,7 +554,7 @@ pub(crate) async fn update_body(
 /// `list_tasks` without the Tauri wrapper, for the socket.
 pub(crate) async fn list_body(state: &AppState) -> Vec<TaskVm> {
     let since = crate::now_ms() - DONE_WINDOW_MS;
-    omacal_store::tasks_for_ui(&state.pool, since)
+    omacal_store::tasks_including_cancelled(&state.pool, since)
         .await
         .map(|rows| rows.iter().map(|r| to_vm(r, state.demo)).collect())
         .unwrap_or_default()
@@ -534,6 +575,13 @@ pub(crate) const TASK_GONE: &str = "that task is no longer here";
 /// A tick on a repeating task (#145). OmaCal can only complete the whole
 /// VTODO, and `STATUS:COMPLETED` on a series ends it for every client, so it
 /// refuses before writing and says where the tick can be made instead.
+/// A status the store does not know (#222). The four it does are the JSON's.
+pub(crate) const TASK_STATUS_UNKNOWN: &str =
+    "Use needs-action, in-process, completed or cancelled.";
+/// Cancelling a repeating task would cancel every occurrence (#222).
+pub(crate) const TASK_REPEATS_CANCEL: &str =
+    "This task repeats, and OmaCal cannot cancel a single occurrence yet — \
+     cancelling it here would cancel the whole series, so nothing was changed.";
 pub(crate) const TASK_REPEATS: &str =
     "This task repeats, and OmaCal cannot complete a single occurrence yet — \
      completing it here would end the whole series, so nothing was changed. \
@@ -1024,6 +1072,62 @@ mod tests {
         let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
         assert_eq!(t.status, "needs-action", "a series completed elsewhere reopens");
         assert!(t.raw_ics.as_deref().is_some_and(|r| r.contains("RRULE:FREQ=WEEKLY")));
+    }
+
+    /// #222: a task can be set in progress, cancelled and opened again. Each
+    /// writes its own STATUS into the resource, and the pane's list carries
+    /// the status, recent cancelled tasks included.
+    #[tokio::test]
+    async fn a_task_can_be_set_in_progress_cancelled_and_opened_again() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list =
+            omacal_store::ensure_local_task_list(&pool, "Tasks on this device", "Europe/Sofia", 0)
+                .await
+                .unwrap();
+        let state = local_state(pool.clone());
+        create_impl(&state, list, "Practise guitar", None, true, 0).await.unwrap();
+        let id = omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task.id;
+        let status_of = |vms: Vec<TaskVm>| vms.into_iter().map(|t| t.status).collect::<Vec<_>>();
+
+        for (status, wire) in [("in-process", "STATUS:IN-PROCESS"), ("cancelled", "STATUS:CANCELLED"), ("needs-action", "STATUS:NEEDS-ACTION")] {
+            set_status_impl(&state, id, status).await.unwrap();
+            let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+            assert_eq!(t.status, status);
+            assert!(t.raw_ics.as_deref().is_some_and(|r| r.contains(wire)), "{wire} written");
+            assert!(t.completed_utc.is_none(), "only completed is stamped");
+            assert_eq!(status_of(list_body(&state).await), [status], "the pane lists it, cancelled included");
+        }
+        let refused = set_status_impl(&state, id, "paused").await.unwrap_err();
+        assert_eq!(refused.to_string(), TASK_STATUS_UNKNOWN);
+    }
+
+    /// #222: cancelling a repeating task would cancel the whole series, so
+    /// it is refused before anything is written, as completing it is.
+    /// Marking it in progress ends nothing, and is allowed.
+    #[tokio::test]
+    async fn a_repeating_task_is_not_cancelled_but_can_be_marked_in_progress() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list =
+            omacal_store::ensure_local_task_list(&pool, "Tasks on this device", "Europe/Sofia", 0)
+                .await
+                .unwrap();
+        let state = local_state(pool.clone());
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:weekly\r\nSUMMARY:Water the plants\r\n\
+                   DUE;VALUE=DATE:20261005\r\nRRULE:FREQ=WEEKLY\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let id = omacal_store::upsert_task(&pool, &omacal_store::StoredTask {
+            id: 0, calendar_id: list, uid: "weekly".into(), etag: None, caldav_href: None,
+            summary: Some("Water the plants".into()), description: None, due_utc: Some(0),
+            due_tz: None, due_all_day: true, status: "needs-action".into(), completed_utc: None,
+            priority: 0, updated_at: 0, raw_ics: Some(raw.into()),
+        }).await.unwrap();
+
+        let refused = set_status_impl(&state, id, "cancelled").await.unwrap_err();
+        assert_eq!(refused.to_string(), TASK_REPEATS_CANCEL);
+        let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!((t.status.as_str(), t.raw_ics.as_deref()), ("needs-action", Some(raw)), "nothing was written");
+
+        set_status_impl(&state, id, "in-process").await.unwrap();
+        assert_eq!(omacal_store::task_by_id(&pool, id).await.unwrap().unwrap().status, "in-process");
     }
 
     /// #145, with the reporter's own mailbox.org (Open-Xchange) export. OX

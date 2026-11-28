@@ -12,8 +12,8 @@
   import { clockFormat } from './clock.svelte';
   import {
     createLocalTaskList, createTask, createTaskList, deleteTask, deleteTaskList, renameTaskList,
-    searchDoneTasks, setTaskCompleted, updateTask, sortTasks, priorityLabel, priorityOption,
-    PRIORITY_CHOICES, type Task, type TaskList, type TaskSort,
+    searchDoneTasks, setTaskCompleted, setTaskStatus, updateTask, sortTasks, priorityLabel, priorityOption,
+    PRIORITY_CHOICES, STATUS_CHOICES, type Task, type TaskList, type TaskSort, type TaskStatus,
   } from './tasks';
   import { taskSort, setTaskSort } from './tasksort.svelte';
   import { setSetting } from './settings';
@@ -135,7 +135,7 @@
    *  another is picked (Plamen, 2026-09-18: the editor did not say which list
    *  a task was on, or offer another). */
   let editingId = $state<number | null>(null);
-  let draft = $state({ summary: '', date: '', time: '', notes: '', list: 0, priority: 0 });
+  let draft = $state({ summary: '', date: '', time: '', notes: '', list: 0, priority: 0, status: 'needs-action' as TaskStatus });
   /** The time field holds something that is not a time. Save waits for it:
    *  saving would quietly make the task all-day. */
   let timeInvalid = $state(false);
@@ -312,7 +312,9 @@
     WHEN_ORDER.map((when) => ({
       key: when as string,
       label: WHEN_LABEL[when],
-      warn: when === 'overdue',
+      // Red only for something still to do: a crossed-out cancelled task
+      // (#222) is not late.
+      warn: when === 'overdue' && open.some((t) => t.status !== 'cancelled' && whenOf(t, nowMs, weekStartDay()) === when),
       color: null as string | null,
       list: null as TaskList | null,
       rows: sortTasks(
@@ -363,6 +365,7 @@
   const priorityChoices: ListChoice[] = PRIORITY_CHOICES.map((c) => ({
     id: c.value, name: c.label, color: null,
   }));
+  const statusChoices: ListChoice[] = STATUS_CHOICES.map((c) => ({ id: c.id, name: c.name, color: null }));
 
   async function toggle(task: Task) {
     if (busyIds.has(task.id)) return;
@@ -569,6 +572,7 @@
       // The raw stored value, so an untouched save writes the same integer
       // back — a server's non-canonical 7 is preserved, not normalised.
       priority: task.priority,
+      status: task.status,
     };
   }
 
@@ -591,8 +595,13 @@
     saving = true;
     note = null;
     const { ms, allDay } = dueFromInputs(draft.date, draft.time);
-    const from = (tasks ?? []).find((t) => t.id === editingId)?.calendarId;
+    const was = (tasks ?? []).find((t) => t.id === editingId);
+    const from = was?.calendarId;
     try {
+      // The status goes first (#222), while the task still has this id: a
+      // move to another list below can give it a new one. A refusal (a
+      // repeating task cannot be cancelled) stops the save before the rest.
+      if (was && draft.status !== was.status) setTaskRows(await setTaskStatus(editingId, draft.status));
       setTaskRows(await updateTask(
         editingId, draft.summary, ms, allDay, draft.notes.trim() || null,
         draft.list !== from ? draft.list : null, draft.priority,
@@ -723,7 +732,7 @@
             <button type="button" class="lact" onclick={() => (naming = null)}>Cancel</button>
           {:else}
             <span class="hlabel" class:warn={g.warn} title={g.label}>{g.label}</span>
-            <span class="count">{g.rows.length}</span>
+            <span class="count">{g.rows.filter((r) => r.status !== 'cancelled').length}</span>
             {#if g.list?.local}
               <!-- Only a list on this device is this pane's to rename or
                    delete; a server's list is the server's. -->
@@ -789,6 +798,13 @@
                             value={priorityOption(draft.priority)} disabled={saving}
                             onpick={(id) => (draft = { ...draft, priority: id ?? 0 })} />
               </div>
+              <!-- #222. Done stays the checkbox; these are the other three. -->
+              <div class="efield">
+                <span class="elab">Status</span>
+                <ListPicker compact noDot label="Status" choices={statusChoices}
+                            value={STATUS_CHOICES.find((c) => c.status === draft.status)?.id ?? 0} disabled={saving}
+                            onpick={(id) => (draft = { ...draft, status: STATUS_CHOICES.find((c) => c.id === id)?.status ?? 'needs-action' })} />
+              </div>
               <textarea class="enotes" aria-label="Notes" rows="2" placeholder="Notes"
                         bind:value={draft.notes} disabled={saving}></textarea>
               <div class="eact">
@@ -800,7 +816,8 @@
               </div>
             </div>
           {:else}
-            <div class="row" id={`task-${t.id}`} class:flash={focusFlash === t.id}>
+            <div class="row" id={`task-${t.id}`} class:flash={focusFlash === t.id}
+                 class:cancelled={t.status === 'cancelled'}>
               <input
                 type="checkbox"
                 checked={false}
@@ -814,6 +831,11 @@
               <button class="title" disabled={!t.canWrite}
                       onpointerdown={(e) => pressTask(t, e)}
                       onclick={() => { if (!carriedNotClicked) edit(t); }}>{t.summary}</button>
+              {#if t.status === 'in-process'}
+                <span class="schip">In progress</span>
+              {:else if t.status === 'cancelled'}
+                <span class="schip">Cancelled</span>
+              {/if}
               {#if priorityLabel(t.priority)}
                 <!-- The word carries the level; the tone is decoration, so it
                      reads in greyscale and to a screen reader. -->
@@ -1089,6 +1111,13 @@
                 border-color: var(--prio-high); }
   .pchip.medium { color: var(--prio-medium); }
   .pchip.low { color: var(--prio-low); }
+  /* #222: a status in words, muted, shaped like the priority chip. A
+     cancelled task is crossed out and faded, and stays until a week past its
+     due date (`tasks_including_cancelled`). */
+  .schip { flex: 0 0 auto; font-size: 10px; font-weight: 600; line-height: 1;
+           padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor;
+           white-space: nowrap; color: var(--muted); }
+  .row.cancelled .title { text-decoration: line-through; color: var(--muted); }
   .due { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
          white-space: nowrap; }
   .due.overdue { color: var(--error); }

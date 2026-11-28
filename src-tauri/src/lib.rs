@@ -1937,6 +1937,7 @@ pub fn run() {
             tasks::list_tasks,
             tasks::search_done_tasks,
             tasks::set_task_completed,
+            tasks::set_task_status,
             tasks::create_task,
             tasks::delete_task_cmd,
             tasks::task_lists,

@@ -303,6 +303,10 @@ const SAFE_EXACT: &[&str] = &[
     // #145: a tick on a repeating task, refused before the write. A fixed
     // literal, `bail!`ed in `set_completed_impl`, no interpolation.
     crate::tasks::TASK_REPEATS,
+    // #222: the same refusal for cancelling, and an unknown status. Fixed
+    // literals `bail!`ed in `set_status_impl` before any write.
+    crate::tasks::TASK_REPEATS_CANCEL,
+    crate::tasks::TASK_STATUS_UNKNOWN,
     // src-tauri/src/caldav_write.rs and caldav_account.rs — the event write
     // path's three refusals, fixed literals raised before anything leaves the
     // machine and reaching the user through the command's own
@@ -669,6 +673,8 @@ mod tests {
             // Checked against the same rule: a fixed literal `bail!`ed in
             // `set_completed_impl` before any write, no interpolation (#145).
             crate::tasks::TASK_REPEATS,
+            crate::tasks::TASK_REPEATS_CANCEL,
+            crate::tasks::TASK_STATUS_UNKNOWN,
             // Checked against the same rule: the event write path's three,
             // fixed literals raised before the write.
             crate::caldav_write::EVENT_CHANGED_ON_SERVER,
@@ -756,6 +762,8 @@ mod tests {
             crate::tasks::LIST_NEEDS_A_NAME,
             crate::tasks::LIST_NAME_TOO_LONG,
             crate::tasks::TASK_REPEATS,
+            crate::tasks::TASK_REPEATS_CANCEL,
+            crate::tasks::TASK_STATUS_UNKNOWN,
         ] {
             let raised = anyhow::anyhow!(lit);
             assert_eq!(user_facing(&raised), lit, "{lit:?} no longer reaches the user");

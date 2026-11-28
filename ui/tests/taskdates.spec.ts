@@ -13,7 +13,7 @@ import type { Task } from '../src/lib/tasks';
  */
 const task = (over: Partial<Task> = {}): Task => ({
   id: 1, calendarId: 1, summary: 'x', notes: null, dueMs: null, dueAllDay: true,
-  completed: false, completedMs: null, calendar: 'Work', color: null, priority: 0, canWrite: true, ...over,
+  completed: false, status: 'needs-action', completedMs: null, calendar: 'Work', color: null, priority: 0, canWrite: true, ...over,
 });
 
 // A Monday, mid-morning: 2026-09-07 10:00 local.
@@ -59,6 +59,12 @@ test.describe('when a task is due', () => {
     expect(whenOf(done, MON)).not.toBe('overdue');
     expect(isOverdue(done, MON)).toBe(false);
     expect(isOverdue(task({ dueMs: at(-3) }), MON)).toBe(true);
+  });
+
+  /** #222: a cancelled task has nothing left to do, so it is not late. */
+  test('a cancelled task is never overdue', () => {
+    expect(isOverdue(task({ dueMs: at(-3), status: 'cancelled' }), MON)).toBe(false);
+    expect(isOverdue(task({ dueMs: at(-3), status: 'in-process' }), MON)).toBe(true);
   });
 
   test('the row label says the day, and the time only when there is one', () => {
@@ -128,7 +134,7 @@ test.describe('done', () => {
     // No stamp cannot be dated, so it is never today's.
     expect(doneToday(done(null), MON)).toBe(false);
     // An open task is not done at all, whatever a stale stamp says.
-    expect(doneToday(task({ completed: false, completedMs: MON }), MON)).toBe(false);
+    expect(doneToday(task({ completed: false, status: 'needs-action', completedMs: MON }), MON)).toBe(false);
   });
 
   test('an earlier one says yesterday, then the date, with a year only when it differs', () => {

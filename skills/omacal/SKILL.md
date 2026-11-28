@@ -100,6 +100,9 @@ omacal tasks edit 41 --due 2026-09-14 --json
 omacal tasks edit 41 --due none --json     # clears the date; `--at none` keeps
                                            # the day and drops the hour
 omacal tasks edit 41 --priority none --json  # clears the priority; absent leaves it
+omacal tasks edit 41 --status cancelled --json  # v6.11+: needs-action, in-process,
+                                           # completed or cancelled, on its own;
+                                           # a repeating task can't be cancelled
 ```
 
 

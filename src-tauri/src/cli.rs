@@ -52,6 +52,7 @@ USAGE
   omacal tasks add \"title\" [--list ID|NAME] [--due YYYY-MM-DD] [--at HH:MM] [--priority LEVEL]
   omacal tasks done ID | omacal tasks reopen ID
   omacal tasks edit ID [--title T] [--due D|none] [--at HH:MM|none] [--notes N|none] [--priority LEVEL|none]
+  omacal tasks edit ID --status needs-action|in-process|completed|cancelled
   omacal weather [--json]                  the app's forecast, and the place it is for
   omacal doctor [--json]                   diagnose this install
   omacal skill                             print the agent skill this binary carries
@@ -209,9 +210,9 @@ pub(crate) fn command_catalog() -> Vec<CommandInfo> {
         CommandInfo { name: "tasks done", usage: "tasks done|reopen ID", writes: true,
             description: "tick a task off, or put it back",
             flags: &["--json"] },
-        CommandInfo { name: "tasks edit", usage: "tasks edit ID [--title T] [--due D|none] [--at HH:MM|none] [--notes N|none] [--priority LEVEL|none]", writes: true,
-            description: "change a task's title, due date, note or priority",
-            flags: &["--title", "--due", "--at", "--notes", "--priority", "--json"] },
+        CommandInfo { name: "tasks edit", usage: "tasks edit ID [--title T] [--due D|none] [--at HH:MM|none] [--notes N|none] [--priority LEVEL|none] | --status S", writes: true,
+            description: "change a task's title, due date, note or priority; or, on its own, its status",
+            flags: &["--title", "--due", "--at", "--notes", "--priority", "--status", "--json"] },
         CommandInfo { name: "weather", usage: "weather", writes: false,
             description: "the app's forecast: the place it is for and how that was decided, now, and eight days",
             flags: &["--json"] },

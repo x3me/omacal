@@ -106,6 +106,8 @@ pub(crate) enum TaskCmd {
         /// is [`PriorityArg::None`], which clears it.
         priority: Option<PriorityArg>,
     },
+    /// `edit ID --status S` (#222): one of the JSON's four words, lowercased.
+    Status { id: i64, status: String },
 }
 
 /// `--due 2026-09-11` and `--at 18:00` into the instant they name, in the
@@ -201,6 +203,19 @@ pub(crate) fn parse(rest: &[&String]) -> Option<Result<TaskCmd, String>> {
             "reopen" => Ok(TaskCmd::Complete { id: id_of("reopen")?, done: false }),
             "edit" => {
                 let id = id_of("edit")?;
+                // A status change travels on its own request, so it is
+                // asked for on its own.
+                if let Some(word) = take("--status")? {
+                    let status = word.to_ascii_lowercase();
+                    if !matches!(status.as_str(), "needs-action" | "in-process" | "completed" | "cancelled") {
+                        return Err("--status takes needs-action, in-process, completed or cancelled".into());
+                    }
+                    let others = ["--title", "--due", "--at", "--notes", "--priority"];
+                    if args.iter().any(|a| others.contains(&a.as_str())) {
+                        return Err("change --status on its own: omacal tasks edit ID --status S".into());
+                    }
+                    return Ok(TaskCmd::Status { id, status });
+                }
                 let priority = match take("--priority")? {
                     Some(w) => Some(priority_of(&w)?),
                     None => None,
@@ -216,8 +231,8 @@ pub(crate) fn parse(rest: &[&String]) -> Option<Result<TaskCmd, String>> {
                 let TaskCmd::Edit { title, due, at, notes, priority, .. } = &cmd else { unreachable!() };
                 if title.is_none() && due.is_none() && at.is_none() && notes.is_none() && priority.is_none() {
                     return Err(
-                        "omacal tasks edit ID needs something to change: --title, --due, --at, --notes or --priority \
-                         (--due none clears the date)"
+                        "omacal tasks edit ID needs something to change: --title, --due, --at, --notes, --priority \
+                         or --status (--due none clears the date)"
                             .into(),
                     );
                 }
@@ -275,6 +290,10 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
             // and a read failure only costs the line its name.
             let name = omacal_store::task_by_id(pool, *id).await.ok().flatten().and_then(|t| t.summary);
             (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" }, name)
+        }
+        TaskCmd::Status { id, status } => {
+            let name = omacal_store::task_by_id(pool, *id).await.ok().flatten().and_then(|t| t.summary);
+            (status_request(*id, status), "Saved", name)
         }
         TaskCmd::Edit { id, title, due, at, notes, priority } => {
             let task = match omacal_store::task_by_id(pool, *id).await {
@@ -343,6 +362,15 @@ pub(crate) fn complete_request(id: i64, done: bool) -> serde_json::Value {
         "cmd": "tasks-complete",
         "id": id,
         "done": done,
+    })
+}
+
+pub(crate) fn status_request(id: i64, status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "v": crate::ipc::PROTOCOL_VERSION,
+        "cmd": "tasks-status",
+        "id": id,
+        "status": status,
     })
 }
 
@@ -496,6 +524,12 @@ mod tests {
         }
         assert!(p("add Thing --priority urgent").unwrap_err().contains("none, low, medium or high"));
 
+        // #222: `--status` takes the JSON's four words, in any case, on its own.
+        assert_eq!(p("edit 41 --status cancelled"), Ok(TaskCmd::Status { id: 41, status: "cancelled".into() }));
+        assert_eq!(p("edit 41 --status IN-PROCESS"), Ok(TaskCmd::Status { id: 41, status: "in-process".into() }));
+        assert!(p("edit 41 --status paused").unwrap_err().contains("needs-action, in-process, completed or cancelled"));
+        assert!(p("edit 41 --status cancelled --title X").unwrap_err().contains("on its own"));
+
         assert!(p("add").is_err(), "a title is not optional");
         assert!(p("done").is_err(), "an id is not optional");
         assert!(p("edit 41").is_err(), "an edit that changes nothing is a usage error");
@@ -634,6 +668,13 @@ mod tests {
                 assert!(done);
             }
             other => panic!("complete_request did not parse as TaskComplete: {other:?}"),
+        }
+
+        match crate::ipc::parse_request(&status_request(41, "in-process").to_string()) {
+            Ok(crate::ipc::Request::TaskStatus { id, status }) => {
+                assert_eq!((id, status.as_str()), (41, "in-process"));
+            }
+            other => panic!("status_request did not parse as TaskStatus: {other:?}"),
         }
 
         match crate::ipc::parse_request(
