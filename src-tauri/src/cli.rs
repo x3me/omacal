@@ -769,12 +769,27 @@ pub struct TaskHit {
     pub due_all_day: bool,
     pub overdue: bool,
     pub completed: bool,
+    /// The task's own status (#222), in the store's words: `needs-action`,
+    /// `in-process`, `completed` or `cancelled`. `completed` above stays, so
+    /// a script that reads it keeps working.
+    pub status: String,
     /// The task's RFC 5545 priority: 1 highest … 9 lowest, 0 for none.
     pub priority: i64,
     /// The list's name.
     pub list: String,
     pub list_id: i64,
     pub can_write: bool,
+}
+
+/// What `omacal tasks` lists: the open tasks, and with `--all` also the last
+/// week's done and cancelled ones (#222).
+pub(crate) async fn tasks_listed(pool: &SqlitePool, all: bool, now_ms: i64) -> anyhow::Result<Vec<omacal_store::TaskRow>> {
+    let rows = if all {
+        omacal_store::tasks_including_cancelled(pool, now_ms - 7 * 24 * 3_600_000).await?
+    } else {
+        omacal_store::tasks_for_ui(pool, now_ms).await?
+    };
+    Ok(rows.into_iter().filter(|r| all || r.task.status != "completed").collect())
 }
 
 pub(crate) fn task_json(row: &omacal_store::TaskRow, now_ms: i64, tz: &jiff::tz::TimeZone) -> TaskHit {
@@ -788,6 +803,7 @@ pub(crate) fn task_json(row: &omacal_store::TaskRow, now_ms: i64, tz: &jiff::tz:
         due_all_day: t.due_all_day,
         overdue: task_overdue(t, now_ms, tz),
         completed: t.status == "completed",
+        status: t.status.clone(),
         priority: t.priority,
         list: row.calendar_summary.clone(),
         list_id: t.calendar_id,
@@ -853,7 +869,8 @@ fn due_wire(t: &omacal_store::StoredTask, tz: &jiff::tz::TimeZone) -> Option<Str
 /// and a completed one never.
 fn task_overdue(t: &omacal_store::StoredTask, now_ms: i64, tz: &jiff::tz::TimeZone) -> bool {
     let Some(ms) = t.due_utc else { return false };
-    if t.status == "completed" {
+    // Done or called off: neither is late.
+    if t.status == "completed" || t.status == "cancelled" {
         return false;
     }
     if !t.due_all_day {
@@ -884,7 +901,12 @@ pub(crate) fn task_lines(rows: &[&omacal_store::TaskRow], now_ms: i64, tz: &jiff
                 if task_overdue(t, now_ms, tz) { format!("{d} !") } else { format!("{d}  ") }
             }
         };
-        let mark = if t.status == "completed" { "x" } else { " " };
+        let mark = match t.status.as_str() {
+            "completed" => "x",
+            "cancelled" => "-",
+            "in-process" => "~",
+            _ => " ",
+        };
         // The level as a word, matching the window's row chip; a fixed-width
         // slot so the columns line up whether or not a task has one.
         let priority = match omacal_caldav::TaskPriority::from_wire(t.priority) {
@@ -1104,12 +1126,8 @@ pub(crate) fn run(inv: Invocation) -> i32 {
                 }
                 Command::Write(_) => unreachable!("taken by value above"),
                 Command::Tasks { all } => {
-                    let since = if *all { crate::now_ms() - 7 * 24 * 3_600_000 } else { crate::now_ms() };
-                    let rows = omacal_store::tasks_for_ui(&pool, since).await?;
-                    let open: Vec<_> = rows
-                        .iter()
-                        .filter(|r| *all || r.task.status != "completed")
-                        .collect();
+                    let rows = tasks_listed(&pool, *all, crate::now_ms()).await?;
+                    let open: Vec<_> = rows.iter().collect();
                     let tz = jiff::tz::TimeZone::system();
                     if inv.json {
                         print_json(&open.iter().map(|r| task_json(r, crate::now_ms(), &tz)).collect::<Vec<_>>());
@@ -1494,6 +1512,57 @@ mod tests {
         let timed = stored_task(Some(at("2026-09-17T07:00:00Z")), "Europe/Sofia", false);
         assert!(task_json(&timed, evening, &sofia).overdue);
         assert!(!task_json(&timed, at("2026-09-17T06:00:00Z"), &sofia).overdue);
+    }
+
+    /// #222: the row carries the task's own status, in the store's words,
+    /// beside `completed`. A cancelled task is not late, whatever its due
+    /// date, and each status has its own mark on the plain-text line.
+    #[test]
+    fn a_task_row_says_its_status_and_a_cancelled_task_is_never_overdue() {
+        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        let past = at("2026-09-17T07:00:00Z");
+        let now = at("2026-09-20T09:00:00Z");
+        let with = |status: &str| {
+            let mut row = stored_task(Some(past), "Europe/Sofia", false);
+            row.task.status = status.into();
+            row
+        };
+        let (open, busy, done, skipped) = (with("needs-action"), with("in-process"), with("completed"), with("cancelled"));
+
+        let j = serde_json::to_value(task_json(&skipped, now, &sofia)).unwrap();
+        assert_eq!(j["status"], "cancelled");
+        assert_eq!(j["completed"], false, "cancelled is not done");
+        assert_eq!(j["overdue"], false, "nor late");
+        assert_eq!(serde_json::to_value(task_json(&busy, now, &sofia)).unwrap()["status"], "in-process");
+        assert!(task_json(&busy, now, &sofia).overdue, "in progress past its due date is still late");
+
+        let lines = task_lines(&[&open, &busy, &done, &skipped], now, &sofia);
+        for (line, mark) in lines.iter().zip(["[ ]", "[~]", "[x]", "[-]"]) {
+            assert!(line.contains(&format!("  {mark} ")), "expected {mark} in: {line}");
+        }
+    }
+
+    /// #222: plain `omacal tasks` lists what is open; `--all` adds the last
+    /// week's done and cancelled tasks.
+    #[tokio::test]
+    async fn tasks_all_adds_the_recent_done_and_cancelled_tasks() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','me@x.com',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (id, account_id, google_id, summary, timezone, access_role) VALUES (1, 1, 'g1', 'Routines', 'UTC', 'owner')")
+            .execute(&pool).await.unwrap();
+        let now = at("2026-11-28T09:00:00Z");
+        for (uid, status, completed) in [("open", "needs-action", None), ("done", "completed", Some(now - 3_600_000)), ("skipped", "cancelled", None)] {
+            let mut row = stored_task(Some(now - 86_400_000), "UTC", false).task;
+            row.uid = uid.into();
+            row.summary = Some(uid.into());
+            row.status = status.into();
+            row.completed_utc = completed;
+            omacal_store::upsert_task(&pool, &row).await.unwrap();
+        }
+        let titles = |rows: Vec<omacal_store::TaskRow>| -> Vec<String> { rows.into_iter().filter_map(|r| r.task.summary).collect() };
+        assert_eq!(titles(tasks_listed(&pool, false, now).await.unwrap()), ["open"]);
+        assert_eq!(titles(tasks_listed(&pool, true, now).await.unwrap()), ["open", "done", "skipped"]);
     }
 
     /// Dates in the zone they were written in, times in the display zone

@@ -30,7 +30,7 @@ pub use invites::{
 pub use reminders::{fired_keys, prune_fired, record_fired};
 pub use tasks::{
     completed_tasks_for_ui, delete_task, delete_tasks_not_in, fired_task_keys, mark_task_status,
-    move_task, prune_fired_tasks, record_fired_task, task_by_id, tasks_for_ui, tasks_to_announce,
+    move_task, prune_fired_tasks, record_fired_task, task_by_id, tasks_for_ui, tasks_including_cancelled, tasks_to_announce,
     update_task_fields, upsert_task,
     StoredTask, TaskRow,
 };

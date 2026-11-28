@@ -139,6 +139,19 @@ pub async fn delete_tasks_not_in(
 /// (undated last), then priority (undefined last), then title; done tasks by
 /// completion, newest first.
 pub async fn tasks_for_ui(pool: &SqlitePool, done_since_ms: i64) -> anyhow::Result<Vec<TaskRow>> {
+    tasks_read(pool, done_since_ms, false).await
+}
+
+/// [`tasks_for_ui`] plus the recent cancelled tasks: what `omacal tasks
+/// --all` lists (#222). Recent by the rule done tasks follow, so a list kept
+/// for years does not print years of skipped chores: a cancelled task counts
+/// when it has no due date or is due since `since_ms`. Cancelled tasks sort
+/// with the done ones, after everything still open.
+pub async fn tasks_including_cancelled(pool: &SqlitePool, since_ms: i64) -> anyhow::Result<Vec<TaskRow>> {
+    tasks_read(pool, since_ms, true).await
+}
+
+async fn tasks_read(pool: &SqlitePool, since_ms: i64, cancelled: bool) -> anyhow::Result<Vec<TaskRow>> {
     let sql = format!(
         "SELECT {COLS}, COALESCE(c.label_override, c.summary) AS cal_summary,
                 COALESCE(c.color_override, c.color_hex) AS cal_color,
@@ -146,18 +159,19 @@ pub async fn tasks_for_ui(pool: &SqlitePool, done_since_ms: i64) -> anyhow::Resu
          FROM tasks t
          JOIN calendars c ON c.id = t.calendar_id
          WHERE c.selected = 1
-           AND t.status != 'cancelled'
+           AND (t.status != 'cancelled'
+                OR (?2 AND (t.due_utc IS NULL OR t.due_utc >= ?1)))
            AND (t.status != 'completed' OR t.completed_utc IS NULL
                 OR t.completed_utc >= ?1)
          ORDER BY
-           CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END,
+           CASE WHEN t.status IN ('completed', 'cancelled') THEN 1 ELSE 0 END,
            CASE WHEN t.due_utc IS NULL THEN 1 ELSE 0 END,
            t.due_utc,
            CASE WHEN t.priority = 0 THEN 10 ELSE t.priority END,
            t.summary,
            t.completed_utc DESC"
     );
-    let rows = sqlx::query(&sql).bind(done_since_ms).fetch_all(pool).await?;
+    let rows = sqlx::query(&sql).bind(since_ms).bind(cancelled).fetch_all(pool).await?;
     Ok(rows
         .iter()
         .map(|row| TaskRow {
@@ -562,6 +576,34 @@ mod tests {
         let uids: Vec<&str> = rows.iter().map(|r| r.task.uid.as_str()).collect();
         assert_eq!(uids, vec!["soon", "later", "undated", "done"], "cancelled never shows");
         assert_eq!(rows[0].calendar_summary, "Chores");
+    }
+
+    /// #222: `omacal tasks --all` lists cancelled tasks too, by the rule it
+    /// already uses for done ones: recent, not years of them. A cancelled
+    /// task is recent when it is undated or due since the cutoff. The pane's
+    /// own read (`tasks_for_ui`) still leaves every cancelled task out.
+    #[tokio::test]
+    async fn the_cli_read_adds_recent_cancelled_tasks_after_the_open_ones() {
+        let (pool, _) = seeded().await;
+        let open = task("open", Some(5_000));
+        let mut skipped = task("skipped", Some(2_000));
+        skipped.status = "cancelled".into();
+        let mut someday = task("someday", None);
+        someday.status = "cancelled".into();
+        let mut old = task("old", Some(500));
+        old.status = "cancelled".into();
+        let mut done = task("done", Some(3_000));
+        done.status = "completed".into();
+        done.completed_utc = Some(4_000);
+        for t in [&open, &skipped, &someday, &old, &done] {
+            upsert_task(&pool, t).await.unwrap();
+        }
+
+        let rows = tasks_including_cancelled(&pool, 1_000).await.unwrap();
+        let uids: Vec<&str> = rows.iter().map(|r| r.task.uid.as_str()).collect();
+        assert_eq!(uids, vec!["open", "skipped", "done", "someday"], "the cancelled one due before the cutoff stays out");
+        let ui: Vec<String> = tasks_for_ui(&pool, 1_000).await.unwrap().into_iter().map(|r| r.task.uid).collect();
+        assert_eq!(ui, ["open", "done"], "the pane is unchanged");
     }
 
     /// Same due date, different priorities: the smaller number (higher) first,

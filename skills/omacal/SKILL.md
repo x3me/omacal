@@ -30,7 +30,8 @@ omacal weather --json                # the app's forecast (v2.2+): place +
                                      # how it was decided, now, eight days
 omacal tasks --json                  # what still needs doing (v2.3+), with
                                      # due dates, ids, priority and list
-omacal tasks --all --json            # including recently completed
+omacal tasks --all --json            # also the last week's completed and
+                                     # cancelled tasks (cancelled: v6.11+)
 omacal tasks lists --json            # the lists a task can go on (v4.5+):
                                      # id, name, onThisDevice, open count
 omacal commands --json               # machine-readable catalog of every
@@ -77,9 +78,15 @@ day**, never `startMs` read in another zone, which can be a day out.
 
 `search`'s `tasks` (v5.3+) are `omacal tasks --json`'s own row shape (`id`,
 `summary`, `notes`, `due`, `dueMs`, `dueAllDay`, `overdue`, `completed`,
-`list`, `listId`, `canWrite`) for **open** tasks whose title matches, due
+`status`, `list`, `listId`, `canWrite`) for **open** tasks whose title matches, due
 first and undated last. A task has no occurrence, so there is no `startMs` on
 those rows — do not look for one.
+
+A task row's `status` (v6.11+) is its own state: `needs-action`,
+`in-process`, `completed` or `cancelled`. `completed` is true only for
+`completed`, and a cancelled task is never `overdue`. In the plain-text
+`omacal tasks` list the marks are `[ ]` open, `[~]` in progress, `[x]` done
+and `[-]` cancelled.
 
 ## Writing (requires the app to be running; omacal v0.7+)
 
