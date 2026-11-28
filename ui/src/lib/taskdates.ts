@@ -107,9 +107,10 @@ export function doneLabel(task: Task, nowMs: number, dateFormat: DateFormat = 'l
 }
 
 /** Whether the row's date should be shown as a warning. Completed tasks are
- *  excluded for `whenOf`'s reason. */
+ *  excluded for `whenOf`'s reason, and so are cancelled ones (#222): nothing
+ *  is left to do. */
 export const isOverdue = (task: Task, nowMs: number): boolean =>
-  task.dueMs !== null && !task.completed && daysAway(task.dueMs, nowMs) < 0;
+  task.dueMs !== null && !task.completed && task.status !== 'cancelled' && daysAway(task.dueMs, nowMs) < 0;
 
 /** The quick answers the date row offers, as the instants they mean.
  *

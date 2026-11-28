@@ -24,7 +24,7 @@ pub use client::{
 pub use vcard::{parse_cards, Contact};
 pub use ics::{
     escape, events_in, exclude_occurrence, new_event_ics, new_todo_ics, parse, parse_time,
-    patch_todo_fields, patch_todo_status, priority_to_write, resolve, respond_all, respond_occurrence,
+    patch_todo_fields, patch_todo_state, patch_todo_status, priority_to_write, resolve, respond_all, respond_occurrence,
     rewrite_master, todo_alarm_lead_minutes, todo_repeats, todos_in, truncate_series, unescape,
     upsert_exception, AttendeeWrite, Class, Transp,
     CalAttendee,

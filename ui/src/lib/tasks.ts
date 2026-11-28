@@ -12,6 +12,9 @@ export type Task = {
   /** When it was completed, or `null` when the resource does not say — a
    *  server may set a task's status without stamping the time. */
   completedMs: number | null;
+  /** The task's own status (#222). The pane crosses out a cancelled task
+   *  and labels one in progress. */
+  status: TaskStatus;
   calendar: string;
   color: string | null;
   priority: number;
@@ -19,6 +22,17 @@ export type Task = {
    *  disabled rather than pretending. */
   canWrite: boolean;
 };
+
+/** RFC 5545's four task statuses, in the store's words. */
+export type TaskStatus = 'needs-action' | 'in-process' | 'completed' | 'cancelled';
+
+/** What the editor's Status picker offers. Done stays the checkbox. The ids
+ *  are the picker's own: `ListPicker` keys its choices by number. */
+export const STATUS_CHOICES: { id: number; status: TaskStatus; name: string }[] = [
+  { id: 0, status: 'needs-action', name: 'Open' },
+  { id: 1, status: 'in-process', name: 'In progress' },
+  { id: 2, status: 'cancelled', name: 'Cancelled' },
+];
 
 /** One list the quick-add can land on. */
 export type TaskList = {
@@ -62,6 +76,11 @@ export const deleteTaskList = (id: number) => invoke<TaskList[]>('delete_task_li
  *  why the fresh list comes back from the same call. */
 export const setTaskCompleted = (id: number, on: boolean) =>
   invoke<Task[]>('set_task_completed', { id, on });
+
+/** Sets a task's status (#222), the server first, then the store. A
+ *  repeating task cannot be cancelled: that would cancel the whole series. */
+export const setTaskStatus = (id: number, status: TaskStatus) =>
+  invoke<Task[]>('set_task_status', { id, status });
 
 /** The Tasks pane's within-group order. */
 export type TaskSort = 'date' | 'priority';

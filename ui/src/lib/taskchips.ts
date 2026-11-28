@@ -63,7 +63,8 @@ export function taskChips(
   const today = dateKey(nowMs);
   const out: WeekTasks = { row: new Map(), timed: new Map() };
   for (const t of tasks) {
-    if (t.completed || t.dueMs === null) continue;
+    // Done and cancelled tasks (#222) have nothing left to schedule.
+    if (t.completed || t.status === 'cancelled' || t.dueMs === null) continue;
     const overdue = dateKey(t.dueMs) < today;
     const chip: TaskChip = {
       id: t.id,

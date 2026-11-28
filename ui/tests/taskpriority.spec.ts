@@ -10,7 +10,7 @@ import { PRIORITY_CHOICES, PRIORITY_MARKS, priorityLabel, priorityOption, sortTa
  */
 const task = (over: Partial<Task> = {}): Task => ({
   id: 1, calendarId: 1, summary: 'x', notes: null, dueMs: null, dueAllDay: true,
-  completed: false, completedMs: null, calendar: 'Work', color: null, priority: 0, canWrite: true,
+  completed: false, status: 'needs-action', completedMs: null, calendar: 'Work', color: null, priority: 0, canWrite: true,
   ...over,
 });
 

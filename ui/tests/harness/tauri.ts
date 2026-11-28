@@ -330,7 +330,7 @@ const harness: Harness = {
     const midnight = new Date(Date.now()).setHours(0, 0, 0, 0);
     doneHistory = Array.from({ length: n }, (_, i) => ({
       id: 5000 + i, calendarId: 1, summary: `Old chore ${i + 1}`, notes: null, dueMs: null,
-      dueAllDay: true, completed: true, completedMs: midnight - (i + 1) * 86_400_000 + 3_600_000,
+      dueAllDay: true, completed: true, status: 'completed', completedMs: midnight - (i + 1) * 86_400_000 + 3_600_000,
       calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true,
     }));
   },
@@ -1683,7 +1683,7 @@ export function installTauriStub(scenario: string): Harness {
         taskRows = [...taskRows, {
           id: 900 + taskRows.length, calendarId: listId, summary: args.summary as string,
           notes: null, dueMs: (args.dueMs as number | null) ?? null, dueAllDay: args.dueAllDay !== false,
-          completed: false, completedMs: null,
+          completed: false, status: 'needs-action', completedMs: null,
           calendar: list.name, color: list.color,
           priority: (args.priority as number) ?? 0, canWrite: true,
         }];
@@ -1695,7 +1695,7 @@ export function installTauriStub(scenario: string): Harness {
         if (failCalendarOnce?.cmd === cmd || holdCalendarOnce === cmd) return calendarResult(cmd, taskRows);
         const on = args.on as boolean;
         const stamp = (t: (typeof TASKS)[number]) =>
-          ({ ...t, completed: on, completedMs: on ? Date.now() : null });
+          ({ ...t, completed: on, status: on ? 'completed' as const : 'needs-action' as const, completedMs: on ? Date.now() : null });
         // Reopening an old one brings it back into the list, as the
         // backend's does: it is open again, and open tasks are all listed.
         const old = doneHistory.find((t) => t.id === args.id);
@@ -1705,6 +1705,19 @@ export function installTauriStub(scenario: string): Harness {
         } else {
           taskRows = taskRows.map((t) => (t.id === args.id ? stamp(t) : t));
         }
+        return taskRows;
+      }
+      // `tasks::set_status_impl` (#222): the four statuses, and the backend's
+      // refusal to cancel a repeating task, played by the title "Weekly".
+      case 'set_task_status': {
+        const status = args.status as import('../../src/lib/tasks').TaskStatus;
+        const task = taskRows.find((t) => t.id === args.id);
+        if (status === 'cancelled' && task?.summary.startsWith('Weekly')) {
+          throw new Error('This task repeats, and OmaCal cannot cancel a single occurrence yet — cancelling it here would cancel the whole series, so nothing was changed.');
+        }
+        taskRows = taskRows.map((t) => (t.id === args.id
+          ? { ...t, status, completed: status === 'completed', completedMs: status === 'completed' ? Date.now() : null }
+          : t));
         return taskRows;
       }
       // `tasks::done_page`: completed before the cutoff, newest first with

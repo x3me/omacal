@@ -8024,6 +8024,53 @@ test.describe('the tasks sidebar', () => {
     await expect(side.locator('.due', { hasText: /^Tomorrow$/ })).toHaveCount(1);
   });
 
+  /** #222: the editor sets In progress or Cancelled. A cancelled task stays
+   *  in its group, crossed out and labelled, and is never red; Open undoes
+   *  it. In progress past its due date is still late. */
+  test('a task can be set in progress or cancelled from its editor', async ({ page }) => {
+    const side = await openTasks(page);
+    const setStatus = async (title: string, choice: string) => {
+      await side.getByRole('button', { name: title }).click();
+      await side.getByRole('combobox', { name: 'Status' }).click();
+      await side.getByRole('option', { name: choice, exact: true }).click();
+      await side.getByRole('button', { name: 'Save' }).click();
+    };
+    const row = side.locator('.row', { has: page.getByRole('button', { name: 'Answer the issue' }) });
+    const overdueHead = side.locator('.head', { has: page.locator('.hlabel', { hasText: /^Overdue$/ }) });
+
+    await setStatus('Answer the issue', 'In progress');
+    await expect(row.locator('.schip')).toHaveText('In progress');
+    await expect(row.locator('.due.overdue')).toHaveCount(1);
+
+    await setStatus('Answer the issue', 'Cancelled');
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_status').pop()?.args,
+    )).toMatchObject({ id: 14, status: 'cancelled' });
+    await expect(row).toHaveClass(/cancelled/);
+    await expect(row.locator('.schip')).toHaveText('Cancelled');
+    await expect(row.locator('.due.overdue')).toHaveCount(0);
+    await expect(overdueHead.locator('.count')).toHaveText('0');
+    await expect(overdueHead.locator('.hlabel')).not.toHaveClass(/warn/);
+
+    await setStatus('Answer the issue', 'Open');
+    await expect(row.locator('.schip')).toHaveCount(0);
+    await expect(row).not.toHaveClass(/cancelled/);
+    await expect(row.locator('.due.overdue')).toHaveCount(1);
+  });
+
+  test('a repeating task is not cancelled, and the pane says why', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('textbox', { name: 'New task title' }).fill('Weekly review');
+    await side.getByRole('textbox', { name: 'New task title' }).press('Enter');
+    await side.getByRole('button', { name: 'Weekly review' }).click();
+    await side.getByRole('combobox', { name: 'Status' }).click();
+    await side.getByRole('option', { name: 'Cancelled', exact: true }).click();
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect(side.getByRole('alert')).toContainText('cannot cancel a single occurrence');
+    expect(await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').length)).toBe(0);
+  });
+
   /** Priority: the editor sets it, the row shows the word (not just a
    *  colour), and the choice rides the same whole-state save. */
   test('a task takes a priority, and the row shows the word', async ({ page }) => {

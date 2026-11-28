@@ -88,6 +88,9 @@ pub(crate) enum Request {
     },
     #[serde(rename = "tasks-complete")]
     TaskComplete { id: i64, done: bool },
+    /// #222: `needs-action`, `in-process`, `completed` or `cancelled`.
+    #[serde(rename = "tasks-status")]
+    TaskStatus { id: i64, status: String },
     #[serde(rename = "tasks-update")]
     TaskUpdate {
         id: i64,
@@ -240,6 +243,12 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
         }
         Request::TaskComplete { id, done } => {
             match crate::tasks::complete_body(state, id, done).await {
+                Ok(tasks) => ok_env(serde_json::json!(tasks)),
+                Err(m) => fail_env("refused", &m),
+            }
+        }
+        Request::TaskStatus { id, status } => {
+            match crate::tasks::status_body(state, id, &status).await {
                 Ok(tasks) => ok_env(serde_json::json!(tasks)),
                 Err(m) => fail_env("refused", &m),
             }

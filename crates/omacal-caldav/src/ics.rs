@@ -983,8 +983,26 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
 }
 
 /// Completes or reopens the task with this UID, touching nothing else in the
-/// resource — [`patch_todo`]'s surgery, on the status properties alone.
+/// resource — [`patch_todo_state`] with the two statuses a checkbox knows.
 pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) -> Option<String> {
+    patch_todo_state(raw, uid, if completed { "completed" } else { "needs-action" }, now)
+}
+
+/// Sets the task's STATUS (#222) — [`patch_todo`]'s surgery, on the status
+/// properties alone. `status` is the store's word: `needs-action`,
+/// `in-process`, `completed` or `cancelled`; anything else is `None`.
+///
+/// Only a completed task carries COMPLETED and PERCENT-COMPLETE:100. In
+/// progress keeps a partial percentage another app set; open and cancelled
+/// clear it.
+pub fn patch_todo_state(raw: &str, uid: &str, status: &str, now: Timestamp) -> Option<String> {
+    let wire = match status {
+        "needs-action" => "NEEDS-ACTION",
+        "in-process" => "IN-PROCESS",
+        "completed" => "COMPLETED",
+        "cancelled" => "CANCELLED",
+        _ => return None,
+    };
     patch_todo(raw, uid, AlarmEdit::Leave, |own| {
         let sequence = own
             .iter()
@@ -992,16 +1010,21 @@ pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) 
             .and_then(|l| l.split_once(':'))
             .and_then(|(_, v)| v.trim().parse::<i64>().ok())
             .unwrap_or(0);
+        let partial = |l: &str| {
+            l.split_once(':')
+                .and_then(|(_, v)| v.trim().parse::<u8>().ok())
+                .is_some_and(|pct| pct < 100)
+        };
         let mut kept: Vec<String> = own
             .iter()
             .filter(|l| {
                 let u = l.to_ascii_uppercase();
+                let percent = u.starts_with("PERCENT-COMPLETE:") || u.starts_with("PERCENT-COMPLETE;");
                 !(u.starts_with("STATUS:")
                     || u.starts_with("STATUS;")
                     || u.starts_with("COMPLETED:")
                     || u.starts_with("COMPLETED;")
-                    || u.starts_with("PERCENT-COMPLETE:")
-                    || u.starts_with("PERCENT-COMPLETE;")
+                    || (percent && !(status == "in-process" && partial(l)))
                     || u.starts_with("SEQUENCE:")
                     || u.starts_with("DTSTAMP:")
                     || u.starts_with("LAST-MODIFIED:"))
@@ -1013,12 +1036,10 @@ pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) 
         kept.push(format!("SEQUENCE:{}", sequence + 1));
         kept.push(format!("DTSTAMP:{}", fmt_utc(now)));
         kept.push(format!("LAST-MODIFIED:{}", fmt_utc(now)));
-        if completed {
-            kept.push("STATUS:COMPLETED".to_string());
+        kept.push(format!("STATUS:{wire}"));
+        if status == "completed" {
             kept.push(format!("COMPLETED:{}", fmt_utc(now)));
             kept.push("PERCENT-COMPLETE:100".to_string());
-        } else {
-            kept.push("STATUS:NEEDS-ACTION".to_string());
         }
         kept
     })
@@ -2450,6 +2471,33 @@ mod tests {
         assert!(!back.contains("STATUS:COMPLETED"));
         assert!(!back.contains("PERCENT-COMPLETE"));
         assert!(back.contains("X-APPLE-SPECIAL:kept"));
+    }
+
+    /// #222: the four statuses, each written as RFC 5545 spells it. Only a
+    /// completed task carries COMPLETED and 100%; in progress keeps a partial
+    /// percentage another app set; cancelled and open clear both.
+    #[test]
+    fn each_task_status_is_written_as_the_rfc_spells_it() {
+        let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
+        let busy = patch_todo_state(TODO, "t-9", "in-process", now).unwrap();
+        assert!(busy.contains("STATUS:IN-PROCESS"));
+        assert!(!busy.contains("COMPLETED:"));
+        assert!(busy.contains("X-APPLE-SPECIAL:kept"), "vendor line survives");
+
+        let partial = TODO.replace("PRIORITY:1\r\n", "PRIORITY:1\r\nPERCENT-COMPLETE:40\r\n");
+        assert!(partial.contains("PERCENT-COMPLETE:40"), "fixture check");
+        assert!(patch_todo_state(&partial, "t-9", "in-process", now).unwrap().contains("PERCENT-COMPLETE:40"));
+        let done = patch_todo_state(TODO, "t-9", "completed", now).unwrap();
+        assert!(!patch_todo_state(&done, "t-9", "in-process", now).unwrap().contains("PERCENT-COMPLETE"), "a full 100% is not progress");
+
+        let skipped = patch_todo_state(&done, "t-9", "cancelled", now).unwrap();
+        assert!(skipped.contains("STATUS:CANCELLED"));
+        assert!(!skipped.contains("COMPLETED:") && !skipped.contains("PERCENT-COMPLETE"));
+        assert_eq!(skipped.matches("STATUS:").count(), 1);
+
+        let open = patch_todo_state(&skipped, "t-9", "needs-action", now).unwrap();
+        assert!(open.contains("STATUS:NEEDS-ACTION") && !open.contains("CANCELLED"));
+        assert_eq!(patch_todo_state(TODO, "t-9", "paused", now), None, "not a status");
     }
 
     /// Timestamp-based CalDAV clients (including iCloudBridge) must see

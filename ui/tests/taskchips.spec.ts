@@ -10,7 +10,7 @@ import type { Task } from '../src/lib/tasks';
  */
 const task = (over: Partial<Task> = {}): Task => ({
   id: 1, calendarId: 1, summary: 'x', notes: null, dueMs: null, dueAllDay: true,
-  completed: false, completedMs: null, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true, ...over,
+  completed: false, status: 'needs-action', completedMs: null, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true, ...over,
 });
 const NOW = new Date(2026, 8, 9, 10, 0).getTime(); // Wed 9 Sep 2026
 const on = (day: number, hour = 9) => new Date(2026, 8, day, hour, 0).getTime();
@@ -75,6 +75,15 @@ test('a completed task and an undated one are not drawn at all', () => {
   ], NOW);
   expect(map.row.size).toBe(0);
   expect(map.timed.size).toBe(0);
+});
+
+/** #222: a cancelled task is not drawn on the grid; one in progress is. */
+test('a cancelled task is not drawn, and one in progress is', () => {
+  const { row } = taskChips([
+    task({ id: 6, dueMs: on(11), status: 'cancelled' }),
+    task({ id: 7, dueMs: on(11), status: 'in-process' }),
+  ], NOW);
+  expect([...row.values()].flat().map((c) => c.id)).toEqual([7]);
 });
 
 test('several tasks on one day keep their order', () => {
